@@ -34,7 +34,8 @@ from __future__ import annotations
 
 import secrets
 import struct
-from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict
 
 __all__ = [
     "ECHO_REPLY_V4",
@@ -79,8 +80,7 @@ _IPV4_VERSION = 4
 _IPV4_MIN_HEADER = 20
 
 
-@dataclass(frozen=True, slots=True)
-class EchoPayload:
+class EchoPayload(BaseModel):
     """The identifying content carried inside an echo request.
 
     Attributes:
@@ -88,6 +88,8 @@ class EchoPayload:
         filler: Padding that brings the payload up to the requested size.
 
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     token: bytes
     filler: bytes = b""
@@ -126,8 +128,7 @@ class EchoPayload:
         return cls(token=raw[start : start + TOKEN_SIZE], filler=raw[start + TOKEN_SIZE :])
 
 
-@dataclass(frozen=True, slots=True)
-class ParsedReply:
+class ParsedReply(BaseModel):
     """The fields of a decoded echo reply that identify which probe it answers.
 
     Attributes:
@@ -140,6 +141,8 @@ class ParsedReply:
         payload: The decoded payload, or ``None`` if it was not ours.
 
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     icmp_type: int
     code: int

@@ -31,12 +31,12 @@ def test_every_reported_address_actually_parses() -> None:
     # The addresses come out of a hand-walked C structure, so an off-by-one in
     # the offsets would surface here as unparseable text rather than silently.
     for item in local_interfaces():
-        for address, prefix in item.ipv4:
-            assert ipaddress.ip_address(address).version == 4
-            assert 0 <= prefix <= 32
-        for address, prefix in item.ipv6:
-            assert ipaddress.ip_address(address).version == 6
-            assert 0 <= prefix <= 128
+        for entry in item.ipv4:
+            assert ipaddress.ip_address(entry.address).version == 4
+            assert 0 <= entry.prefix_len <= 32
+        for entry in item.ipv6:
+            assert ipaddress.ip_address(entry.address).version == 6
+            assert 0 <= entry.prefix_len <= 128
 
 
 def test_a_reported_mac_has_the_canonical_shape() -> None:
@@ -53,7 +53,7 @@ def test_loopback_carries_the_loopback_address() -> None:
     loopbacks = [item for item in local_interfaces() if item.is_loopback]
 
     assert loopbacks
-    addresses = {address for item in loopbacks for address, _ in item.ipv4}
+    addresses = {entry.address for item in loopbacks for entry in item.ipv4}
     assert "127.0.0.1" in addresses or not addresses
 
 
@@ -66,12 +66,12 @@ def test_an_all_zero_hardware_address_is_reported_as_absent() -> None:
 
 
 def test_the_records_are_immutable() -> None:
-    import dataclasses
+    from pydantic import ValidationError
 
     item = local_interfaces()[0]
 
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        item.name = "renamed"  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        item.name = "renamed"
 
 
 @pytest.mark.parametrize(

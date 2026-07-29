@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import dataclasses
-
 import pytest
+from pydantic import ValidationError
 
 from ipscout.models import AddressFamily, MacLookup, MacScope, ProbeMethod, ResponseObject
 
@@ -117,8 +116,8 @@ def test_jitter_needs_two_samples_before_it_means_anything() -> None:
 def test_a_result_cannot_be_edited_after_the_fact() -> None:
     result = _reply(1.0)
 
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        result.reached = False  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        result.reached = False
 
 
 @pytest.mark.os_agnostic
@@ -126,7 +125,7 @@ def test_a_result_records_which_protocol_answered() -> None:
     # A TCP handshake time is not comparable to an ICMP round trip, so the
     # result has to say which one produced it.
     icmp = _reply(1.0)
-    tcp = dataclasses.replace(_reply(1.0), method=ProbeMethod.TCP)
+    tcp = _reply(1.0).model_copy(update={"method": ProbeMethod.TCP})
 
     assert icmp.method is ProbeMethod.ICMP
     assert tcp.method is ProbeMethod.TCP
@@ -163,8 +162,19 @@ def test_an_unanswerable_mac_question_is_its_own_state() -> None:
 
 @pytest.mark.os_agnostic
 def test_results_serialise_for_the_cli_json_output() -> None:
-    payload = dataclasses.asdict(_reply(1.0, 2.0))
+    payload = _reply(1.0, 2.0).model_dump(mode="json")
 
     assert payload["target"] == "example.test"
-    assert payload["rtts_ms"] == (1.0, 2.0)
-    assert payload["family"] is AddressFamily.IPV4
+    assert payload["rtts_ms"] == [1.0, 2.0]
+    assert payload["family"] == AddressFamily.IPV4.value
+
+
+@pytest.mark.os_agnostic
+def test_every_computed_statistic_is_a_real_field_not_a_bare_property() -> None:
+    # The reason these are computed fields: a plain property is invisible to
+    # serialisation, so the payload would look complete while missing exactly
+    # the numbers a caller wants.
+    payload = _reply(1.0, 3.0).model_dump(mode="json")
+
+    for computed in ("time_min_ms", "time_avg_ms", "time_max_ms", "jitter_ms", "n_packets_lost", "packets_lost_percentage", "str_result"):
+        assert computed in payload, f"{computed} missing from the dump"

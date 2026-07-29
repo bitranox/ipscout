@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from .models import AddressFamily, ProbeMethod, ResponseObject
 
@@ -28,8 +29,7 @@ if TYPE_CHECKING:
 __all__ = ["PingRequest", "arun_ping", "run_ping"]
 
 
-@dataclass(frozen=True, slots=True)
-class PingRequest:
+class PingRequest(BaseModel):
     """Validated parameters for one ping.
 
     Validation happens once, here, at construction. Every caller path -
@@ -46,9 +46,11 @@ class PingRequest:
         method: Which protocol the chosen transport represents.
 
     Raises:
-        ValueError: ``times`` below 1, ``timeout`` not positive, or ``interval``
-            negative. These are caller mistakes, not network conditions, so
-            they raise regardless of the ``raise_on_error`` setting.
+        pydantic.ValidationError: ``times`` below 1, ``timeout`` not positive,
+            or ``interval`` negative. These are caller mistakes, not network
+            conditions, so they raise regardless of ``raise_on_error``. The
+            bounds live on the fields rather than in a hand-written check, so
+            the constraint and the documentation cannot drift apart.
 
     Examples:
         >>> PingRequest(target="t", address="127.0.0.1", family=AddressFamily.IPV4).times
@@ -56,30 +58,19 @@ class PingRequest:
         >>> PingRequest(target="t", address="127.0.0.1", family=AddressFamily.IPV4, times=0)
         Traceback (most recent call last):
         ...
-        ValueError: times must be at least 1, got 0
+        pydantic_core._pydantic_core.ValidationError: ...
 
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     target: str
     address: str
     family: AddressFamily
-    times: int = 4
-    timeout: float = 2.0
-    interval: float = 0.2
+    times: int = Field(default=4, ge=1, description="Echoes to send; fewer than one describes no probe at all.")
+    timeout: float = Field(default=2.0, gt=0, description="Seconds to wait per reply; zero would never wait.")
+    interval: float = Field(default=0.2, ge=0, description="Seconds between echoes; negative is meaningless.")
     method: ProbeMethod = ProbeMethod.ICMP
-
-    def __post_init__(self) -> None:
-        """Reject parameters that cannot describe a meaningful probe."""
-
-        if self.times < 1:
-            msg = f"times must be at least 1, got {self.times}"
-            raise ValueError(msg)
-        if self.timeout <= 0:
-            msg = f"timeout must be positive, got {self.timeout}"
-            raise ValueError(msg)
-        if self.interval < 0:
-            msg = f"interval must not be negative, got {self.interval}"
-            raise ValueError(msg)
 
 
 def _build_response(request: PingRequest, results: list[EchoResult]) -> ResponseObject:

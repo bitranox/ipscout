@@ -20,8 +20,9 @@ Note:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -29,8 +30,7 @@ if TYPE_CHECKING:
 __all__ = ["AsyncEchoTransport", "EchoResult", "EchoTransport"]
 
 
-@dataclass(frozen=True, slots=True)
-class EchoResult:
+class EchoResult(BaseModel):
     """The outcome of one probe attempt.
 
     Attributes:
@@ -47,6 +47,8 @@ class EchoResult:
         False
 
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     rtt_ms: float | None = None
     source: str | None = None

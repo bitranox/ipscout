@@ -22,7 +22,8 @@ from __future__ import annotations
 import contextlib
 import socket
 import struct
-from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict
 
 __all__ = ["RouteInfo", "query_route"]
 
@@ -52,8 +53,7 @@ _RTA_PREFSRC = 7
 _RTN_UNREACHABLE = 7
 
 
-@dataclass(frozen=True, slots=True)
-class RouteInfo:
+class RouteInfo(BaseModel):
     """How this host would reach one destination.
 
     Attributes:
@@ -63,6 +63,8 @@ class RouteInfo:
         source: The source address the kernel would use.
 
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     gateway: str | None = None
     interface: str | None = None

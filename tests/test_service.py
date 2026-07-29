@@ -12,6 +12,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
 from ipscout.errors import IPScoutPermissionError
 from ipscout.models import AddressFamily, ProbeMethod
@@ -187,7 +188,9 @@ def test_the_result_reports_what_the_caller_asked_for_not_what_arrived() -> None
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("bad", [{"times": 0}, {"times": -1}, {"timeout": 0}, {"timeout": -1.0}, {"interval": -0.1}])
 def test_nonsense_parameters_are_rejected_before_any_packet_moves(bad: dict[str, object]) -> None:
-    with pytest.raises(ValueError, match="must"):
+    # The bounds live on the fields, so the constraint and its documentation
+    # cannot drift apart the way a hand-written __post_init__ check could.
+    with pytest.raises(ValidationError):
         _request(**bad)
 
 

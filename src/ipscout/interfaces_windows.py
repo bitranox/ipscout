@@ -24,7 +24,7 @@ import ctypes
 import socket
 from typing import Any
 
-from .models import Interface
+from .models import Interface, InterfaceAddress
 from .winapi import iphlpapi
 
 __all__ = ["list_interfaces"]
@@ -200,16 +200,16 @@ def list_interfaces() -> list[Interface]:  # pragma: no cover - Windows only
 def _to_interface(adapter: Any) -> Interface:  # pragma: no cover - Windows only
     """Build the public record for one adapter."""
 
-    ipv4: list[tuple[str, int]] = []
-    ipv6: list[tuple[str, int]] = []
+    ipv4: list[InterfaceAddress] = []
+    ipv6: list[InterfaceAddress] = []
     unicast = adapter.FirstUnicastAddress
     while unicast:
         entry = unicast.contents
         found = _sockaddr_text(entry.Address)
         if found is not None:
             family, text = found
-            pair = (text, int(entry.OnLinkPrefixLength))
-            (ipv6 if family == socket.AF_INET6 else ipv4).append(pair)
+            found = InterfaceAddress(address=text, prefix_len=int(entry.OnLinkPrefixLength))
+            (ipv6 if family == socket.AF_INET6 else ipv4).append(found)
         unicast = entry.Next
 
     return Interface(

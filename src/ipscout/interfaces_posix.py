@@ -40,7 +40,7 @@ import socket
 import sys
 from dataclasses import dataclass, field
 
-from .models import Interface
+from .models import Interface, InterfaceAddress
 
 __all__ = ["list_interfaces"]
 
@@ -193,7 +193,7 @@ def _libc() -> ctypes.CDLL:
     return lib
 
 
-def _no_addresses() -> list[tuple[str, int]]:
+def _no_addresses() -> list[InterfaceAddress]:
     """Return an empty address list.
 
     A named factory rather than the bare ``list``, which a strict checker reads
@@ -209,11 +209,17 @@ class _Accumulator:
 
     A typed accumulator rather than a dict, so the address lists keep their
     element type all the way through to the frozen public record.
+
+    Note:
+        Deliberately a mutable dataclass rather than a model: it is a builder
+        that exists only inside :func:`list_interfaces`, is appended to as the
+        libc list is walked, and is discarded once the frozen ``Interface`` is
+        produced. It never crosses a boundary and is never serialised.
     """
 
     flags: int = 0
-    ipv4: list[tuple[str, int]] = field(default_factory=_no_addresses)
-    ipv6: list[tuple[str, int]] = field(default_factory=_no_addresses)
+    ipv4: list[InterfaceAddress] = field(default_factory=_no_addresses)
+    ipv6: list[InterfaceAddress] = field(default_factory=_no_addresses)
     mac: str | None = None
 
     def to_interface(self, name: str) -> Interface:
@@ -246,11 +252,11 @@ def _absorb(record: _Accumulator, entry: _IfAddrs) -> None:
         return
     family, text = found
     netmask = entry.ifa_netmask.contents if entry.ifa_netmask else None
-    pair = (text, _prefix_length(netmask, family))
+    found_address = InterfaceAddress(address=text, prefix_len=_prefix_length(netmask, family))
     if family == socket.AF_INET6:
-        record.ipv6.append(pair)
+        record.ipv6.append(found_address)
     else:
-        record.ipv4.append(pair)
+        record.ipv4.append(found_address)
 
 
 def list_interfaces() -> list[Interface]:

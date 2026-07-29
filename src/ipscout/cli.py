@@ -23,11 +23,11 @@ Note:
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import lib_cli_exit_tools
 import rich_click as click
+from pydantic import BaseModel, ConfigDict
 from rich.console import Console
 from rich.style import Style
 from rich.table import Table
@@ -37,10 +37,20 @@ from .api import is_reachable, ping, ping_many
 from .errors import IPScoutError
 from .factory import icmp_available
 from .interfaces import local_interfaces
-from .models import AddressFamily
+from .models import (
+    AddressFamily,
+    CapabilityReport,
+    CommandName,
+    JsonEnvelope,
+    JsonError,
+    PackageInfo,
+    ReachabilityReport,
+    ResolveReport,
+    ReverseDnsReport,
+)
 from .resolve import resolve as resolve_target
 from .resolve import reverse_dns
-from .serialize import dumps, to_json_dict
+from .serialize import dumps, to_jsonable
 from .traceroute import traceroute
 from .typed_click import argument, option, version_option
 
@@ -70,8 +80,7 @@ EXIT_NOT_REACHED = 1
 EXIT_ERROR = 2
 
 
-@dataclass
-class CliContext:
+class CliContext(BaseModel):
     """Typed context object for Click's ``ctx.obj``.
 
     Attributes:
@@ -80,6 +89,8 @@ class CliContext:
         json_bare: Emit the payload at top level, without the envelope.
 
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     traceback: bool = True
     json_output: bool = False
@@ -100,7 +111,7 @@ def _context(ctx: click.Context) -> CliContext:
     return ctx.obj
 
 
-def _emit(ctx: click.Context, command: str, payload: Any, human: Callable[[], None]) -> None:
+def _emit(ctx: click.Context, command: CommandName, payload: Any, human: Callable[[], None]) -> None:
     """Render one command's result in whichever format was asked for.
 
     Args:
@@ -122,17 +133,19 @@ def _emit(ctx: click.Context, command: str, payload: Any, human: Callable[[], No
         click.echo(dumps(payload))
         return
     if state.json_output:
-        click.echo(dumps({"ok": True, "command": command, "data": to_json_dict(payload)}))
+        envelope = JsonEnvelope(ok=True, command=command, data=to_jsonable(payload))
+        click.echo(dumps(envelope))
         return
     human()
 
 
-def _fail(ctx: click.Context, command: str, exc: Exception) -> None:
+def _fail(ctx: click.Context, command: CommandName, exc: Exception) -> None:
     """Report a failure in the active output format, then exit non-zero."""
 
     state = _context(ctx)
     if state.json_output:
-        click.echo(dumps({"ok": False, "command": command, "error": {"type": type(exc).__name__, "message": str(exc)}}))
+        envelope = JsonEnvelope(ok=False, command=command, error=JsonError(type=type(exc).__name__, message=str(exc)))
+        click.echo(dumps(envelope))
     else:
         console.print(f"Error: {type(exc).__name__}: {exc}", style=_ERROR_STYLE, highlight=False)
     ctx.exit(EXIT_ERROR)
@@ -223,10 +236,10 @@ def cli_ping(  # noqa: PLR0913 - one parameter per documented CLI option; collap
             tcp_port=tcp_port,
         )
     except (IPScoutError, ValueError) as exc:
-        _fail(ctx, "ping", exc)
+        _fail(ctx, CommandName.PING, exc)
         return
 
-    _emit(ctx, "ping", result, lambda: console.print(result.str_result))
+    _emit(ctx, CommandName.PING, result, lambda: console.print(result.str_result))
     if not result.reached:
         ctx.exit(EXIT_NOT_REACHED)
 
@@ -254,7 +267,7 @@ def cli_ping_many(ctx: click.Context, targets: tuple[str, ...], *, times: int, t
             )
         console.print(table)
 
-    _emit(ctx, "ping-many", results, human)
+    _emit(ctx, CommandName.PING_MANY, results, human)
     if not any(result.reached for result in results.values()):
         ctx.exit(EXIT_NOT_REACHED)
 
@@ -269,7 +282,7 @@ def cli_reachable(ctx: click.Context, target: str, *, timeout: float, tcp_port: 
 
     answer = is_reachable(target, timeout=timeout, tcp_port=tcp_port)
 
-    _emit(ctx, "reachable", {"target": target, "reachable": answer}, lambda: console.print("yes" if answer else "no"))
+    _emit(ctx, CommandName.REACHABLE, ReachabilityReport(target=target, reachable=answer), lambda: console.print("yes" if answer else "no"))
     if not answer:
         ctx.exit(EXIT_NOT_REACHED)
 
@@ -303,7 +316,7 @@ def cli_traceroute(  # noqa: PLR0913 - one parameter per documented CLI option; 
             resolve_names=resolve_names,
         )
     except (IPScoutError, ValueError) as exc:
-        _fail(ctx, "traceroute", exc)
+        _fail(ctx, CommandName.TRACEROUTE, exc)
         return
 
     def human() -> None:
@@ -313,7 +326,7 @@ def cli_traceroute(  # noqa: PLR0913 - one parameter per documented CLI option; 
             marker = "  <- target" if hop.reached else ""
             console.print(f"{hop.ttl:3}  {rtt}  {hop.address or '*'}{name}{marker}", highlight=False)
 
-    _emit(ctx, "traceroute", hops, human)
+    _emit(ctx, CommandName.TRACEROUTE, hops, human)
     if not any(hop.reached for hop in hops):
         ctx.exit(EXIT_NOT_REACHED)
 
@@ -329,11 +342,11 @@ def cli_resolve(ctx: click.Context, target: str, *, ipv4: bool, ipv6: bool) -> N
     try:
         addresses = resolve_target(target, family=_family(ipv4=ipv4, ipv6=ipv6))
     except (IPScoutError, ValueError) as exc:
-        _fail(ctx, "resolve", exc)
+        _fail(ctx, CommandName.RESOLVE, exc)
         return
 
-    payload = {"target": target, "addresses": addresses}
-    _emit(ctx, "resolve", payload, lambda: console.print("\n".join(addresses), highlight=False))
+    payload = ResolveReport(target=target, addresses=tuple(addresses))
+    _emit(ctx, CommandName.RESOLVE, payload, lambda: console.print("\n".join(addresses), highlight=False))
 
 
 @cli.command("reverse-dns", context_settings=CLICK_CONTEXT_SETTINGS)
@@ -343,8 +356,8 @@ def cli_reverse_dns(ctx: click.Context, ip: str) -> None:
     """Resolve an address back to a hostname."""
 
     hostname = reverse_dns(ip)
-    payload = {"ip": ip, "hostname": hostname}
-    _emit(ctx, "reverse-dns", payload, lambda: console.print(hostname or "(no PTR record)", highlight=False))
+    payload = ReverseDnsReport(ip=ip, hostname=hostname)
+    _emit(ctx, CommandName.REVERSE_DNS, payload, lambda: console.print(hostname or "(no PTR record)", highlight=False))
     if hostname is None:
         ctx.exit(EXIT_NOT_REACHED)
 
@@ -363,7 +376,7 @@ def cli_interfaces(ctx: click.Context) -> None:
             table.add_row(item.name, "yes" if item.is_up else "no", "yes" if item.is_loopback else "no", item.mac or "-", addresses or "-")
         console.print(table)
 
-    _emit(ctx, "interfaces", interfaces, human)
+    _emit(ctx, CommandName.INTERFACES, interfaces, human)
 
 
 @cli.command("capabilities", context_settings=CLICK_CONTEXT_SETTINGS)
@@ -379,23 +392,22 @@ def cli_capabilities(ctx: click.Context) -> None:
 
     def human() -> None:
         table = Table("capability", "available")
-        for name, available in capabilities.items():
+        for name, available in capabilities.model_dump().items():
             table.add_row(name, "yes" if available else "no")
         console.print(table)
 
-    _emit(ctx, "capabilities", capabilities, human)
+    _emit(ctx, CommandName.CAPABILITIES, capabilities, human)
 
 
-def _probe_capabilities() -> dict[str, bool]:
+def _probe_capabilities() -> CapabilityReport:
     """Return which platform capabilities this process actually has."""
 
     icmp_v4 = icmp_available(AddressFamily.IPV4)
-    icmp_v6 = icmp_available(AddressFamily.IPV6)
-    return {
-        "icmp_ipv4": icmp_v4,
-        "icmp_ipv6": icmp_v6,
-        "traceroute": _traceroute_available(icmp_v4=icmp_v4),
-    }
+    return CapabilityReport(
+        icmp_ipv4=icmp_v4,
+        icmp_ipv6=icmp_available(AddressFamily.IPV6),
+        traceroute=_traceroute_available(icmp_v4=icmp_v4),
+    )
 
 
 def _traceroute_available(*, icmp_v4: bool) -> bool:
@@ -424,15 +436,15 @@ def _traceroute_available(*, icmp_v4: bool) -> bool:
 def cli_info(ctx: click.Context) -> None:
     """Print resolved package metadata."""
 
-    payload = {
-        "name": __init__conf__.name,
-        "version": __init__conf__.version,
-        "title": __init__conf__.title,
-        "homepage": __init__conf__.homepage,
-        "author": __init__conf__.author,
-        "shell_command": __init__conf__.shell_command,
-    }
-    _emit(ctx, "info", payload, __init__conf__.print_info)
+    payload = PackageInfo(
+        name=__init__conf__.name,
+        version=__init__conf__.version,
+        title=__init__conf__.title,
+        homepage=__init__conf__.homepage,
+        author=__init__conf__.author,
+        shell_command=__init__conf__.shell_command,
+    )
+    _emit(ctx, CommandName.INFO, payload, __init__conf__.print_info)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -504,7 +516,8 @@ def _exception_handler(*, as_json: bool) -> Callable[[BaseException], int]:
     def handle(exc: BaseException) -> int:
         code = lib_cli_exit_tools.get_system_exit_code(exc)
         if as_json:
-            click.echo(dumps({"ok": False, "command": None, "error": {"type": type(exc).__name__, "message": str(exc)}}))
+            envelope = JsonEnvelope(ok=False, error=JsonError(type=type(exc).__name__, message=str(exc)))
+            click.echo(dumps(envelope))
             return code
         lib_cli_exit_tools.print_exception_message()
         return code
