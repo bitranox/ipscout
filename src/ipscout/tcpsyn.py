@@ -153,7 +153,7 @@ def build_syn(*, source_ip: str, target_ip: str, source_port: int, target_port: 
     return header + tcp
 
 
-def parse_tcp_reply(packet: bytes, *, source_port: int, target_port: int) -> PortState | None:
+def parse_tcp_reply(packet: bytes, *, source_port: int, target_port: int, peer_ip: str | None = None) -> PortState | None:
     """Return what a reply says about one port, or None if it is not ours.
 
     Args:
@@ -161,6 +161,8 @@ def parse_tcp_reply(packet: bytes, *, source_port: int, target_port: int) -> Por
             header.
         source_port: The port the scan sent from.
         target_port: The port the scan asked about.
+        peer_ip: The host being scanned. When given, a packet from anywhere
+            else is discarded.
 
     Returns:
         ``OPEN`` for a SYN-ACK, ``CLOSED`` for a RST, and ``None`` when the
@@ -168,28 +170,50 @@ def parse_tcp_reply(packet: bytes, *, source_port: int, target_port: int) -> Por
         every TCP packet the host sees, so most of what arrives is unrelated
         and must be discarded rather than interpreted.
 
+    Note:
+        The port pair alone is not enough to claim a packet. Two scans of
+        different hosts can hold the same source port, and matching on ports
+        only would let each read the other's replies and report them against
+        its own target - silently, and only under concurrency. Checking the
+        peer address closes that.
+
     Examples:
         >>> parse_tcp_reply(b"", source_port=40000, target_port=80) is None
         True
 
     """
 
-    if len(packet) < IPV4_HEADER_SIZE:
+    if not _is_ours(packet, source_port=source_port, target_port=target_port, peer_ip=peer_ip):
         return None
+
     header_length = (packet[0] & _IHL_MASK) * _WORD
-    # Options make the header longer; assuming 20 bytes would read the TCP
-    # header from the middle of them.
-    if header_length < IPV4_HEADER_SIZE or len(packet) < header_length + TCP_HEADER_SIZE:
-        return None
-
-    fields = _TCP.unpack(packet[header_length : header_length + TCP_HEADER_SIZE])
-    reply_source, reply_target, _seq, _ack, _offset, flags = fields[0], fields[1], fields[2], fields[3], fields[4], fields[5]
-
-    # The reply's ports are the mirror of the ones sent.
-    if reply_source != target_port or reply_target != source_port:
-        return None
+    flags = _TCP.unpack(packet[header_length : header_length + TCP_HEADER_SIZE])[5]
     if flags & SYN and flags & ACK:
         return PortState.OPEN
     if flags & RST:
         return PortState.CLOSED
     return None
+
+
+def _is_ours(packet: bytes, *, source_port: int, target_port: int, peer_ip: str | None) -> bool:
+    """Return whether this packet answers the probe that was sent.
+
+    A raw TCP socket receives every TCP packet the host sees, so nearly all of
+    it belongs to somebody else and has to be rejected before anything is read
+    out of it.
+    """
+
+    if len(packet) < IPV4_HEADER_SIZE:
+        return False
+    if peer_ip is not None and socket.inet_ntoa(packet[12:16]) != peer_ip:
+        return False
+
+    header_length = (packet[0] & _IHL_MASK) * _WORD
+    # Options make the header longer; assuming 20 bytes would read the TCP
+    # header from the middle of them.
+    if header_length < IPV4_HEADER_SIZE or len(packet) < header_length + TCP_HEADER_SIZE:
+        return False
+
+    reply_source, reply_target = _TCP.unpack(packet[header_length : header_length + TCP_HEADER_SIZE])[:2]
+    # The reply's ports are the mirror of the ones sent.
+    return reply_source == target_port and reply_target == source_port

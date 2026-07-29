@@ -475,7 +475,7 @@ def test_only_the_tail_of_an_append_only_lease_file_is_read(tmp_path: Path) -> N
     path = tmp_path / "dhclient.leases"
     filler = 'lease {\n  interface "eth0";\n  option dhcp-server-identifier 10.0.0.1;\n}\n'
     current = 'lease {\n  interface "eth0";\n  option dhcp-server-identifier 192.168.9.9;\n}\n'
-    path.write_text(filler * ((MAX_LEASE_BYTES // len(filler)) + 200) + current)
+    path.write_bytes((filler * ((MAX_LEASE_BYTES // len(filler)) + 200) + current).encode())
 
     text = read_lease_text(path)
 
@@ -489,7 +489,46 @@ def test_only_the_tail_of_an_append_only_lease_file_is_read(tmp_path: Path) -> N
 def test_a_short_lease_file_is_read_whole(tmp_path: Path) -> None:
     from ipscout.leases_linux import read_lease_text
 
+    # Written as bytes: write_text translates newlines on Windows, and a real
+    # lease store is written by a DHCP client with LF whatever the platform.
     path = tmp_path / "lease"
-    path.write_text("ADDRESS=192.168.1.50\nSERVER_ADDRESS=192.168.1.1\n")
+    path.write_bytes(b"ADDRESS=192.168.1.50\nSERVER_ADDRESS=192.168.1.1\n")
 
     assert read_lease_text(path) == "ADDRESS=192.168.1.50\nSERVER_ADDRESS=192.168.1.1\n"
+
+
+# --------------------------------------------------------------------------
+# Telling one scan's replies from another's
+# --------------------------------------------------------------------------
+
+
+def _tcp_reply_from(source_ip: str, *, flags: int = SYN | ACK, source_port: int = 80, target_port: int = 40000) -> bytes:
+    """Build a TCP reply that appears to come from one host."""
+
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 0, 0, 64, socket.IPPROTO_TCP, 0, socket.inet_aton(source_ip), b"\x05\x06\x07\x08")
+    return ip + struct.pack("!HHIIBBHHH", source_port, target_port, 0, 1, 5 << 4, flags, 0, 0, 0)
+
+
+@pytest.mark.os_agnostic
+def test_a_reply_from_another_host_is_not_claimed() -> None:
+    # The port pair alone is not enough. Two scans can hold the same source
+    # port, and matching on ports only lets each read the other's replies and
+    # report them against its own target - silently, and only under
+    # concurrency, which is exactly when a scan is used.
+    ours = _tcp_reply_from("1.2.3.4")
+    theirs = _tcp_reply_from("9.9.9.9")
+
+    assert parse_tcp_reply(ours, source_port=40000, target_port=80, peer_ip="1.2.3.4") is PortState.OPEN
+    assert parse_tcp_reply(theirs, source_port=40000, target_port=80, peer_ip="1.2.3.4") is None
+
+
+@pytest.mark.os_agnostic
+def test_two_scans_do_not_share_a_source_port() -> None:
+    # It used to be derived from the pid alone, so every scan in a process got
+    # the same one and concurrent scans crossed over.
+    from ipscout.portscan import choose_source_port
+
+    chosen = {choose_source_port() for _ in range(200)}
+
+    assert len(chosen) > 100, "source ports should vary per scan, not be fixed per process"
+    assert all(32768 <= port < 61000 for port in chosen), "and stay in the ephemeral range"

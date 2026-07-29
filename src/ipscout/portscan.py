@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
-import os
+import secrets
 import socket
 import sys
 import time
@@ -44,7 +44,7 @@ from .pool import gather_bounded
 from .routes import query_route
 from .tcpsyn import build_syn, parse_tcp_reply
 
-__all__ = ["DEFAULT_CONCURRENCY", "MAX_PORT", "ascan_ports", "parse_ports", "scan_ports", "syn_scan"]
+__all__ = ["DEFAULT_CONCURRENCY", "MAX_PORT", "ascan_ports", "choose_source_port", "parse_ports", "scan_ports", "syn_scan"]
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -60,7 +60,9 @@ MAX_PORT = 65535
 _WSAECONNREFUSED = 10061
 _ERROR_CONNECTION_REFUSED = 1225
 
-#: The ephemeral range a SYN scan picks its source port from.
+#: The ephemeral range a SYN scan picks its source port from, at random.
+#: A predictable choice collides with a concurrent scan in the same
+#: process, and both then read replies meant for the other.
 _EPHEMERAL_LOW = 32768
 _EPHEMERAL_HIGH = 60999
 
@@ -144,6 +146,25 @@ def _is_refusal(exc: OSError) -> bool:
     if exc.errno in codes:
         return True
     return getattr(exc, "winerror", None) in codes
+
+
+def choose_source_port() -> int:
+    """Return the port a scan will send from and match replies on.
+
+    Random per scan rather than derived from the process id. A per-process
+    value means two concurrent scans share it, and since replies are claimed
+    on the port pair, each would then read the other's and report them against
+    its own target - silently, and only under the concurrency a scan is used
+    for.
+
+    Examples:
+        >>> port = choose_source_port()
+        >>> 32768 <= port < 61000
+        True
+
+    """
+
+    return _EPHEMERAL_LOW + secrets.randbelow(_EPHEMERAL_HIGH - _EPHEMERAL_LOW)
 
 
 def _source_for(host: str) -> str | None:
@@ -238,7 +259,7 @@ def _syn_exchange(  # noqa: PLR0913 - one parameter per piece of the exchange, a
     # Ports the target never answers about stay FILTERED, which is the honest
     # reading of silence rather than an assumption that they are closed.
     found: dict[int, PortState] = dict.fromkeys(ports, PortState.FILTERED)
-    source_port = _EPHEMERAL_LOW + (os.getpid() % (_EPHEMERAL_HIGH - _EPHEMERAL_LOW))
+    source_port = choose_source_port()
 
     try:
         receiver.settimeout(timeout)
@@ -259,7 +280,7 @@ def _syn_exchange(  # noqa: PLR0913 - one parameter per piece of the exchange, a
             except (TimeoutError, OSError):
                 break
             for port in list(outstanding):
-                state = parse_tcp_reply(packet, source_port=source_port, target_port=port)
+                state = parse_tcp_reply(packet, source_port=source_port, target_port=port, peer_ip=host)
                 if state is not None:
                     found[port] = state
                     outstanding.discard(port)

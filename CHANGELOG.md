@@ -43,8 +43,44 @@ subprocess is spawned, and no administrator or root rights are needed on the def
   when ICMP is unavailable, and every result carries a `method` field, so a TCP answer can never be
   mistaken for an ICMP round trip. `is_reachable` is the deliberate exception to the error contract:
   it never raises and always tries TCP.
-- **A CLI with nine commands.** `ping`, `ping-many`, `reachable`, `traceroute`, `resolve`,
-  `reverse-dns`, `interfaces`, `capabilities`, `info`. Global `--json`/`-j` emits an envelope
+- **Hardware addresses, answered with their scope.** `lookup_mac`, `get_mac_address`,
+  `neighbours`, `normalise_mac`. A MAC does not survive a router hop, so a routed address can only
+  ever yield the next-hop router's, and `lookup_mac` says so through `MacScope.NEXT_HOP` and
+  `via_ip` rather than passing it off as the host's. `get_mac_address` stays strict and answers
+  `None` for anything routed. Backed by netlink `RTM_GETNEIGH` on Linux, a `NET_RT_FLAGS` sysctl
+  dump on macOS and `GetIpNetTable2` on Windows, all passive and unprivileged.
+- **Active address resolution.** `resolve_active`, and `active=True` on the two lookups. Sends a
+  real ARP request or ICMPv6 neighbour solicitation instead of reading the cache: `AF_PACKET` on
+  Linux, BPF on macOS, `SendARP` and `ResolveIpNetEntry2` on Windows. Needs root or `CAP_NET_RAW`
+  everywhere except Windows IPv4, and raises `IPScoutPermissionError` naming the remedy rather
+  than falling back to a stale cache entry.
+- **Reverse search by hardware address.** `find_ip_by_mac` and `arp_scan`. No protocol asks "who
+  has this MAC" - RARP is dead - so these sweep and then read what the kernel learned. The search
+  returns a list because one address legitimately holds several, commonly an IPv4 and an IPv6
+  link-local on one NIC. A sweep wider than 4096 addresses is refused, naming the network at fault.
+- **Routes.** `query_route` and `default_gateway`, via netlink `RTM_GETROUTE`, a BSD routing-socket
+  `RTM_GET`, and `GetBestRoute2`. Each asks the kernel what route it would actually use rather than
+  re-implementing longest-prefix matching. `default_gateway` selects the zero-length destination
+  prefix from the table: asking for the route to `0.0.0.0` looks equivalent and is not, because the
+  unspecified address matches the local table first and answers with loopback.
+- **Subnets, without sending DHCP traffic.** `subnet_info`, `local_networks`. Addressing comes from
+  the calls the interface listing already makes, the gateway from the route lookup, and the DHCP
+  fields from the lease store the OS's own client wrote. Those fields may be unset off Linux; the
+  addressing fields work everywhere. `Interface.mtu` is now populated on POSIX too.
+- **Port scanning, in three states.** `scan_ports`, `ascan_ports`, `parse_ports`. `CLOSED` means
+  something refused, which proves a host is there; `FILTERED` means nothing answered. A half-open
+  SYN scan (`ScanMethod.SYN`) distinguishes them without completing a handshake, and needs a raw
+  socket; Windows has blocked raw TCP sends since XP SP2, so it is unavailable there at any
+  privilege level. Both methods hold only `concurrency` probes alive at a time, so a full-range
+  scan is bounded in memory rather than allocating a task per port.
+- **Wake-on-LAN.** `wake_on_lan`. Returns nothing, because nothing acknowledges a magic packet: a
+  successful send means only that it left this host.
+- **Path MTU.** `path_mtu`. Queries the kernel on Linux, and bisects with the don't-fragment flag
+  on Windows and the BSDs. Returns `None` where a platform cannot say, which is an answer rather
+  than a failure - an MTU sizes packets, so a guessed one is a silent black hole.
+- **A CLI with seventeen commands.** `ping`, `ping-many`, `reachable`, `traceroute`, `resolve`,
+  `reverse-dns`, `interfaces`, `gateway`, `neighbours`, `mac`, `find-ip`, `arp-scan`, `subnet`,
+  `scan-ports`, `mtu`, `wake`, `info`. Global `--json`/`-j` emits an envelope
   (`ok`, `command`, `data` or `error`); `--json-bare` emits the payload at top level for `jq`. Exit
   codes: 0 reached, 1 not reached, 2 error.
 - **Typed errors.** `IPScoutError` plus `IPScoutPermissionError`, `IPScoutResolutionError` and
