@@ -372,7 +372,7 @@ def cli_interfaces(ctx: click.Context) -> None:
     def human() -> None:
         table = Table("interface", "up", "loopback", "mac", "addresses")
         for item in interfaces:
-            addresses = ", ".join(f"{address}/{prefix}" for address, prefix in (*item.ipv4, *item.ipv6))
+            addresses = ", ".join(f"{entry.address}/{entry.prefix_len}" for entry in (*item.ipv4, *item.ipv6))
             table.add_row(item.name, "yes" if item.is_up else "no", "yes" if item.is_loopback else "no", item.mac or "-", addresses or "-")
         console.print(table)
 

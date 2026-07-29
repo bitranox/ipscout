@@ -188,6 +188,17 @@ def test_forcing_a_family_the_target_lacks_is_reported_as_an_error(runner: CliRu
     assert payload["error"]["type"] == "IPScoutResolutionError"
 
 
+def test_interfaces_renders_addresses_as_address_slash_prefix(runner: CliRunner) -> None:
+    # The sweep above only asserts that a command prints something that is not
+    # JSON, so a table can be populated with the wrong thing and still pass.
+    # InterfaceAddress is a model, and iterating a model yields (name, value)
+    # pairs, so unpacking one as a 2-tuple silently renders the field NAMES.
+    output = _invoke(runner, ["interfaces"]).output
+
+    assert "127.0.0.1/8" in output, output
+    assert "'address'" not in output, output
+
+
 def test_capabilities_answers_with_a_boolean_per_capability(runner: CliRunner) -> None:
     data = json.loads(_invoke(runner, ["--json", "capabilities"]).output)["data"]
 
