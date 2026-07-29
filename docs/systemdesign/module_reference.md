@@ -81,7 +81,7 @@ Platform Adapter (__init__conf__.py)     <- static package metadata
 CI by import-linter (`tool.importlinter` contract "CLI depends on behaviors only").
 
 **Dependencies:**
-* **Runtime:** `rich-click>=1.9.8`, `rtoml` (version-split for the Python 3.9 baseline).
+* **Runtime:** `rich-click>=1.9.8`, `rtoml>=0.13`.
 * **Development:** pytest, ruff, pyright, bandit, build, twine, import-linter, pip-audit,
    pydantic, textual (install with the `[dev]` extra).
 
@@ -303,7 +303,7 @@ docstring examples in `behaviors.py`, `cli.py`, and `__init__conf__.py` run as t
 ## Known Limitations & Future Enhancements
 
 **By design (do not "fix"):**
-- Python 3.9 baseline is intentional for backward compatibility with older applications.
+- Python 3.10 baseline: it is the oldest release still receiving security fixes, and it is what `dataclass(slots=True)` and `zip(strict=)` require.
 - `from __future__ import annotations` is kept across modules for consistency and forward
   compatibility.
 - The domain layer is a placeholder: `emit_greeting`, `raise_intentional_failure`, and
@@ -353,7 +353,7 @@ docstring examples in `behaviors.py`, `cli.py`, and `__init__conf__.py` run as t
   rule.
 
 **v1.1.1 (2026-02-18):**
-- Added `__all__` to `__init__conf__.py`; pinned `rtoml` / `pip-audit` for the 3.9 baseline.
+- Added `__all__` to `__init__conf__.py`.
 
 **v1.1.0 (2026-02-18):**
 - Added the `WritableStream` Protocol for narrower stream typing in `behaviors.py`.

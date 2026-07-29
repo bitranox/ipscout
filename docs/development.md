@@ -90,7 +90,7 @@ Workflows live under `.github/workflows/` and are managed by the shared
 `default_cicd_public` template. Do not edit them in this repo.
 
 - `default_cicd_public.yml` - lint, type-check and test across `ubuntu-latest`,
-  `macos-latest` and `windows-latest` and CPython 3.9 through 3.14, then build.
+  `macos-latest` and `windows-latest` and CPython 3.10 through 3.14, then build.
 - `default_release_public.yml` - on a `v*.*.*` tag, build and publish to PyPI.
 - `codeql.yml` - CodeQL security analysis.
 

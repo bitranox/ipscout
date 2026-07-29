@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 __all__ = ["PingRequest", "arun_ping", "run_ping"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PingRequest:
     """Validated parameters for one ping.
 

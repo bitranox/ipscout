@@ -34,6 +34,7 @@ import asyncio
 import contextlib
 import socket
 import struct
+import sys
 import time
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -105,19 +106,40 @@ class RecvMsg(Protocol):
     def __call__(self, bufsize: int, ancbufsize: int = ..., flags: int = ..., /) -> tuple[bytes, list[tuple[int, int, bytes]], int, object]: ...
 
 
+#: Linux socket options that CPython only began exposing in 3.14. The values
+#: are kernel ABI (``linux/in.h``: ``IP_RECVERR 11``, ``linux/in6.h``:
+#: ``IPV6_RECVERR 25``) and therefore fixed forever - changing one would break
+#: every compiled binary on the platform.
+#:
+#: Without this fallback traceroute silently reported itself unsupported on
+#: Linux for every Python below 3.14, because the option lookup came back empty
+#: and the capability check honestly answered "no". The failure was invisible on
+#: a 3.14 development machine and invisible in CI, whose Linux runners refuse
+#: ICMP outright and skip those tests.
+_LINUX_ABI_FALLBACK = {
+    "IP_RECVERR": 11,
+    "IPV6_RECVERR": 25,
+}
+
+
 def socket_const(name: str) -> int | None:
-    """Return a socket constant that only some platforms define.
+    """Return a socket constant that only some platforms or versions define.
 
     ``IP_RECVERR`` and ``MSG_ERRQUEUE`` are Linux-only and absent from the
     macOS and Windows type stubs, so a direct attribute access fails type
     checking there even when it is guarded at runtime. Looking them up by name
     keeps every call site typed without silencing the checker per platform.
 
+    Falls back to the kernel ABI value on Linux when the running CPython is too
+    old to expose the name. The fallback is Linux-only: on a platform where the
+    option does not exist as a concept, inventing a number would only turn a
+    clean "unsupported" into a confusing ``setsockopt`` failure.
+
     Args:
         name: The constant's name in the ``socket`` module.
 
     Returns:
-        The value, or ``None`` where this platform does not define it.
+        The value, or ``None`` where this platform genuinely lacks it.
 
     Examples:
         >>> socket_const("SO_REUSEADDR") is not None
@@ -128,7 +150,11 @@ def socket_const(name: str) -> int | None:
     """
 
     value = getattr(socket, name, None)
-    return value if isinstance(value, int) else None
+    if isinstance(value, int):
+        return value
+    if sys.platform.startswith("linux"):
+        return _LINUX_ABI_FALLBACK.get(name)
+    return None
 
 
 def recvmsg_of(sock: socket.socket) -> RecvMsg | None:

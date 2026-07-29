@@ -17,9 +17,11 @@ Contents:
 
 Note:
     The enums are plain ``enum.Enum`` rather than ``StrEnum`` deliberately.
-    ``StrEnum`` arrived in 3.11, this package declares ``requires-python
-    >=3.9``, and CI type-checks with ``pyright --pythonversion 3.10``, so a
-    ``StrEnum`` here would fail the gate rather than merely being unavailable.
+    ``StrEnum`` arrived in 3.11 and this package supports 3.10, so it is still
+    out of reach even after the floor moved up from 3.9.
+
+    Every record here is ``slots=True``, which needs 3.10. A sweep can build
+    thousands of results, and slots drop the per-instance dict.
 
 """
 
@@ -84,7 +86,7 @@ class MacScope(enum.Enum):
     UNKNOWN = "unknown"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResponseObject:
     """The result of pinging one target.
 
@@ -223,7 +225,7 @@ class ResponseObject:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TraceHop:
     """One hop on the path to a target.
 
@@ -243,7 +245,7 @@ class TraceHop:
     hostname: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Interface:
     """One local network interface.
 
@@ -267,7 +269,7 @@ class Interface:
     mtu: int | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MacLookup:
     """A hardware-address answer that states what it is an answer *about*.
 
@@ -297,7 +299,7 @@ class MacLookup:
     interface: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SubnetInfo:
     """Addressing for one interface, plus whatever DHCP data the OS stored.
 

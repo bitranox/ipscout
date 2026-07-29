@@ -272,7 +272,9 @@ async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only 
             )
 
     completed = await asyncio.gather(*(one(target) for target in unique))
-    return dict(zip(unique, completed))
+    # strict=True because a length mismatch here would mean results were
+    # silently dropped from a sweep rather than a visible failure.
+    return dict(zip(unique, completed, strict=True))
 
 
 def ping_many(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful

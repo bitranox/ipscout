@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 __all__ = ["AsyncEchoTransport", "EchoResult", "EchoTransport"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EchoResult:
     """The outcome of one probe attempt.
 

@@ -79,7 +79,7 @@ _IPV4_VERSION = 4
 _IPV4_MIN_HEADER = 20
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EchoPayload:
     """The identifying content carried inside an echo request.
 
@@ -126,7 +126,7 @@ class EchoPayload:
         return cls(token=raw[start : start + TOKEN_SIZE], filler=raw[start + TOKEN_SIZE :])
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ParsedReply:
     """The fields of a decoded echo reply that identify which probe it answers.
 

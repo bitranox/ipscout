@@ -10,9 +10,9 @@ follow.
 
 ## Requirements
 
-- Python 3.9 or newer.
+- Python 3.10 or newer.
 - Runtime dependencies (installed automatically): `rich-click` for the CLI, and `rtoml`
-  for TOML parsing (`rtoml>=0.13` on Python 3.10+, `rtoml>=0.12,<0.13` on 3.9).
+  for TOML parsing (`rtoml>=0.13`).
 
 ## Install uv (optional)
 

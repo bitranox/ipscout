@@ -203,7 +203,7 @@ def _no_addresses() -> list[tuple[str, int]]:
     return []
 
 
-@dataclass
+@dataclass(slots=True)
 class _Accumulator:
     """Fields gathered for one interface as the linked list is walked.
 

@@ -18,7 +18,7 @@ from ipscout.errors import IPScoutUnsupportedError
 from ipscout.models import AddressFamily
 from ipscout.ports import EchoResult
 from ipscout.traceroute import atrace_path, trace_path
-from ipscout.transport_posix import PosixEchoTransport
+from ipscout.transport_posix import PosixEchoTransport, socket_const
 from ipscout.transport_tcp import TcpEchoTransport
 
 if TYPE_CHECKING:
@@ -217,3 +217,30 @@ def test_tracing_loopback_reaches_the_target_at_the_first_hop() -> None:
 def test_traceroute_refuses_an_unresolvable_target() -> None:
     with pytest.raises(ipscout.IPScoutResolutionError):
         ipscout.traceroute("nothing.invalid", max_hops=2)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="IP_RECVERR is a Linux socket option")
+def test_the_error_queue_options_resolve_on_every_supported_python() -> None:
+    # CPython only began exposing IP_RECVERR and IPV6_RECVERR in 3.14. Without
+    # a kernel-ABI fallback, traceroute answered "unsupported" on Linux for
+    # every earlier version - invisible on a 3.14 dev box, and invisible in CI
+    # too, whose Linux runners refuse ICMP and skip the live tests.
+    assert socket_const("IP_RECVERR") == 11
+    assert socket_const("IPV6_RECVERR") == 25
+    assert socket_const("MSG_ERRQUEUE") is not None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux is where the error queue exists")
+def test_linux_can_always_observe_expiry_whatever_the_python() -> None:
+    if not ipscout.icmp_available():
+        pytest.skip("unprivileged ICMP unavailable on this host")
+
+    with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4) as transport:
+        assert transport.supports_ttl_discovery is True
+
+
+def test_a_platform_without_the_option_gets_no_invented_value() -> None:
+    # The fallback is Linux-only on purpose: inventing a number where the
+    # option does not exist would turn a clean "unsupported" into a confusing
+    # setsockopt failure.
+    assert socket_const("DEFINITELY_NOT_A_SOCKET_OPTION") is None
