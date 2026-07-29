@@ -137,6 +137,12 @@ class WindowsEchoTransport:
 
         return True
 
+    @property
+    def supports_ttl_discovery(self) -> bool:
+        """Return True: the API reports IP_TTL_EXPIRED_TRANSIT with the router."""
+
+        return True
+
     def _options(self, ttl: int | None) -> winapi.IP_OPTION_INFORMATION:
         """Build the request options carrying the requested hop limit."""
 
@@ -310,6 +316,12 @@ class AsyncWindowsEchoTransport:
         """Return True: the API accepts a per-request TTL."""
 
         return self._inner.supports_ttl
+
+    @property
+    def supports_ttl_discovery(self) -> bool:
+        """Return whether expired hops can be observed, as the inner one says."""
+
+        return self._inner.supports_ttl_discovery
 
     async def probe(self, *, sequence: int, timeout: float, ttl: int | None = None) -> EchoResult:
         """Run one blocking probe on the pool and await its outcome."""

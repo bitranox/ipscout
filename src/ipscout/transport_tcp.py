@@ -84,6 +84,12 @@ class TcpEchoTransport:
 
         return False
 
+    @property
+    def supports_ttl_discovery(self) -> bool:
+        """Return False: with no hop limit there is no expiry to observe."""
+
+        return False
+
     def probe(self, *, sequence: int, timeout: float, ttl: int | None = None) -> EchoResult:
         """Attempt one connection and time it.
 
@@ -149,6 +155,12 @@ class AsyncTcpEchoTransport:
     @property
     def supports_ttl(self) -> bool:
         """Return False: a connect probe cannot usefully carry a hop limit."""
+
+        return False
+
+    @property
+    def supports_ttl_discovery(self) -> bool:
+        """Return False: with no hop limit there is no expiry to observe."""
 
         return False
 

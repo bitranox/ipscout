@@ -229,11 +229,17 @@ src-path = "src"
 root_package = "ipscout"
 
 [[tool.importlinter.contracts]]
-name = "CLI depends on behaviors only"
+name = "Layered dependencies point one way only"
 type = "layers"
 layers = [
-  "ipscout.cli",
-  "ipscout.behaviors",
+  "ipscout.api",
+  "ipscout.traceroute",
+  "ipscout.service",
+  "ipscout.factory",
+  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp",
+  "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi",
+  "ipscout.models",
+  "ipscout.errors",
 ]
 
 [tool.pip-audit]

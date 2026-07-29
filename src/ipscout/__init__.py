@@ -60,6 +60,7 @@ from .models import (
     TraceHop,
 )
 from .resolve import resolve, reverse_dns
+from .traceroute import atrace_path, atraceroute, trace_path, traceroute
 
 __all__ = [
     "AddressFamily",
@@ -77,6 +78,8 @@ __all__ = [
     "ais_reachable",
     "aping",
     "aping_many",
+    "atrace_path",
+    "atraceroute",
     "icmp_available",
     "is_reachable",
     "ping",
@@ -84,4 +87,6 @@ __all__ = [
     "print_info",
     "resolve",
     "reverse_dns",
+    "trace_path",
+    "traceroute",
 ]

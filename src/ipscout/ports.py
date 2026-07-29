@@ -77,6 +77,17 @@ class EchoTransport(Protocol):
         """
         ...
 
+    @property
+    def supports_ttl_discovery(self) -> bool:
+        """Return whether an expired hop can actually be *observed*.
+
+        Separate from :attr:`supports_ttl` because the two come apart: macOS
+        can set a hop limit but never surfaces the resulting Time Exceeded to
+        an unprivileged process, so a traceroute built there would report
+        silence at every hop and look like a broken network.
+        """
+        ...
+
     def probe(self, *, sequence: int, timeout: float, ttl: int | None = None) -> EchoResult:
         """Send one echo and wait up to ``timeout`` seconds for its reply.
 
@@ -112,6 +123,11 @@ class AsyncEchoTransport(Protocol):
     @property
     def supports_ttl(self) -> bool:
         """Return whether this transport can set a per-probe TTL."""
+        ...
+
+    @property
+    def supports_ttl_discovery(self) -> bool:
+        """Return whether an expired hop can actually be observed."""
         ...
 
     async def probe(self, *, sequence: int, timeout: float, ttl: int | None = None) -> EchoResult:

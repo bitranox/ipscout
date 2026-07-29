@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import socket
+import struct
 import time
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -148,6 +149,91 @@ def recvmsg_of(sock: socket.socket) -> RecvMsg | None:
     return cast("RecvMsg | None", getattr(sock, "recvmsg", None))
 
 
+#: ``struct sock_extended_err``: errno, origin, type, code, pad, info, data.
+#: Native byte order and alignment, as the kernel writes it.
+_EXTENDED_ERR = struct.Struct("=IBBBBII")
+
+#: ``SO_EE_ORIGIN_ICMP`` / ``SO_EE_ORIGIN_ICMP6``: the error came from a router
+#: rather than from the local stack.
+_ORIGIN_ICMP = 2
+_ORIGIN_ICMP6 = 3
+
+#: ICMP "Time Exceeded" in each family. A router sends this when it discards a
+#: packet whose hop limit ran out, which is the entire basis of traceroute.
+_TIME_EXCEEDED_V4 = 11
+_TIME_EXCEEDED_V6 = 3
+
+
+def _offender_address(control: bytes, *, is_ipv6: bool) -> str | None:
+    """Return the router named by ``SO_EE_OFFENDER``, if the message carries one.
+
+    The control message is ``struct sock_extended_err`` followed immediately by
+    the offending peer's ``sockaddr``. Verified against live routers: a hop
+    limit of 1 toward a public address yields origin 2, type 11, and the first
+    router's address.
+
+    Args:
+        control: One ancillary control-message payload.
+        is_ipv6: Which family's Time Exceeded type number to expect.
+
+    Returns:
+        The router address, or ``None`` when this message is not a Time
+        Exceeded from a router.
+
+    """
+
+    if len(control) < _EXTENDED_ERR.size:
+        return None
+    _errno, origin, ee_type, _code, _pad, _info, _data = _EXTENDED_ERR.unpack(control[: _EXTENDED_ERR.size])
+    expected_origin = _ORIGIN_ICMP6 if is_ipv6 else _ORIGIN_ICMP
+    expected_type = _TIME_EXCEEDED_V6 if is_ipv6 else _TIME_EXCEEDED_V4
+    if origin != expected_origin or ee_type != expected_type:
+        return None
+
+    offender = control[_EXTENDED_ERR.size :]
+    # sockaddr_in:  family(2) port(2) addr(4)
+    # sockaddr_in6: family(2) port(2) flowinfo(4) addr(16)
+    if is_ipv6:
+        if len(offender) < 24:  # noqa: PLR2004 - sockaddr_in6 through the address field
+            return None
+        return socket.inet_ntop(socket.AF_INET6, offender[8:24])
+    if len(offender) < 8:  # noqa: PLR2004 - sockaddr_in through the address field
+        return None
+    return socket.inet_ntop(socket.AF_INET, offender[4:8])
+
+
+def _enable_error_queue(sock: socket.socket, *, is_ipv6: bool) -> tuple[RecvMsg, int] | None:
+    """Turn on the error queue, returning how to read it, or None if unavailable.
+
+    ``IP_RECVERR`` asks the kernel to keep ICMP errors - including Time
+    Exceeded - on a queue the process can read, which is how unprivileged
+    traceroute works on Linux. Neither the option nor ``recvmsg`` exists on
+    macOS or Windows, so this returns ``None`` there and the caller reports
+    the capability as absent rather than pretending to have it.
+
+    Args:
+        sock: The ICMP socket to configure.
+        is_ipv6: Selects the IPv6 spelling of the option.
+
+    Returns:
+        A ``(recvmsg, MSG_ERRQUEUE)`` pair, or ``None`` where the platform has
+        no error queue.
+
+    """
+
+    flag = socket_const("MSG_ERRQUEUE")
+    option = socket_const("IPV6_RECVERR" if is_ipv6 else "IP_RECVERR")
+    recvmsg = recvmsg_of(sock)
+    if flag is None or option is None or recvmsg is None:
+        return None
+    level = socket.IPPROTO_IPV6 if is_ipv6 else socket.IPPROTO_IP
+    try:
+        sock.setsockopt(level, option, 1)
+    except OSError:
+        return None
+    return recvmsg, flag
+
+
 def _matches(parsed: packet.ParsedReply, *, sequence: int, token: bytes, is_ipv6: bool) -> bool:
     """Return whether a decoded datagram answers this specific probe.
 
@@ -190,12 +276,42 @@ class PosixEchoTransport:
         self._is_ipv6 = family is AddressFamily.IPV6
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
+        self._errqueue = _enable_error_queue(self._socket, is_ipv6=self._is_ipv6)
 
     @property
     def supports_ttl(self) -> bool:
         """Return True: POSIX sockets expose a per-probe hop limit."""
 
         return True
+
+    @property
+    def supports_ttl_discovery(self) -> bool:
+        """Return whether expired hops can actually be *observed* here.
+
+        Setting a hop limit and seeing what a router says about it are separate
+        capabilities, and macOS has the first without the second. Measured on
+        a macOS runner: neither the error queue nor a plain receive surfaces
+        Time Exceeded, so traceroute reports the platform unsupported instead
+        of returning a column of silent hops that looks like a broken network.
+        """
+
+        return self._errqueue is not None
+
+    def _read_ttl_expired(self) -> str | None:
+        """Return the router that discarded the packet, if one reported doing so."""
+
+        if self._errqueue is None:
+            return None
+        recvmsg, flag = self._errqueue
+        try:
+            _data, ancillary, _flags, _addr = recvmsg(4096, 4096, flag)
+        except (TimeoutError, OSError):
+            return None
+        for _level, _ctype, control in ancillary:
+            offender = _offender_address(control, is_ipv6=self._is_ipv6)
+            if offender is not None:
+                return offender
+        return None
 
     def _apply_ttl(self, ttl: int | None) -> None:
         """Set the outgoing hop limit for subsequent packets."""
@@ -247,17 +363,28 @@ class PosixEchoTransport:
         while True:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
-                return EchoResult()
+                return self._expired_or_silent(started, ttl)
             self._socket.settimeout(remaining)
             try:
                 raw, peer = self._socket.recvfrom(65535)
             except (TimeoutError, OSError):
-                return EchoResult()
+                # A hop limit that expired arrives as an error, not as data.
+                return self._expired_or_silent(started, ttl)
 
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             parsed = packet.parse_echo_reply(raw)
             if parsed is not None and _matches(parsed, sequence=sequence, token=token, is_ipv6=self._is_ipv6):
                 return EchoResult(rtt_ms=elapsed_ms, source=str(peer[0]))
+
+    def _expired_or_silent(self, started: float, ttl: int | None) -> EchoResult:
+        """Return a TTL-expired hop when a router reported one, else silence."""
+
+        if ttl is None:
+            return EchoResult()
+        router = self._read_ttl_expired()
+        if router is None:
+            return EchoResult()
+        return EchoResult(rtt_ms=(time.perf_counter() - started) * 1000.0, source=router, ttl_expired=True)
 
     def close(self) -> None:
         """Close the underlying socket."""
@@ -309,12 +436,19 @@ class AsyncPosixEchoTransport:
         self._socket.settimeout(0)
         self._waiters: dict[bytes, asyncio.Future[tuple[float, str]]] = {}
         self._reader_installed = False
+        self._errqueue = _enable_error_queue(self._socket, is_ipv6=self._is_ipv6)
 
     @property
     def supports_ttl(self) -> bool:
         """Return True: POSIX sockets expose a per-probe hop limit."""
 
         return True
+
+    @property
+    def supports_ttl_discovery(self) -> bool:
+        """Return whether expired hops can actually be observed here."""
+
+        return self._errqueue is not None
 
     def _ensure_reader(self) -> None:
         """Register the socket with the running loop, once."""

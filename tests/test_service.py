@@ -36,6 +36,10 @@ class ScriptedTransport:
     def supports_ttl(self) -> bool:
         return self._supports_ttl
 
+    @property
+    def supports_ttl_discovery(self) -> bool:
+        return self._supports_ttl
+
     def probe(self, *, sequence: int, timeout: float, ttl: int | None = None) -> EchoResult:
         del timeout
         self.sequences.append(sequence)
@@ -83,6 +87,7 @@ class RefusingTransport:
     """Stands in for a machine where ICMP cannot be opened at all."""
 
     supports_ttl = True
+    supports_ttl_discovery = True
 
     def probe(self, *, sequence: int, timeout: float, ttl: int | None = None) -> EchoResult:
         del sequence, timeout, ttl
