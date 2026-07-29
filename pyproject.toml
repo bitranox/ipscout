@@ -151,6 +151,7 @@ markers = [
   "os_posix: test exercises behavior requiring POSIX semantics",
   "os_linux: test exercises Linux-only behavior",
   "local_only: test only runs in local development environments (skipped in CI)",
+  "integration: test reaches a real external network; skips cleanly when there is no route out",
 ]
 
 [tool.coverage.run]
@@ -261,7 +262,12 @@ layers = [
 # PYSEC-2022-42969: same as above (alias)
 # GHSA-w853-jp5j-5j7f: filelock vulnerability (transitive dep, fix requires update)
 # GHSA-qmgc-5h2g-mvrw: filelock vulnerability (transitive dep, fix requires update)
-ignore-vulns = ["GHSA-4xh5-x5gv-qwph", "PYSEC-2022-42969", "CVE-2026-1703", "CVE-2026-25990", "CVE-2026-26007", "GHSA-w853-jp5j-5j7f", "GHSA-qmgc-5h2g-mvrw", "CVE-2026-4539", "CVE-2026-25645"]
+# No exclusions. Verified 2026-07-29: pip-audit over the fully resolved tree (75 packages,
+# --extra dev) reports no known vulnerabilities with nothing ignored, so the nine ids
+# inherited from the template were all inert. An inert ignore is not free - it is a
+# permanent blind spot for that id, so a future dependency carrying one would pass silently.
+# Removed rather than kept: re-add an id here only when it actually fires and has no fix.
+ignore-vulns = []
 
 [tool.bashate]
 # bashate style settings for .sh files (E003 excluded: indent handled by shfmt)

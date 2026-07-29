@@ -100,6 +100,12 @@ subprocess is spawned, and no administrator or root rights are needed on the def
   `0xBEEF` came back carrying `0x4C36`. Replies are therefore matched on the sequence number plus a
   random token embedded in the payload, which is correct on datagram sockets, raw sockets and the
   Windows backend alike, and which discards another process's replies rather than counting them.
+- **An integration lane that reaches the real internet.** Nine tests marked `integration` probe
+  public hosts: a live ICMP round trip, a sweep whose results stay paired with their targets, a
+  real traceroute with identified hops, a port scan, name resolution and its reverse, the path MTU,
+  and the routed-MAC rule against an actual route. Each skips cleanly when there is no route out,
+  so an offline machine reports skipped rather than failed. Run with `make testintegration`; the
+  rest of the suite stays hermetic against loopback and synthetic buffers.
 - **Kernel ABI fallback for `IP_RECVERR` / `IPV6_RECVERR`.** CPython only exposed these constants
   from 3.14. Without the fallback to the kernel values (11 and 25), traceroute would report itself
   unsupported on Linux for every Python from 3.10 to 3.13.
