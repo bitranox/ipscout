@@ -4,6 +4,7 @@ Contents:
     lease_for: The lease for one interface, from whichever store holds it.
     parse_networkd_lease: systemd-networkd's key/value format.
     parse_dhclient_lease: the ISC dhclient lease-block format.
+    read_lease_text: A bounded tail read of an append-only lease store.
 
 Note:
     **No DHCP traffic is sent.** The client that already holds the lease wrote
@@ -28,10 +29,15 @@ from pathlib import Path
 
 from .models import LeaseInfo
 
-__all__ = ["lease_for", "parse_dhclient_lease", "parse_networkd_lease"]
+__all__ = ["MAX_LEASE_BYTES", "lease_for", "parse_dhclient_lease", "parse_networkd_lease", "read_lease_text"]
 
 #: systemd-networkd writes one file per interface index, world-readable.
 _NETWORKD_LEASES = Path("/run/systemd/netif/leases")
+
+#: How much of a lease file to read. The current lease is the last record,
+#: and these files are append-only, so a bounded tail is both sufficient and
+#: the only way to stay bounded on a host that has been up for years.
+MAX_LEASE_BYTES = 256 * 1024
 
 #: Where the ISC client and NetworkManager keep theirs.
 _DHCLIENT_PATHS = (
@@ -143,15 +149,35 @@ def parse_dhclient_lease(text: str, interface: str | None = None) -> LeaseInfo:
     return latest
 
 
-def _read(path: Path) -> str | None:
-    """Return a file's text, or None when it cannot be read."""
+def read_lease_text(path: Path) -> str | None:
+    """Return the tail of a lease file, or None when it cannot be read.
+
+    dhclient lease stores are append-only and are never trimmed, so on a
+    long-lived host they grow without bound. Only the most recent lease is
+    wanted, and it is at the end, so this reads a bounded window from the end
+    rather than the whole file.
+
+    The window is cut back to the first complete record so a half-block at the
+    front cannot be parsed as a lease. systemd-networkd files are a few
+    hundred bytes and fit entirely.
+    """
 
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > MAX_LEASE_BYTES:
+                handle.seek(size - MAX_LEASE_BYTES)
+            raw = handle.read(MAX_LEASE_BYTES)
     except OSError:
         # Not present, or not readable by this user: both mean no lease data
         # from this store, which is not an error.
         return None
+
+    text = raw.decode("utf-8", errors="replace")
+    if size > MAX_LEASE_BYTES:
+        start = text.find("lease")
+        text = text[start:] if start >= 0 else ""
+    return text
 
 
 def lease_for(interface: str) -> LeaseInfo:
@@ -176,7 +202,7 @@ def lease_for(interface: str) -> LeaseInfo:
 
     with contextlib.suppress(OSError, ValueError):
         index = socket.if_nametoindex(interface)
-        text = _read(_NETWORKD_LEASES / str(index))
+        text = read_lease_text(_NETWORKD_LEASES / str(index))
         if text:
             return parse_networkd_lease(text)
 
@@ -185,7 +211,7 @@ def lease_for(interface: str) -> LeaseInfo:
             if not directory.is_dir():
                 continue
             for path in sorted(directory.glob("*lease*")):
-                text = _read(path)
+                text = read_lease_text(path)
                 if text and "lease" in text:
                     lease = parse_dhclient_lease(text, interface)
                     if lease.dhcp_server or lease.dns_servers:

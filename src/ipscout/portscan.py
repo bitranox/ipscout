@@ -40,6 +40,7 @@ import time
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import PortState, ScanMethod
+from .pool import gather_bounded
 from .routes import query_route
 from .tcpsyn import build_syn, parse_tcp_reply
 
@@ -343,23 +344,23 @@ async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = 1.0
     """
 
     wanted = _wanted(ports)
-    limit = asyncio.Semaphore(max(1, concurrency))
 
     async def probe(port: int) -> tuple[int, PortState]:
-        async with limit:
-            try:
-                _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
-            except (TimeoutError, asyncio.TimeoutError):
-                return port, PortState.FILTERED
-            except OSError as exc:
-                return port, PortState.CLOSED if _is_refusal(exc) else PortState.FILTERED
-            except ValueError:
-                # A name that does not resolve is not an answer about the port.
-                return port, PortState.FILTERED
-            writer.close()
-            with contextlib.suppress(OSError, asyncio.TimeoutError, ConnectionError):
-                await writer.wait_closed()
-            return port, PortState.OPEN
+        try:
+            _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            return port, PortState.FILTERED
+        except OSError as exc:
+            return port, PortState.CLOSED if _is_refusal(exc) else PortState.FILTERED
+        except ValueError:
+            # A name that does not resolve is not an answer about the port.
+            return port, PortState.FILTERED
+        writer.close()
+        with contextlib.suppress(OSError, asyncio.TimeoutError, ConnectionError):
+            await writer.wait_closed()
+        return port, PortState.OPEN
 
-    results = await asyncio.gather(*(probe(port) for port in wanted))
-    return dict(results)
+    # A worker pool rather than a semaphore inside a gather over everything:
+    # the semaphore would bound sockets while still creating one Task per
+    # port, which is 65535 of them for a full-range scan.
+    return dict(await gather_bounded(wanted, probe, concurrency))

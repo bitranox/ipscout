@@ -193,3 +193,4 @@ prompts.md
 .venv*/
 # bitranox curated memory (local; CLAUDE.local.md @imports it)
 CLAUDE.local.md
+EXECUTION-USER-REVIEW.md

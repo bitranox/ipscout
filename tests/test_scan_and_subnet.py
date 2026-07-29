@@ -26,6 +26,7 @@ from ipscout.wol import MAGIC_PACKET_SIZE, build_magic_packet
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 pytestmark = pytest.mark.os_agnostic
 
@@ -377,3 +378,118 @@ def test_a_lease_naming_something_that_is_not_an_address_drops_it() -> None:
     lease = parse_networkd_lease("DNS=192.168.1.1 not-an-address 9.9.9.9\n")
 
     assert lease.dns_servers == ("192.168.1.1", "9.9.9.9")
+
+
+# --------------------------------------------------------------------------
+# Bounded scheduling
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_a_wide_scan_keeps_only_the_concurrency_limit_alive() -> None:
+    # The trap this guards: asyncio.gather over every port with a semaphore
+    # inside bounds the sockets but still creates one Task per port, so a
+    # full-range scan holds 65535 of them to keep 256 busy.
+    import asyncio
+
+    from ipscout.pool import gather_bounded
+
+    live = 0
+    peak = 0
+
+    async def work(value: int) -> int:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0)
+        live -= 1
+        return value
+
+    results = asyncio.run(gather_bounded(range(500), work, 8))
+
+    assert sorted(results) == list(range(500))
+    assert peak <= 8, f"{peak} ran at once against a limit of 8"
+
+
+@pytest.mark.os_agnostic
+def test_a_bounded_run_returns_every_result_exactly_once() -> None:
+    import asyncio
+
+    from ipscout.pool import gather_bounded
+
+    async def work(value: int) -> int:
+        return value
+
+    results = asyncio.run(gather_bounded(range(100), work, 7))
+
+    assert sorted(results) == list(range(100))
+
+
+@pytest.mark.os_agnostic
+def test_a_sweep_pairs_each_result_with_its_own_target() -> None:
+    # The pool completes out of order, so pairing by position would attribute
+    # results to the wrong hosts - silently, and only under load.
+    if not ipscout.icmp_available():
+        pytest.skip("unprivileged ICMP unavailable on this host")
+
+    results = ipscout.ping_many(["127.0.0.1", "::1"], times=1, timeout=1.0)
+
+    assert set(results) == {"127.0.0.1", "::1"}
+    for target, result in results.items():
+        assert result.target == target
+
+
+@pytest.mark.os_agnostic
+def test_every_port_asked_about_comes_back_from_a_wide_scan() -> None:
+    result = ipscout.scan_ports("127.0.0.1", "1-300", timeout=0.05, concurrency=32)
+
+    assert len(result) == 300
+    assert set(result) == set(range(1, 301))
+
+
+# --------------------------------------------------------------------------
+# One error hierarchy
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_a_failed_wake_reports_through_the_library_hierarchy() -> None:
+    # Every other public callable reports failure this way; one leaking a bare
+    # OSError would make "catch IPScoutError" untrue for exactly one function.
+    with pytest.raises(ipscout.IPScoutError):
+        ipscout.wake_on_lan("aa:bb:cc:dd:ee:ff", broadcast="300.1.1.1")
+
+
+# --------------------------------------------------------------------------
+# Bounded lease reads
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_only_the_tail_of_an_append_only_lease_file_is_read(tmp_path: Path) -> None:
+    # dhclient lease stores are append-only and never trimmed. Reading the
+    # whole thing grows without bound on a long-lived host, and the wanted
+    # lease is the last one anyway.
+    from ipscout.leases_linux import MAX_LEASE_BYTES, read_lease_text
+
+    path = tmp_path / "dhclient.leases"
+    filler = 'lease {\n  interface "eth0";\n  option dhcp-server-identifier 10.0.0.1;\n}\n'
+    current = 'lease {\n  interface "eth0";\n  option dhcp-server-identifier 192.168.9.9;\n}\n'
+    path.write_text(filler * ((MAX_LEASE_BYTES // len(filler)) + 200) + current)
+
+    text = read_lease_text(path)
+
+    assert text is not None
+    assert len(text) <= MAX_LEASE_BYTES
+    assert "192.168.9.9" in text, "the current lease is at the end and must survive the trim"
+    assert text.startswith("lease"), "a half-block at the front would parse as a lease"
+
+
+@pytest.mark.os_agnostic
+def test_a_short_lease_file_is_read_whole(tmp_path: Path) -> None:
+    from ipscout.leases_linux import read_lease_text
+
+    path = tmp_path / "lease"
+    path.write_text("ADDRESS=192.168.1.50\nSERVER_ADDRESS=192.168.1.1\n")
+
+    assert read_lease_text(path) == "ADDRESS=192.168.1.50\nSERVER_ADDRESS=192.168.1.1\n"

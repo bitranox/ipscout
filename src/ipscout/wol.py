@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import socket
 
+from .errors import IPScoutError
 from .neighbours import normalise_mac
 
 __all__ = ["DEFAULT_PORT", "build_magic_packet", "wake_on_lan"]
@@ -78,7 +79,8 @@ def wake_on_lan(mac: str, *, broadcast: str = "255.255.255.255", port: int = DEF
 
     Raises:
         ValueError: The input is not a hardware address.
-        OSError: The packet could not be sent.
+        IPScoutError: The packet could not be sent - an unroutable broadcast
+            address, or no route to it.
 
     Note:
         Returns nothing, because nothing comes back. A magic packet is
@@ -92,6 +94,13 @@ def wake_on_lan(mac: str, *, broadcast: str = "255.255.255.255", port: int = DEF
     """
 
     packet = build_magic_packet(mac)
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.sendto(packet, (broadcast, port))
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.sendto(packet, (broadcast, port))
+    except OSError as exc:
+        # Every other public callable reports failure through this hierarchy;
+        # leaking a bare OSError from one of them would make the contract
+        # "catch IPScoutError" untrue for exactly one function.
+        msg = f"could not send the magic packet to {broadcast}:{port}: {exc}"
+        raise IPScoutError(msg) from exc

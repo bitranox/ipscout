@@ -21,7 +21,6 @@ import select
 import socket
 import struct
 import time
-from typing import Protocol, cast
 
 from .arp import (
     build_arp_request,
@@ -44,6 +43,7 @@ from .bsdroute import (
 )
 from .errors import IPScoutPermissionError
 from .models import AddressFamily, Neighbour, NeighbourState
+from .unixio import fcntl_module
 
 __all__ = ["iter_bpf_frames", "list_neighbours", "parse_neighbour_dump", "resolve_active_ipv4", "resolve_active_ipv6"]
 
@@ -148,27 +148,6 @@ _BPF_HDR = struct.Struct("=iiIIH")
 _MAX_BPF_DEVICES = 64
 
 
-class _Fcntl(Protocol):
-    """The one ``fcntl`` call this module makes, in the one form used.
-
-    ``fcntl`` is a Unix module, so on the Windows type-check its attributes
-    are unknown even though the import sits on a macOS-only path. Casting the
-    module onto this Protocol gives the call sites complete types on every
-    platform without turning a rule off, which would blind this file to real
-    errors as well.
-    """
-
-    def ioctl(self, fd: int, request: int, arg: bytes, /) -> bytes: ...
-
-
-def _fcntl() -> _Fcntl:
-    """Return the ``fcntl`` module, typed, importing it on first use."""
-
-    import fcntl  # noqa: PLC0415 - Unix-only, and only on the active path
-
-    return cast("_Fcntl", fcntl)
-
-
 def _iow(number: int, size: int) -> int:
     """Return the ioctl number for a write-direction request."""
 
@@ -224,7 +203,7 @@ def iter_bpf_frames(buffer: bytes) -> list[bytes]:
 def _open_bpf(interface: str) -> tuple[int, int]:  # pragma: no cover - macOS only
     """Open a free BPF device bound to one interface, and its buffer size."""
 
-    fcntl = _fcntl()
+    fcntl = fcntl_module()
     last: OSError | None = None
     for number in range(_MAX_BPF_DEVICES):
         try:

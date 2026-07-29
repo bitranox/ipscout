@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from .errors import IPScoutError
 from .factory import icmp_available, make_async_transport, make_transport
 from .models import AddressFamily, ProbeMethod, ResponseObject
+from .pool import gather_bounded
 from .resolve import resolve_one
 from .service import PingRequest, arun_ping, run_ping
 
@@ -255,26 +256,33 @@ async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only 
     """
 
     unique = list(dict.fromkeys(targets))
-    semaphore = asyncio.Semaphore(max(1, concurrency))
 
-    async def one(target: str) -> ResponseObject:
-        async with semaphore:
-            return await aping(
-                target,
-                times,
-                timeout=timeout,
-                interval=interval,
-                family=family,
-                payload_size=payload_size,
-                allow_tcp_fallback=allow_tcp_fallback,
-                tcp_port=tcp_port,
-                raise_on_error=raise_on_error,
-            )
+    async def one(target: str) -> tuple[str, ResponseObject]:
+        # Returns the target with its result: the pool completes out of order,
+        # so pairing by position afterwards would attribute results to the
+        # wrong hosts.
+        result = await aping(
+            target,
+            times,
+            timeout=timeout,
+            interval=interval,
+            family=family,
+            payload_size=payload_size,
+            allow_tcp_fallback=allow_tcp_fallback,
+            tcp_port=tcp_port,
+            raise_on_error=raise_on_error,
+        )
+        return target, result
 
-    completed = await asyncio.gather(*(one(target) for target in unique))
-    # strict=True because a length mismatch here would mean results were
-    # silently dropped from a sweep rather than a visible failure.
-    return dict(zip(unique, completed, strict=True))
+    # A worker pool rather than a semaphore inside a gather over everything:
+    # the semaphore bounds probes in flight while still creating one Task per
+    # target up front, so a sweep of a large subnet holds them all at once.
+    completed = await gather_bounded(unique, one, concurrency)
+    results = dict(completed)
+    if len(results) != len(unique):  # pragma: no cover - a lost result is a bug, not a condition
+        msg = f"sweep returned {len(results)} results for {len(unique)} targets"
+        raise RuntimeError(msg)
+    return results
 
 
 def ping_many(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful

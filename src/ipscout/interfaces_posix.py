@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .models import Interface, InterfaceAddress
+from .unixio import fcntl_module
 
 __all__ = ["list_interfaces"]
 
@@ -223,12 +224,10 @@ def _mtu_of(name: str) -> int | None:
 def _mtu_by_ioctl(name: str) -> int | None:  # pragma: no cover - BSD only
     """Return an interface's MTU through SIOCGIFMTU."""
 
-    import fcntl  # noqa: PLC0415 - Unix-only, and only on this path
-
     request = name.encode()[:_IFNAME_MAX].ljust(_IFREQ_SIZE, b"\x00")
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            answer = fcntl.ioctl(sock.fileno(), _SIOCGIFMTU_BSD, request)
+            answer = fcntl_module().ioctl(sock.fileno(), _SIOCGIFMTU_BSD, request)
     except (OSError, ValueError):
         return None
     # The MTU lands in the union straight after the 16-byte name.
