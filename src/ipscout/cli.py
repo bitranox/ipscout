@@ -1,21 +1,22 @@
-"""CLI adapter wiring the behavior helpers into a rich-click interface.
-
-Expose a stable command-line surface using rich-click for consistent,
-beautiful terminal output. The CLI delegates to behavior helpers while
-maintaining clean separation of concerns.
+"""Command-line surface. Every public function is reachable from here.
 
 Contents:
-    CLICK_CONTEXT_SETTINGS: Shared Click settings for consistent help.
-    cli: Root command group with global options.
-    cli_info: Print package metadata.
-    cli_hello: Demonstrate success path.
-    cli_fail: Demonstrate error handling.
-    main: Entry point for console scripts.
+    cli: Root group holding the global flags.
+    One subcommand per public callable, plus ``capabilities`` and ``info``.
+    main: Entry point for the console script and ``python -m ipscout``.
+
+Output modes:
+    Human-readable by default. ``--json``/``-j`` switches to an envelope -
+    ``{"ok": ..., "command": ..., "data"|"error": ...}`` - which is what a
+    machine reading only stdout needs: a boolean it can always see, rather than
+    an exit code it may not have captured, and errors as structured data rather
+    than a traceback on stderr. ``--json-bare`` drops the envelope for ``jq``.
 
 Note:
-    The CLI is the primary adapter for local development workflows. Packaging
-    targets register the console script defined in __init__conf__. The module
-    entry point (python -m) reuses the same helpers for consistency.
+    Both flags live on the group rather than on each command, so they compose
+    with every subcommand including ones added later. Rendering goes through
+    one helper, :func:`_emit`, so a command cannot support JSON on its success
+    path and forget it on another.
 
 """
 
@@ -23,29 +24,33 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import lib_cli_exit_tools
 import rich_click as click
-from click.core import ParameterSource
 from rich.console import Console
 from rich.style import Style
-from rich.traceback import Traceback
-from rich.traceback import install as install_rich_traceback
+from rich.table import Table
 
 from . import __init__conf__
-from .behaviors import emit_greeting, noop_main, raise_intentional_failure
-from .typed_click import option, version_option
+from .api import is_reachable, ping, ping_many
+from .errors import IPScoutError
+from .factory import icmp_available
+from .interfaces import local_interfaces
+from .models import AddressFamily
+from .resolve import resolve as resolve_target
+from .resolve import reverse_dns
+from .serialize import dumps, to_json_dict
+from .traceroute import traceroute
+from .typed_click import argument, option, version_option
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 __all__ = [
     "CLICK_CONTEXT_SETTINGS",
     "CliContext",
     "cli",
-    "cli_fail",
-    "cli_hello",
-    "cli_info",
     "console",
     "main",
 ]
@@ -53,51 +58,97 @@ __all__ = [
 #: Shared Click context flags for consistent help output.
 CLICK_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
-#: Console for rich output
+#: Console for rich output.
 console = Console()
 
-#: Style for error messages when traceback is suppressed
+#: Style for error messages when traceback is suppressed.
 _ERROR_STYLE = Style(color="red", bold=True)
+
+#: Exit codes. Independent of output format.
+EXIT_OK = 0
+EXIT_NOT_REACHED = 1
+EXIT_ERROR = 2
 
 
 @dataclass
 class CliContext:
     """Typed context object for Click's ``ctx.obj``.
 
-    Replaces an untyped dict so that every downstream command accesses
-    strongly-typed attributes instead of string-keyed dictionary items.
-
     Attributes:
-        traceback: Whether to show full Python traceback on errors.
+        traceback: Show a full Python traceback on an unexpected error.
+        json_output: Emit the JSON envelope instead of human-readable text.
+        json_bare: Emit the payload at top level, without the envelope.
 
     """
 
     traceback: bool = True
+    json_output: bool = False
+    json_bare: bool = False
+
+    @property
+    def machine_readable(self) -> bool:
+        """Return whether output should be JSON in either of its two shapes."""
+
+        return self.json_output or self.json_bare
 
 
-def _exit_code_from(exc: SystemExit) -> int:
-    """Extract integer exit code from SystemExit.
+def _context(ctx: click.Context) -> CliContext:
+    """Return the typed context object, creating it if a command runs alone."""
+
+    if not isinstance(ctx.obj, CliContext):
+        ctx.obj = CliContext()
+    return ctx.obj
+
+
+def _emit(ctx: click.Context, command: str, payload: Any, human: Callable[[], None]) -> None:
+    """Render one command's result in whichever format was asked for.
 
     Args:
-        exc: The SystemExit exception to extract the code from.
+        ctx: The Click context carrying the output flags.
+        command: The subcommand name, echoed into the envelope so a transcript
+            of several calls stays unambiguous.
+        payload: The data to serialise when a JSON mode is active.
+        human: Callable that prints the human-readable rendering.
 
-    Returns:
-        Integer exit code: the code itself if int, 1 if truthy, 0 if falsy.
-
-    Examples:
-        >>> _exit_code_from(SystemExit(0))
-        0
-        >>> _exit_code_from(SystemExit(42))
-        42
-        >>> _exit_code_from(SystemExit("error"))
-        1
-        >>> _exit_code_from(SystemExit(None))
-        0
+    Note:
+        Every command routes through here. That is deliberate: a per-command
+        ``if json:`` branch is exactly the kind of thing that gets added on the
+        success path and forgotten everywhere else.
 
     """
-    if isinstance(exc.code, int):
-        return exc.code
-    return 1 if exc.code else 0
+
+    state = _context(ctx)
+    if state.json_bare:
+        click.echo(dumps(payload))
+        return
+    if state.json_output:
+        click.echo(dumps({"ok": True, "command": command, "data": to_json_dict(payload)}))
+        return
+    human()
+
+
+def _fail(ctx: click.Context, command: str, exc: Exception) -> None:
+    """Report a failure in the active output format, then exit non-zero."""
+
+    state = _context(ctx)
+    if state.json_output:
+        click.echo(dumps({"ok": False, "command": command, "error": {"type": type(exc).__name__, "message": str(exc)}}))
+    else:
+        console.print(f"Error: {type(exc).__name__}: {exc}", style=_ERROR_STYLE, highlight=False)
+    ctx.exit(EXIT_ERROR)
+
+
+def _family(*, ipv4: bool, ipv6: bool) -> AddressFamily | None:
+    """Return the family the -4/-6 flags select, or None for either."""
+
+    if ipv4 and ipv6:
+        msg = "-4 and -6 are mutually exclusive"
+        raise click.UsageError(msg)
+    if ipv4:
+        return AddressFamily.IPV4
+    if ipv6:
+        return AddressFamily.IPV6
+    return None
 
 
 @click.group(
@@ -110,116 +161,352 @@ def _exit_code_from(exc: SystemExit) -> int:
     prog_name=__init__conf__.shell_command,
     message=f"{__init__conf__.shell_command} version {__init__conf__.version}",
 )
-@option(
-    "--traceback/--no-traceback",
-    is_flag=True,
-    default=True,
-    help="Show full Python traceback on errors (default: enabled)",
-)
+@option("--json", "-j", "json_output", is_flag=True, default=False, help="Emit a JSON envelope: {ok, command, data|error}.")
+@option("--json-bare", "json_bare", is_flag=True, default=False, help="Emit the JSON payload at top level, without the envelope.")
+@option("--traceback/--no-traceback", is_flag=True, default=True, help="Show a full Python traceback on unexpected errors.")
 @click.pass_context
-def cli(ctx: click.Context, *, traceback: bool) -> None:
-    """Root command storing global flags.
-
-    When invoked without a subcommand, displays help unless --traceback
-    is explicitly provided (for backward compatibility).
-
-    Args:
-        ctx: Click context object for the command group.
-        traceback: Whether to show full Python traceback on errors.
+def cli(ctx: click.Context, *, json_output: bool, json_bare: bool, traceback: bool) -> None:
+    """Probe reachability and inspect the local network, without admin rights.
 
     Examples:
         >>> from click.testing import CliRunner
-        >>> runner = CliRunner()
-        >>> result = runner.invoke(cli, ["hello"])
+        >>> result = CliRunner().invoke(cli, ["--json", "info"])
         >>> result.exit_code
         0
-        >>> "Hello World" in result.output
+        >>> import json
+        >>> json.loads(result.output)["ok"]
         True
 
     """
-    # Store traceback preference in typed context object
-    ctx.ensure_object(CliContext)
-    ctx.obj.traceback = traceback
 
-    # Show help if no subcommand and no explicit option
+    if json_output and json_bare:
+        msg = "--json and --json-bare are mutually exclusive; pick one output shape"
+        raise click.UsageError(msg)
+
+    ctx.obj = CliContext(traceback=traceback, json_output=json_output, json_bare=json_bare)
     if ctx.invoked_subcommand is None:
-        source = ctx.get_parameter_source("traceback")
-        if source not in (ParameterSource.DEFAULT, None):
-            # Traceback was explicitly set, run default behavior
-            noop_main()
-        else:
-            # No subcommand and default traceback value, show help
-            click.echo(ctx.get_help())
+        click.echo(ctx.get_help())
+
+
+@cli.command("ping", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("target")
+@option("--times", "-c", type=int, default=4, show_default=True, help="Echoes to send.")
+@option("--timeout", type=float, default=2.0, show_default=True, help="Seconds to wait per reply.")
+@option("--interval", type=float, default=0.2, show_default=True, help="Seconds between echoes.")
+@option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
+@option("--tcp-fallback", is_flag=True, default=False, help="Fall back to a TCP connect when ICMP is unavailable.")
+@option("--tcp-port", type=int, default=443, show_default=True, help="Port for the TCP fallback.")
+@click.pass_context
+def cli_ping(  # noqa: PLR0913 - one parameter per documented CLI option; collapsing them would hide the interface
+    ctx: click.Context,
+    target: str,
+    *,
+    times: int,
+    timeout: float,
+    interval: float,
+    ipv4: bool,
+    ipv6: bool,
+    tcp_fallback: bool,
+    tcp_port: int,
+) -> None:
+    """Ping a host and report what came back."""
+
+    try:
+        result = ping(
+            target,
+            times,
+            timeout=timeout,
+            interval=interval,
+            family=_family(ipv4=ipv4, ipv6=ipv6),
+            allow_tcp_fallback=tcp_fallback,
+            tcp_port=tcp_port,
+        )
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, "ping", exc)
+        return
+
+    _emit(ctx, "ping", result, lambda: console.print(result.str_result))
+    if not result.reached:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("ping-many", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("targets", nargs=-1, required=True)
+@option("--times", "-c", type=int, default=4, show_default=True, help="Echoes per target.")
+@option("--timeout", type=float, default=2.0, show_default=True, help="Seconds to wait per reply.")
+@option("--concurrency", type=int, default=64, show_default=True, help="Probes in flight at once.")
+@click.pass_context
+def cli_ping_many(ctx: click.Context, targets: tuple[str, ...], *, times: int, timeout: float, concurrency: int) -> None:
+    """Ping many hosts concurrently."""
+
+    results = ping_many(list(targets), times=times, timeout=timeout, concurrency=concurrency)
+
+    def human() -> None:
+        table = Table("target", "reached", "loss", "avg ms", "error")
+        for name, result in results.items():
+            table.add_row(
+                name,
+                "yes" if result.reached else "no",
+                f"{result.packets_lost_percentage}%",
+                f"{result.time_avg_ms:.2f}" if result.reached else "-",
+                result.error or "",
+            )
+        console.print(table)
+
+    _emit(ctx, "ping-many", results, human)
+    if not any(result.reached for result in results.values()):
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("reachable", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("target")
+@option("--timeout", type=float, default=2.0, show_default=True, help="Seconds to allow per attempt.")
+@option("--tcp-port", type=int, default=443, show_default=True, help="Port for the TCP attempt.")
+@click.pass_context
+def cli_reachable(ctx: click.Context, target: str, *, timeout: float, tcp_port: int) -> None:
+    """Answer whether a host responds, by ICMP or failing that TCP."""
+
+    answer = is_reachable(target, timeout=timeout, tcp_port=tcp_port)
+
+    _emit(ctx, "reachable", {"target": target, "reachable": answer}, lambda: console.print("yes" if answer else "no"))
+    if not answer:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("traceroute", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("target")
+@option("--max-hops", type=int, default=30, show_default=True, help="Highest hop limit to try.")
+@option("--timeout", type=float, default=2.0, show_default=True, help="Seconds to wait per hop.")
+@option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
+@option("--resolve-names", is_flag=True, default=False, help="Reverse-resolve each responding hop.")
+@click.pass_context
+def cli_traceroute(  # noqa: PLR0913 - one parameter per documented CLI option; collapsing them would hide the interface
+    ctx: click.Context,
+    target: str,
+    *,
+    max_hops: int,
+    timeout: float,
+    ipv4: bool,
+    ipv6: bool,
+    resolve_names: bool,
+) -> None:
+    """Report the path packets take to a host."""
+
+    try:
+        hops = traceroute(
+            target,
+            max_hops=max_hops,
+            timeout=timeout,
+            family=_family(ipv4=ipv4, ipv6=ipv6),
+            resolve_names=resolve_names,
+        )
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, "traceroute", exc)
+        return
+
+    def human() -> None:
+        for hop in hops:
+            rtt = f"{hop.rtt_ms:7.2f}ms" if hop.rtt_ms is not None else "      *  "
+            name = f"  {hop.hostname}" if hop.hostname else ""
+            marker = "  <- target" if hop.reached else ""
+            console.print(f"{hop.ttl:3}  {rtt}  {hop.address or '*'}{name}{marker}", highlight=False)
+
+    _emit(ctx, "traceroute", hops, human)
+    if not any(hop.reached for hop in hops):
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("resolve", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("target")
+@option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
+@click.pass_context
+def cli_resolve(ctx: click.Context, target: str, *, ipv4: bool, ipv6: bool) -> None:
+    """Resolve a hostname to its addresses."""
+
+    try:
+        addresses = resolve_target(target, family=_family(ipv4=ipv4, ipv6=ipv6))
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, "resolve", exc)
+        return
+
+    payload = {"target": target, "addresses": addresses}
+    _emit(ctx, "resolve", payload, lambda: console.print("\n".join(addresses), highlight=False))
+
+
+@cli.command("reverse-dns", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("ip")
+@click.pass_context
+def cli_reverse_dns(ctx: click.Context, ip: str) -> None:
+    """Resolve an address back to a hostname."""
+
+    hostname = reverse_dns(ip)
+    payload = {"ip": ip, "hostname": hostname}
+    _emit(ctx, "reverse-dns", payload, lambda: console.print(hostname or "(no PTR record)", highlight=False))
+    if hostname is None:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("interfaces", context_settings=CLICK_CONTEXT_SETTINGS)
+@click.pass_context
+def cli_interfaces(ctx: click.Context) -> None:
+    """List local network interfaces."""
+
+    interfaces = local_interfaces()
+
+    def human() -> None:
+        table = Table("interface", "up", "loopback", "mac", "addresses")
+        for item in interfaces:
+            addresses = ", ".join(f"{address}/{prefix}" for address, prefix in (*item.ipv4, *item.ipv6))
+            table.add_row(item.name, "yes" if item.is_up else "no", "yes" if item.is_loopback else "no", item.mac or "-", addresses or "-")
+        console.print(table)
+
+    _emit(ctx, "interfaces", interfaces, human)
+
+
+@cli.command("capabilities", context_settings=CLICK_CONTEXT_SETTINGS)
+@click.pass_context
+def cli_capabilities(ctx: click.Context) -> None:
+    """Report what this host can actually do.
+
+    The machine-readable form of every "unsupported here" message, so a caller
+    can find out without provoking an error first.
+    """
+
+    capabilities = _probe_capabilities()
+
+    def human() -> None:
+        table = Table("capability", "available")
+        for name, available in capabilities.items():
+            table.add_row(name, "yes" if available else "no")
+        console.print(table)
+
+    _emit(ctx, "capabilities", capabilities, human)
+
+
+def _probe_capabilities() -> dict[str, bool]:
+    """Return which platform capabilities this process actually has."""
+
+    icmp_v4 = icmp_available(AddressFamily.IPV4)
+    icmp_v6 = icmp_available(AddressFamily.IPV6)
+    return {
+        "icmp_ipv4": icmp_v4,
+        "icmp_ipv6": icmp_v6,
+        "traceroute": _traceroute_available(icmp_v4=icmp_v4),
+    }
+
+
+def _traceroute_available(*, icmp_v4: bool) -> bool:
+    """Return whether expired hops can be observed here.
+
+    Asked of a real transport rather than inferred from the platform, for the
+    same reason traceroute itself refuses on the capability: setting a hop
+    limit and observing its expiry come apart on macOS.
+    """
+
+    if not icmp_v4:
+        return False
+    if sys.platform == "win32":  # pragma: no cover - Windows only
+        return True
+    from .transport_posix import PosixEchoTransport  # noqa: PLC0415 - POSIX-only import, never reached on Windows
+
+    try:
+        with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4) as transport:
+            return transport.supports_ttl_discovery
+    except IPScoutError:  # pragma: no cover - guarded by icmp_v4 above
+        return False
 
 
 @cli.command("info", context_settings=CLICK_CONTEXT_SETTINGS)
-def cli_info() -> None:
-    """Print resolved metadata so users can inspect installation details."""
-    __init__conf__.print_info()
+@click.pass_context
+def cli_info(ctx: click.Context) -> None:
+    """Print resolved package metadata."""
 
-
-@cli.command("hello", context_settings=CLICK_CONTEXT_SETTINGS)
-def cli_hello() -> None:
-    """Demonstrate the success path by emitting the canonical greeting."""
-    emit_greeting()
-
-
-@cli.command("fail", context_settings=CLICK_CONTEXT_SETTINGS)
-def cli_fail() -> None:
-    """Trigger the intentional failure helper to test error handling."""
-    raise_intentional_failure()
+    payload = {
+        "name": __init__conf__.name,
+        "version": __init__conf__.version,
+        "title": __init__conf__.title,
+        "homepage": __init__conf__.homepage,
+        "author": __init__conf__.author,
+        "shell_command": __init__conf__.shell_command,
+    }
+    _emit(ctx, "info", payload, __init__conf__.print_info)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Execute the CLI and return the exit code.
-
-    This is the entry point used by console scripts and python -m execution.
+    """Run the CLI and return its exit code.
 
     Args:
-        argv: Optional sequence of CLI arguments. None uses sys.argv.
+        argv: Arguments to parse. ``None`` uses ``sys.argv``.
 
     Returns:
-        Exit code: 0 for success, non-zero for errors.
+        ``0`` reached, ``1`` not reached, ``2`` error. Signals and a broken
+        pipe map to their conventional codes via ``lib_cli_exit_tools``.
+
+    Note:
+        Delegates to ``lib_cli_exit_tools.run_cli`` for signal handling
+        (SIGINT/SIGTERM/SIGBREAK), ``BrokenPipeError`` - which a JSON-emitting
+        CLI meets the moment someone pipes it into ``head`` or ``jq`` - errno
+        mapping, and stream flushing. A local exception handler is injected so
+        an escaping error is still serialised into the JSON envelope rather
+        than printed as a traceback into a stream the caller is parsing.
+
+        Requires ``lib_cli_exit_tools >= 2.3.4``: earlier releases discarded
+        Click's return value, which would collapse the not-reached exit code
+        of 1 into 0.
 
     Examples:
-        >>> main(["hello"])
-        Hello World
+        The command prints its result, so the output is captured here to leave
+        just the exit code visible.
+
+        >>> import contextlib, io
+        >>> with contextlib.redirect_stdout(io.StringIO()):
+        ...     code = main(["--json", "resolve", "localhost"])
+        >>> code
         0
 
+        A host that does not answer exits 1, distinctly from an error:
+
+        >>> with contextlib.redirect_stdout(io.StringIO()):
+        ...     code = main(["--json", "reachable", "nothing.invalid"])
+        >>> code
+        1
+
     """
-    argv_list = list(argv) if argv else sys.argv[1:]
+
+    argv_list = list(argv) if argv is not None else sys.argv[1:]
+    # Read the output flag from argv rather than the Click context: an error
+    # can escape before the context exists, and a traceback would then land in
+    # a stream the caller is parsing as JSON.
+    as_json = "--json" in argv_list or "-j" in argv_list
     show_traceback = "--no-traceback" not in argv_list
 
-    if show_traceback:
-        install_rich_traceback(show_locals=True)
+    lib_cli_exit_tools.config.traceback = show_traceback and not as_json
 
-    try:
-        cli(args=argv, standalone_mode=False, prog_name=__init__conf__.shell_command)
-        return 0
-    except SystemExit as exc:
-        return _exit_code_from(exc)
-    except Exception as exc:
-        _print_error(exc, show_traceback=show_traceback)
-        return 1
+    return lib_cli_exit_tools.run_cli(
+        cli,
+        argv_list,
+        prog_name=__init__conf__.shell_command,
+        exception_handler=_exception_handler(as_json=as_json),
+    )
 
 
-def _print_error(exc: Exception, *, show_traceback: bool) -> None:
-    """Print error to console with or without full traceback.
+def _exception_handler(*, as_json: bool) -> Callable[[BaseException], int]:
+    """Return the handler run_cli should use for an escaping exception.
 
-    Args:
-        exc: The exception to display.
-        show_traceback: If True, show full rich traceback with locals.
-            If False, show simple one-line error message.
-
+    Keeps ``lib_cli_exit_tools``'s exit-code mapping - signals, broken pipe,
+    errno - while making sure that in JSON mode the report is data rather than
+    a traceback.
     """
-    if show_traceback:
-        tb = Traceback.from_exception(
-            type(exc),
-            exc,
-            exc.__traceback__,
-            show_locals=True,
-            width=120,
-        )
-        console.print(tb)
-    else:
-        console.print(f"Error: {type(exc).__name__}: {exc}", style=_ERROR_STYLE)
+
+    def handle(exc: BaseException) -> int:
+        code = lib_cli_exit_tools.get_system_exit_code(exc)
+        if as_json:
+            click.echo(dumps({"ok": False, "command": None, "error": {"type": type(exc).__name__, "message": str(exc)}}))
+            return code
+        lib_cli_exit_tools.print_exception_message()
+        return code
+
+    return handle

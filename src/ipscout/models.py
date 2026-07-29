@@ -45,8 +45,9 @@ __all__ = [
 #: Value the old library used for "no timing data available".
 NO_TIME_MS = -1.0
 
-#: Value the old library used for "no address determined".
-UNKNOWN_IP = "0.0.0.0"  # noqa: S104  # nosec B104 - reported as a value for compatibility, never bound to
+#: Value the old library used for "no address determined". Reported back as a
+#: value for compatibility; nothing is ever bound to it.
+UNKNOWN_IP = "0.0.0.0"  # noqa: S104  # nosec B104
 
 
 class AddressFamily(enum.Enum):

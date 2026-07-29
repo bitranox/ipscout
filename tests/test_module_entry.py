@@ -1,68 +1,56 @@
-"""Module entry stories ensuring `python -m` mirrors the CLI."""
+"""Module-entry stories: ``python -m ipscout`` must behave exactly like the script."""
 
 from __future__ import annotations
 
 import runpy
 import sys
-from typing import TYPE_CHECKING
 
 import pytest
 
 from ipscout import cli as cli_mod
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+pytestmark = pytest.mark.os_agnostic
+
+NEVER_RESOLVES = "nothing.invalid"
 
 
-@pytest.mark.os_agnostic
-def test_when_module_entry_returns_zero_the_story_matches_cli(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Module entry should successfully execute hello command."""
-    monkeypatch.setattr(sys, "argv", ["ipscout", "hello"], raising=False)
+def _run_module(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
+    """Run ``python -m ipscout`` with ``argv`` and return its exit code."""
 
-    with pytest.raises(SystemExit) as exc:
+    monkeypatch.setattr(sys, "argv", ["ipscout", *argv], raising=False)
+    with pytest.raises(SystemExit) as exit_info:
         runpy.run_module("ipscout.__main__", run_name="__main__")
-
-    assert exc.value.code == 0
-
-
-@pytest.mark.os_agnostic
-def test_when_module_entry_raises_the_exit_helpers_format_the_song(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Module entry should handle exceptions and return non-zero exit code."""
-    monkeypatch.setattr(sys, "argv", ["ipscout", "fail"], raising=False)
-
-    with pytest.raises(SystemExit) as exc:
-        runpy.run_module("ipscout.__main__", run_name="__main__")
-
-    assert exc.value.code != 0
-    assert exc.value.code is not None
+    code = exit_info.value.code
+    return code if isinstance(code, int) else 0
 
 
-@pytest.mark.os_agnostic
-def test_when_traceback_flag_is_used_via_module_entry_the_full_poem_is_printed(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    strip_ansi: Callable[[str], str],
-) -> None:
-    """Module entry with --traceback should show full traceback."""
-    monkeypatch.setattr(sys, "argv", ["ipscout", "--traceback", "fail"])
-
-    with pytest.raises(SystemExit) as exc:
-        runpy.run_module("ipscout.__main__", run_name="__main__")
-
-    captured = capsys.readouterr()
-    plain_out = strip_ansi(captured.out)
-    plain_err = strip_ansi(captured.err)
-    combined = plain_out + plain_err
-
-    assert exc.value.code != 0
-    # With rich traceback we should see error information
-    assert "RuntimeError" in combined or "I should fail" in combined
+def test_a_successful_command_exits_zero_through_the_module_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _run_module(monkeypatch, ["resolve", "localhost"]) == 0
 
 
-@pytest.mark.os_agnostic
-def test_when_module_entry_imports_cli_the_alias_stays_intact() -> None:
-    """CLI name should be accessible."""
-    assert hasattr(cli_mod.cli, "name")
+def test_an_error_exits_non_zero_through_the_module_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _run_module(monkeypatch, ["resolve", NEVER_RESOLVES]) != 0
+
+
+def test_the_module_entry_honours_the_json_flag(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import json
+
+    _run_module(monkeypatch, ["--json", "resolve", "localhost"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["command"] == "resolve"
+
+
+def test_the_module_entry_reports_a_failure_as_json_too(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import json
+
+    code = _run_module(monkeypatch, ["--json", "resolve", NEVER_RESOLVES])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert code != 0
+
+
+def test_the_cli_group_is_importable_under_its_name() -> None:
+    assert cli_mod.cli.name is not None

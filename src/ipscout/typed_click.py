@@ -29,6 +29,7 @@ _CommandDecorator = Callable[[Callable[..., Any]], Callable[..., Any]]
 class _RichClickDecorators(Protocol):
     """rich_click's decorator surface, declared with complete types."""
 
+    argument: Callable[..., _CommandDecorator]
     option: Callable[..., _CommandDecorator]
     version_option: Callable[..., _CommandDecorator]
 
@@ -36,6 +37,11 @@ class _RichClickDecorators(Protocol):
 # ``cast`` is type-only; at runtime these forward to rich_click's own decorators,
 # so ``RichOption``/``RichArgument`` behavior is unchanged.
 _click = cast("_RichClickDecorators", click)
+
+
+def argument(*param_decls: str, **attrs: Any) -> _CommandDecorator:
+    """Typed wrapper over :func:`rich_click.argument`. See module docstring."""
+    return _click.argument(*param_decls, **attrs)
 
 
 def option(*param_decls: str, **attrs: Any) -> _CommandDecorator:
@@ -48,4 +54,4 @@ def version_option(*param_decls: str, **attrs: Any) -> _CommandDecorator:
     return _click.version_option(*param_decls, **attrs)
 
 
-__all__ = ["option", "version_option"]
+__all__ = ["argument", "option", "version_option"]
