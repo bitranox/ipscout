@@ -42,7 +42,7 @@ from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import PortState, ScanMethod
 from .pool import gather_bounded
 from .routes import query_route
-from .tcpsyn import build_syn, parse_tcp_reply
+from .tcpsyn import build_syn, read_reply
 
 __all__ = ["DEFAULT_CONCURRENCY", "MAX_PORT", "ascan_ports", "choose_source_port", "parse_ports", "scan_ports", "syn_scan"]
 
@@ -279,12 +279,12 @@ def _syn_exchange(  # noqa: PLR0913 - one parameter per piece of the exchange, a
                 packet = receiver.recv(65535)
             except (TimeoutError, OSError):
                 break
-            for port in list(outstanding):
-                state = parse_tcp_reply(packet, source_port=source_port, target_port=port, peer_ip=host)
-                if state is not None:
-                    found[port] = state
-                    outstanding.discard(port)
-                    break
+            # The packet names its own port, so it is read once and looked
+            # up. Testing every outstanding port against it is quadratic.
+            answer = read_reply(packet, source_port=source_port, peer_ip=host)
+            if answer is not None and answer[0] in outstanding:
+                found[answer[0]] = answer[1]
+                outstanding.discard(answer[0])
         return found
     finally:
         with contextlib.suppress(OSError):

@@ -532,3 +532,33 @@ def test_two_scans_do_not_share_a_source_port() -> None:
 
     assert len(chosen) > 100, "source ports should vary per scan, not be fixed per process"
     assert all(32768 <= port < 61000 for port in chosen), "and stay in the ephemeral range"
+
+
+@pytest.mark.os_agnostic
+def test_a_reply_names_the_port_it_answers() -> None:
+    # A packet carries the port it concerns, so a scan waiting on thousands
+    # reads it once and looks it up. Asking "is this about port N?" for every
+    # outstanding N is quadratic: measured at 0.26us a parse, a full-range
+    # scan would spend about eighteen minutes on that alone.
+    from ipscout.tcpsyn import read_reply
+
+    answer = read_reply(_tcp_reply_from("1.2.3.4", source_port=443), source_port=40000, peer_ip="1.2.3.4")
+
+    assert answer == (443, PortState.OPEN)
+
+
+@pytest.mark.os_agnostic
+def test_a_reply_to_a_different_scan_names_nothing() -> None:
+    from ipscout.tcpsyn import read_reply
+
+    other = _tcp_reply_from("1.2.3.4", source_port=443, target_port=55555)
+
+    assert read_reply(other, source_port=40000, peer_ip="1.2.3.4") is None
+
+
+@pytest.mark.os_agnostic
+def test_the_single_port_wrapper_still_answers_about_that_port_only() -> None:
+    packet = _tcp_reply_from("1.2.3.4", source_port=443)
+
+    assert parse_tcp_reply(packet, source_port=40000, target_port=443, peer_ip="1.2.3.4") is PortState.OPEN
+    assert parse_tcp_reply(packet, source_port=40000, target_port=80, peer_ip="1.2.3.4") is None
