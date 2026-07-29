@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import os
 import socket
 import sys
@@ -46,6 +47,11 @@ DEFAULT_CONCURRENCY = 256
 #: Ports are 16-bit, and zero is not a usable destination.
 MIN_PORT = 1
 MAX_PORT = 65535
+
+#: How Windows numbers a refused connection: the sockets layer and the
+#: overlapped layer disagree, and neither matches the POSIX errno.
+_WSAECONNREFUSED = 10061
+_ERROR_CONNECTION_REFUSED = 1225
 
 #: The ephemeral range a SYN scan picks its source port from.
 _EPHEMERAL_LOW = 32768
@@ -112,6 +118,25 @@ def _wanted(ports: str | list[int]) -> list[int]:
     """Return the ports to scan, however they were specified."""
 
     return parse_ports(ports) if isinstance(ports, str) else sorted(set(ports))
+
+
+def _is_refusal(exc: OSError) -> bool:
+    """Return whether an error means the target actively refused.
+
+    A refusal is an answer - something is there to send the reset - so it must
+    be told apart from silence. The exception class carries that on most
+    platforms, but not dependably enough to rely on alone: the same condition
+    can arrive as a bare OSError with the errno set, and Windows numbers it
+    differently again (WSAECONNREFUSED, and 1225 from the overlapped layer).
+    Checking all three is cheaper than being wrong about a firewall.
+    """
+
+    if isinstance(exc, ConnectionRefusedError):
+        return True
+    codes = {errno.ECONNREFUSED, _WSAECONNREFUSED, _ERROR_CONNECTION_REFUSED}
+    if exc.errno in codes:
+        return True
+    return getattr(exc, "winerror", None) in codes
 
 
 def _source_for(host: str) -> str | None:
@@ -318,13 +343,12 @@ async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = 1.0
         async with limit:
             try:
                 _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
-            except ConnectionRefusedError:
-                return port, PortState.CLOSED
             except (TimeoutError, asyncio.TimeoutError):
                 return port, PortState.FILTERED
-            except (OSError, ValueError):
-                # Unreachable, or a name that does not resolve: not an answer
-                # about the port itself.
+            except OSError as exc:
+                return port, PortState.CLOSED if _is_refusal(exc) else PortState.FILTERED
+            except ValueError:
+                # A name that does not resolve is not an answer about the port.
                 return port, PortState.FILTERED
             writer.close()
             with contextlib.suppress(OSError, asyncio.TimeoutError, ConnectionError):

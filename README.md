@@ -8,7 +8,7 @@
 [![PyPI](https://img.shields.io/pypi/v/ipscout.svg)](https://pypi.org/project/ipscout/)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/ipscout.svg)](https://pypi.org/project/ipscout/)
 [![Code Style: Ruff](https://img.shields.io/badge/Code%20Style-Ruff-46A3FF?logo=ruff&labelColor=000)](https://docs.astral.sh/ruff/)
-[![codecov](https://codecov.io/gh/bitranox/ipscout/graph/badge.svg?token=UFBaUDIgRk)](https://codecov.io/gh/bitranox/ipscout)
+[![codecov](https://codecov.io/gh/bitranox/ipscout/graph/badge.svg?token=cMExEFiuhI)](https://codecov.io/gh/bitranox/ipscout)
 [![Maintainability](https://qlty.sh/badges/041ba2c1-37d6-40bb-85a0-ec5a8a0aca0c/maintainability.svg)](https://qlty.sh/gh/bitranox/projects/ipscout)
 [![security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 

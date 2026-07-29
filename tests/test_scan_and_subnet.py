@@ -89,7 +89,9 @@ def test_a_refused_port_is_closed_rather_than_merely_not_open(refused_port: int)
     # A refusal is an answer: it proves something is there to refuse. Folding
     # it in with silence would hide the difference between a closed port and a
     # firewall, which is the main thing a scan is asked to tell apart.
-    assert ipscout.scan_ports("127.0.0.1", [refused_port], timeout=1.0)[refused_port] is PortState.CLOSED
+    state = ipscout.scan_ports("127.0.0.1", [refused_port], timeout=1.0)[refused_port]
+
+    assert state is PortState.CLOSED, f"port {refused_port} on loopback reported {state.value}, not a refusal"
 
 
 @pytest.mark.os_agnostic
