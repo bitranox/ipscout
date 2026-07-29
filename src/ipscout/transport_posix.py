@@ -42,7 +42,13 @@ from .models import AddressFamily
 from .ports import EchoResult
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import TracebackType
+
+    #: How a transport obtains its socket. Injecting this is the seam that lets
+    #: the matching, timeout and drain logic be exercised over ordinary UDP on
+    #: hosts where opening an ICMP socket is not permitted at all.
+    SocketFactory = Callable[[AddressFamily], socket.socket]
 
 __all__ = ["AsyncPosixEchoTransport", "PosixEchoTransport", "open_socket"]
 
@@ -121,12 +127,19 @@ class PosixEchoTransport:
 
     """
 
-    def __init__(self, address: str, family: AddressFamily, *, payload_size: int = 56) -> None:
+    def __init__(
+        self,
+        address: str,
+        family: AddressFamily,
+        *,
+        payload_size: int = 56,
+        socket_factory: SocketFactory | None = None,
+    ) -> None:
         self._address = address
         self._family = family
         self._is_ipv6 = family is AddressFamily.IPV6
         self._payload_size = payload_size
-        self._socket = open_socket(family)
+        self._socket = (socket_factory or open_socket)(family)
 
     @property
     def supports_ttl(self) -> bool:
@@ -229,12 +242,19 @@ class AsyncPosixEchoTransport:
 
     """
 
-    def __init__(self, address: str, family: AddressFamily, *, payload_size: int = 56) -> None:
+    def __init__(
+        self,
+        address: str,
+        family: AddressFamily,
+        *,
+        payload_size: int = 56,
+        socket_factory: SocketFactory | None = None,
+    ) -> None:
         self._address = address
         self._family = family
         self._is_ipv6 = family is AddressFamily.IPV6
         self._payload_size = payload_size
-        self._socket = open_socket(family)
+        self._socket = (socket_factory or open_socket)(family)
         # settimeout(0) is setblocking(False) without a boolean positional arg.
         self._socket.settimeout(0)
         self._waiters: dict[bytes, asyncio.Future[tuple[float, str]]] = {}

@@ -44,17 +44,32 @@ FAR_TARGET = "1.1.1.1"
 ICMP_TIME_EXCEEDED = 11
 
 
+def _socket_const(name: str) -> int | None:
+    """Return a socket constant that exists only on some platforms.
+
+    ``IP_RECVERR`` and ``MSG_ERRQUEUE`` are Linux-only and absent from the
+    macOS type stubs, so a direct attribute access fails type checking there
+    even when guarded at runtime. Reaching them by name keeps every call site
+    typed without silencing the checker on one platform.
+    """
+
+    value = getattr(socket, name, None)
+    return value if isinstance(value, int) else None
+
+
 def _probe_error_queue() -> tuple[bool, str]:
     """Return whether MSG_ERRQUEUE yields a Time Exceeded, and what happened."""
 
-    if not hasattr(socket, "MSG_ERRQUEUE"):
+    msg_errqueue = _socket_const("MSG_ERRQUEUE")
+    ip_recverr = _socket_const("IP_RECVERR")
+    if msg_errqueue is None:
         return False, "socket.MSG_ERRQUEUE is not defined on this platform"
-    if not hasattr(socket, "IP_RECVERR"):
+    if ip_recverr is None:
         return False, "socket.IP_RECVERR is not defined on this platform"
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
     try:
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_RECVERR, 1)
+        sock.setsockopt(socket.IPPROTO_IP, ip_recverr, 1)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 1)
         sock.settimeout(3.0)
         datagram, _token = packet.build_echo_request(sequence=1)
@@ -64,7 +79,7 @@ def _probe_error_queue() -> tuple[bool, str]:
         with contextlib.suppress(TimeoutError, OSError):
             sock.recvfrom(4096)
         try:
-            _data, ancillary, _flags, addr = sock.recvmsg(4096, 4096, socket.MSG_ERRQUEUE)
+            _data, ancillary, _flags, addr = sock.recvmsg(4096, 4096, msg_errqueue)
         except (TimeoutError, OSError) as exc:
             return False, f"MSG_ERRQUEUE recvmsg failed: {exc!r}"
         return True, f"MSG_ERRQUEUE delivered {len(ancillary)} cmsg from {addr}"
