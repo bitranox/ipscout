@@ -51,25 +51,32 @@ from .models import (
     CommandName,
     Interface,
     InterfaceAddress,
+    LeaseInfo,
     MacLookup,
     MacScope,
     Neighbour,
     NeighbourState,
     PackageInfo,
+    PortState,
     ProbeMethod,
     ReachabilityReport,
     ResolveReport,
     ResponseObject,
     ReverseDnsReport,
     RouteInfo,
+    ScanMethod,
     SubnetInfo,
     TraceHop,
 )
+from .mtu import path_mtu
 from .neighbours import get_mac_address, lookup_mac, neighbours, normalise_mac
+from .portscan import ascan_ports, parse_ports, scan_ports
 from .resolve import resolve, reverse_dns
 from .routes import default_gateway, query_route
 from .scan import arp_scan, find_ip_by_mac, local_networks
+from .subnet import subnet_info
 from .traceroute import atrace_path, atraceroute, trace_path, traceroute
+from .wol import wake_on_lan
 
 __all__ = [
     "AddressFamily",
@@ -81,23 +88,27 @@ __all__ = [
     "IPScoutUnsupportedError",
     "Interface",
     "InterfaceAddress",
+    "LeaseInfo",
     "MacLookup",
     "MacScope",
     "Neighbour",
     "NeighbourState",
     "PackageInfo",
+    "PortState",
     "ProbeMethod",
     "ReachabilityReport",
     "ResolveReport",
     "ResponseObject",
     "ReverseDnsReport",
     "RouteInfo",
+    "ScanMethod",
     "SubnetInfo",
     "TraceHop",
     "ais_reachable",
     "aping",
     "aping_many",
     "arp_scan",
+    "ascan_ports",
     "atrace_path",
     "atraceroute",
     "default_gateway",
@@ -110,12 +121,17 @@ __all__ = [
     "lookup_mac",
     "neighbours",
     "normalise_mac",
+    "parse_ports",
+    "path_mtu",
     "ping",
     "ping_many",
     "print_info",
     "query_route",
     "resolve",
     "reverse_dns",
+    "scan_ports",
+    "subnet_info",
     "trace_path",
     "traceroute",
+    "wake_on_lan",
 ]

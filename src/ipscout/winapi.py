@@ -65,6 +65,7 @@ __all__ = [
     "iphlpapi",
     "ipv4_to_string",
     "ipv6_words_to_string",
+    "last_error",
     "sockaddr_inet_to_string",
     "status_message",
     "string_to_ipv4",
@@ -339,6 +340,27 @@ WIN_AF_INET = 2
 WIN_AF_INET6 = 23
 
 
+def last_error() -> int:
+    """Return the thread's last Windows error code, or 0 elsewhere.
+
+    ``ctypes.get_last_error`` is declared only for Windows in the type stubs,
+    so reading it directly is an unknown attribute on the other two platform
+    checks. Looking it up by name keeps every call site typed without turning
+    a rule off.
+
+    Examples:
+        >>> isinstance(last_error(), int)
+        True
+
+    """
+
+    getter = getattr(ctypes, "get_last_error", None)
+    if getter is None:  # pragma: no cover - POSIX
+        return 0
+    value = getter()
+    return value if isinstance(value, int) else 0
+
+
 def sockaddr_inet_to_string(sockaddr: SOCKADDR_INET) -> str | None:
     """Return the address held in a ``SOCKADDR_INET``, or None if it holds none.
 
@@ -514,6 +536,12 @@ def _configure(library: Any) -> None:  # pragma: no cover - Windows only
         ctypes.c_uint32,  # SrcIP, 0 to let the stack choose
         ctypes.POINTER(ctypes.c_uint8 * 8),  # PhysAddr, written by the call
         ctypes.POINTER(ctypes.c_uint32),  # PhysAddrLen, in and out
+    )
+
+    library.ResolveIpNetEntry2.restype = ctypes.c_uint32
+    library.ResolveIpNetEntry2.argtypes = (
+        ctypes.POINTER(MIB_IPNET_ROW2),  # Row, filled in by the call
+        ctypes.c_void_p,  # SourceAddress, optional
     )
 
     library.GetIpNetTable2.restype = ctypes.c_uint32

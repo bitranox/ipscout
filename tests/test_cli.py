@@ -37,6 +37,10 @@ ALL_COMMANDS: list[list[str]] = [
     ["mac", "127.0.0.1"],
     ["find-ip", "aa:bb:cc:dd:ee:ff"],
     ["arp-scan", "--network", "127.0.0.0/30"],
+    ["subnet"],
+    ["scan-ports", "127.0.0.1", "--ports", "1", "--timeout", "0.3"],
+    ["mtu", "127.0.0.1"],
+    ["wake", "aa:bb:cc:dd:ee:ff", "--broadcast", "127.0.0.1"],
     ["capabilities"],
     ["info"],
 ]

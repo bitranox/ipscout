@@ -100,6 +100,20 @@ def open_socket(family: AddressFamily) -> socket.socket:
             raise IPScoutPermissionError(msg) from raw_error
 
 
+def _is_raw_socket(sock: socket.socket) -> bool:
+    """Return whether this is a raw socket rather than a datagram one.
+
+    Worth knowing because the two see different things: a raw ICMP socket
+    receives Time Exceeded messages directly, which is what lets traceroute
+    work on macOS when the process is privileged.
+    """
+
+    try:
+        return sock.type == socket.SOCK_RAW
+    except (AttributeError, OSError):  # pragma: no cover - exotic socket doubles
+        return False
+
+
 class RecvMsg(Protocol):
     """The shape of ``socket.recvmsg``, which exists only on POSIX."""
 
@@ -303,6 +317,7 @@ class PosixEchoTransport:
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
         self._errqueue = _enable_error_queue(self._socket, is_ipv6=self._is_ipv6)
+        self._is_raw = _is_raw_socket(self._socket)
 
     @property
     def supports_ttl(self) -> bool:
@@ -315,19 +330,23 @@ class PosixEchoTransport:
         """Return whether expired hops can actually be *observed* here.
 
         Setting a hop limit and seeing what a router says about it are separate
-        capabilities, and macOS has the first without the second. Measured on
-        a macOS runner: neither the error queue nor a plain receive surfaces
-        Time Exceeded, so traceroute reports the platform unsupported instead
-        of returning a column of silent hops that looks like a broken network.
+        capabilities, and they come apart by socket type rather than by
+        platform.
+
+        Linux surfaces them on the error queue, on any socket. macOS surfaces
+        them nowhere on an unprivileged datagram socket - measured on a macOS
+        runner - but delivers them as ordinary ICMP Time Exceeded packets on a
+        *raw* socket, which a privileged process gets. So this is asked of the
+        socket in hand rather than of ``sys.platform``.
         """
 
-        return self._errqueue is not None
+        return self._errqueue is not None or self._is_raw
 
     def _read_ttl_expired(self) -> str | None:
         """Return the router that discarded the packet, if one reported doing so."""
 
         if self._errqueue is None:
-            return None
+            return self._read_ttl_expired_raw() if self._is_raw else None
         recvmsg, flag = self._errqueue
         try:
             _data, ancillary, _flags, _addr = recvmsg(4096, 4096, flag)
@@ -338,6 +357,28 @@ class PosixEchoTransport:
             if offender is not None:
                 return offender
         return None
+
+    def _read_ttl_expired_raw(self) -> str | None:
+        """Return the router named by a Time Exceeded packet on a raw socket.
+
+        Where there is no error queue, a raw socket still receives the ICMP
+        Time Exceeded message itself, and its source address is the router
+        that discarded the probe. This is the path macOS traceroute runs on
+        when the process is privileged enough to hold a raw socket.
+        """
+
+        try:
+            data, address = self._socket.recvfrom(4096)
+        except (TimeoutError, OSError):
+            return None
+        if not packet.is_time_exceeded(data, is_ipv6=self._is_ipv6):
+            return None
+        # recvfrom's address element type is unknown to the checker, so the
+        # tuple is cast rather than the value read out of it: indexing an
+        # untyped tuple stays untyped however the target is annotated.
+        if not isinstance(address, tuple) or not address:
+            return None
+        return cast("tuple[str, ...]", address)[0]
 
     def _apply_ttl(self, ttl: int | None) -> None:
         """Set the outgoing hop limit for subsequent packets."""
@@ -463,6 +504,7 @@ class AsyncPosixEchoTransport:
         self._waiters: dict[bytes, asyncio.Future[tuple[float, str]]] = {}
         self._reader_installed = False
         self._errqueue = _enable_error_queue(self._socket, is_ipv6=self._is_ipv6)
+        self._is_raw = _is_raw_socket(self._socket)
 
     @property
     def supports_ttl(self) -> bool:
@@ -474,7 +516,7 @@ class AsyncPosixEchoTransport:
     def supports_ttl_discovery(self) -> bool:
         """Return whether expired hops can actually be observed here."""
 
-        return self._errqueue is not None
+        return self._errqueue is not None or self._is_raw
 
     def _ensure_reader(self) -> None:
         """Register the socket with the running loop, once."""

@@ -50,6 +50,7 @@ __all__ = [
     "build_echo_request",
     "checksum",
     "is_echo_reply",
+    "is_time_exceeded",
     "parse_echo_reply",
     "strip_ip_header",
 ]
@@ -374,3 +375,42 @@ def is_echo_reply(parsed: ParsedReply, *, is_ipv6: bool) -> bool:
 
     expected = ECHO_REPLY_V6 if is_ipv6 else ECHO_REPLY_V4
     return parsed.icmp_type == expected
+
+
+#: ICMP Time Exceeded: type 11 on IPv4, type 3 on IPv6. A router that
+#: discards a probe for running out of hops sends one of these, and its source
+#: address is the router itself.
+TIME_EXCEEDED_V4 = 11
+TIME_EXCEEDED_V6 = 3
+
+
+def is_time_exceeded(datagram: bytes, *, is_ipv6: bool) -> bool:
+    """Return whether a datagram is an ICMP Time Exceeded message.
+
+    Args:
+        datagram: The bytes received, with or without a leading IP header.
+        is_ipv6: Which protocol's type numbering applies. The two disagree:
+            11 on IPv4 is Time Exceeded, while 3 on IPv6 is - and 3 on IPv4
+            means Destination Unreachable instead, so reading it with the
+            wrong family inverts the meaning.
+
+    Returns:
+        Whether this is a router reporting that a probe ran out of hops.
+
+    Examples:
+        >>> is_time_exceeded(bytes([11, 0]) + bytes(6), is_ipv6=False)
+        True
+        >>> is_time_exceeded(bytes([3, 0]) + bytes(6), is_ipv6=False)
+        False
+        >>> is_time_exceeded(bytes([3, 0]) + bytes(6), is_ipv6=True)
+        True
+        >>> is_time_exceeded(b"", is_ipv6=False)
+        False
+
+    """
+
+    body = strip_ip_header(datagram)
+    if not body:
+        return False
+    expected = TIME_EXCEEDED_V6 if is_ipv6 else TIME_EXCEEDED_V4
+    return body[0] == expected

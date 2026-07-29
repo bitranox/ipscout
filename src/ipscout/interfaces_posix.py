@@ -39,6 +39,7 @@ import ipaddress
 import socket
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .models import Interface, InterfaceAddress
 
@@ -193,6 +194,47 @@ def _libc() -> ctypes.CDLL:
     return lib
 
 
+#: SIOCGIFMTU, which differs per platform because the ioctl number encodes
+#: the argument size and the BSD and Linux encodings are not the same.
+_SIOCGIFMTU_LINUX = 0x8921
+_SIOCGIFMTU_BSD = 0xC0206933
+
+#: sizeof(struct ifreq): 16 bytes of name plus a 16-byte union on Linux, and
+#: 32 bytes on the BSDs as well.
+_IFREQ_SIZE = 32
+_IFNAME_MAX = 15
+
+
+def _mtu_of(name: str) -> int | None:
+    """Return an interface's MTU, or None when it cannot be read.
+
+    Linux publishes it in sysfs, which needs no ioctl and no Unix-only module.
+    The BSDs have no sysfs, so they are asked through SIOCGIFMTU instead.
+    """
+
+    if sys.platform.startswith("linux"):
+        try:
+            return int(Path(f"/sys/class/net/{name}/mtu").read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return None
+    return _mtu_by_ioctl(name)
+
+
+def _mtu_by_ioctl(name: str) -> int | None:  # pragma: no cover - BSD only
+    """Return an interface's MTU through SIOCGIFMTU."""
+
+    import fcntl  # noqa: PLC0415 - Unix-only, and only on this path
+
+    request = name.encode()[:_IFNAME_MAX].ljust(_IFREQ_SIZE, b"\x00")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            answer = fcntl.ioctl(sock.fileno(), _SIOCGIFMTU_BSD, request)
+    except (OSError, ValueError):
+        return None
+    # The MTU lands in the union straight after the 16-byte name.
+    return int.from_bytes(answer[16:20], "little") or None
+
+
 def _no_addresses() -> list[InterfaceAddress]:
     """Return an empty address list.
 
@@ -232,6 +274,7 @@ class _Accumulator:
             mac=self.mac,
             is_up=bool(self.flags & _IFF_UP),
             is_loopback=bool(self.flags & _IFF_LOOPBACK),
+            mtu=_mtu_of(name),
         )
 
 

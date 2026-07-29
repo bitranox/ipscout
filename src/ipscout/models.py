@@ -45,17 +45,20 @@ __all__ = [
     "InterfaceAddress",
     "JsonEnvelope",
     "JsonError",
+    "LeaseInfo",
     "MacLookup",
     "MacScope",
     "Neighbour",
     "NeighbourState",
     "PackageInfo",
+    "PortState",
     "ProbeMethod",
     "ReachabilityReport",
     "ResolveReport",
     "ResponseObject",
     "ReverseDnsReport",
     "RouteInfo",
+    "ScanMethod",
     "SubnetInfo",
     "TraceHop",
 ]
@@ -112,6 +115,32 @@ class MacScope(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
+class PortState(str, enum.Enum):
+    """What a scan learned about one port.
+
+    Three states rather than a boolean, because "nothing came back" is a real
+    and different answer from "something refused". A connect scan cannot tell
+    FILTERED from CLOSED; a SYN scan can, which is most of the reason to use
+    one.
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+    FILTERED = "filtered"
+
+
+class ScanMethod(str, enum.Enum):
+    """How a port scan asked its question.
+
+    Carried on the result because the two methods do not measure the same
+    thing: a full connect completes the handshake and lands in the target's
+    logs, while a SYN scan never finishes it and needs a raw socket.
+    """
+
+    CONNECT = "connect"
+    SYN = "syn"
+
+
 class NeighbourState(str, enum.Enum):
     """How much the kernel currently trusts a neighbour-cache entry.
 
@@ -147,6 +176,10 @@ class CommandName(str, enum.Enum):
     MAC = "mac"
     FIND_IP = "find-ip"
     ARP_SCAN = "arp-scan"
+    SUBNET = "subnet"
+    SCAN_PORTS = "scan-ports"
+    MTU = "mtu"
+    WAKE = "wake"
     CAPABILITIES = "capabilities"
     INFO = "info"
 
@@ -316,6 +349,22 @@ class Interface(_Frozen):
     is_up: bool = False
     is_loopback: bool = False
     mtu: int | None = None
+
+
+class LeaseInfo(_Frozen):
+    """What the OS's own DHCP client recorded about a lease.
+
+    Every field is optional because lease stores differ in what they keep, and
+    a host with a static address has no lease at all. An absent field means
+    the store did not say, which is different from a value of zero.
+    """
+
+    dhcp_server: str | None = None
+    router: str | None = None
+    dns_servers: tuple[str, ...] = ()
+    domain: str | None = None
+    obtained: str | None = None
+    expires: str | None = None
 
 
 class Neighbour(_Frozen):

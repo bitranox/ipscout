@@ -232,15 +232,16 @@ root_package = "ipscout"
 name = "Layered dependencies point one way only"
 type = "layers"
 layers = [
-  "ipscout.scan",
+  "ipscout.scan : ipscout.subnet : ipscout.portscan : ipscout.mtu : ipscout.wol",
   "ipscout.api",
   "ipscout.traceroute",
   "ipscout.neighbours",
+  "ipscout.leases_linux",
   "ipscout.interfaces : ipscout.routes",
   "ipscout.service",
   "ipscout.factory",
   "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows : ipscout.routes_linux : ipscout.routes_macos : ipscout.routes_windows : ipscout.neighbours_linux : ipscout.neighbours_macos : ipscout.neighbours_windows",
-  "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi : ipscout.netlink : ipscout.bsdroute : ipscout.arp",
+  "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi : ipscout.netlink : ipscout.bsdroute : ipscout.arp : ipscout.tcpsyn",
   "ipscout.models",
   "ipscout.errors",
 ]

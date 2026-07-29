@@ -47,19 +47,25 @@ from .models import (
     MacScope,
     Neighbour,
     PackageInfo,
+    PortState,
     ReachabilityReport,
     ResolveReport,
     ReverseDnsReport,
     RouteInfo,
+    ScanMethod,
 )
+from .mtu import path_mtu
 from .neighbours import get_mac_address, lookup_mac, neighbours
+from .portscan import scan_ports
 from .resolve import resolve as resolve_target
 from .resolve import reverse_dns
 from .routes import default_gateway, query_route
 from .scan import arp_scan, find_ip_by_mac
 from .serialize import dumps, to_jsonable
+from .subnet import subnet_info
 from .traceroute import traceroute
 from .typed_click import argument, option, version_option
+from .wol import wake_on_lan
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -494,6 +500,113 @@ def cli_arp_scan(ctx: click.Context, *, network: str | None, concurrency: int) -
     _emit(ctx, CommandName.ARP_SCAN, entries, lambda: console.print(_neighbour_table(entries)))
     if not entries:
         ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("subnet", context_settings=CLICK_CONTEXT_SETTINGS)
+@option("--interface", default=None, help="Report only this interface.")
+@click.pass_context
+def cli_subnet(ctx: click.Context, *, interface: str | None) -> None:
+    """Show addressing, gateway and stored DHCP facts per subnet."""
+
+    subnets = subnet_info(interface)
+
+    def human() -> None:
+        table = Table("interface", "address", "network", "broadcast", "gateway", "dns", "mtu")
+        for item in subnets:
+            table.add_row(
+                item.interface,
+                f"{item.address}/{item.prefix_len}",
+                item.network,
+                item.broadcast or "-",
+                item.gateway or "-",
+                ", ".join(item.dns_servers) or "-",
+                str(item.mtu) if item.mtu else "-",
+            )
+        console.print(table)
+
+    _emit(ctx, CommandName.SUBNET, subnets, human)
+    if not subnets:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("scan-ports", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("host")
+@option("--ports", required=True, help="Ports and ranges, as in 22,80,443,8000-8100.")
+@option("--syn", is_flag=True, default=False, help="Half-open SYN scan. Needs root or CAP_NET_RAW.")
+@option("--timeout", type=float, default=1.0, show_default=True, help="Seconds to wait per port.")
+@option("--concurrency", type=int, default=256, show_default=True, help="Connects in flight at once.")
+@click.pass_context
+def cli_scan_ports(  # noqa: PLR0913 - one parameter per CLI option, which is the point of the command
+    ctx: click.Context,
+    host: str,
+    *,
+    ports: str,
+    syn: bool,
+    timeout: float,
+    concurrency: int,
+) -> None:
+    """Report which ports are open, closed or filtered."""
+
+    method = ScanMethod.SYN if syn else ScanMethod.CONNECT
+    try:
+        states = scan_ports(host, ports, method=method, timeout=timeout, concurrency=concurrency)
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, CommandName.SCAN_PORTS, exc)
+        return
+
+    payload = {str(port): state.value for port, state in sorted(states.items())}
+
+    def human() -> None:
+        table = Table("port", "state")
+        for port, state in sorted(states.items()):
+            table.add_row(str(port), state.value)
+        console.print(table)
+
+    _emit(ctx, CommandName.SCAN_PORTS, payload, human)
+    if not any(state is PortState.OPEN for state in states.values()):
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("mtu", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("target")
+@option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
+@click.pass_context
+def cli_mtu(ctx: click.Context, target: str, *, ipv4: bool, ipv6: bool) -> None:
+    """Show the largest packet that reaches a target unfragmented."""
+
+    try:
+        value = path_mtu(target, family=_family(ipv4=ipv4, ipv6=ipv6))
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, CommandName.MTU, exc)
+        return
+
+    # Labelled rather than printed bare: a lone number is also valid JSON,
+    # which makes the human output indistinguishable from the machine one.
+    rendered = f"path MTU to {target}: {value} bytes" if value else f"path MTU to {target}: unavailable"
+    _emit(ctx, CommandName.MTU, {"target": target, "mtu": value}, lambda: console.print(rendered, highlight=False))
+    if value is None:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("wake", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("mac")
+@option("--broadcast", default="255.255.255.255", show_default=True, help="Where to send the magic packet.")
+@option("--port", type=int, default=9, show_default=True, help="UDP port. The NIC matches the payload, not the port.")
+@click.pass_context
+def cli_wake(ctx: click.Context, mac: str, *, broadcast: str, port: int) -> None:
+    """Send a wake-on-LAN magic packet."""
+
+    try:
+        wake_on_lan(mac, broadcast=broadcast, port=port)
+    except (OSError, ValueError) as exc:
+        _fail(ctx, CommandName.WAKE, exc)
+        return
+
+    # Nothing acknowledges a magic packet, so this reports only that it was
+    # sent. Whether the host woke is a separate question, for `reachable`.
+    payload = {"mac": mac, "broadcast": broadcast, "port": port, "sent": True}
+    _emit(ctx, CommandName.WAKE, payload, lambda: console.print(f"magic packet sent to {broadcast}:{port}", highlight=False))
 
 
 @cli.command("capabilities", context_settings=CLICK_CONTEXT_SETTINGS)

@@ -18,7 +18,7 @@ import ipaddress
 import socket
 from typing import Any
 
-from .errors import IPScoutUnsupportedError
+from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily, Neighbour, NeighbourState
 from .winapi import (
     MIB_IPNET_ROW2,
@@ -31,8 +31,12 @@ from .winapi import (
 
 __all__ = ["format_mac", "list_neighbours", "resolve_active", "state_of"]
 
-#: NO_ERROR, the only success value GetIpNetTable2 returns.
+#: NO_ERROR, the only success value these calls return.
 _NO_ERROR = 0
+
+#: ERROR_ACCESS_DENIED: the elevation refusal, worth telling apart from a
+#: neighbour that simply did not answer.
+_ERROR_ACCESS_DENIED = 5
 
 #: An Ethernet hardware address is six bytes; the row's buffer is larger.
 _MAC_LENGTH = 6
@@ -168,6 +172,34 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
         library.FreeMibTable(table)
 
 
+def _resolve_ipv6(library: Any, ip: str) -> str | None:  # pragma: no cover - Windows only
+    """Resolve an IPv6 neighbour through ResolveIpNetEntry2.
+
+    Unlike SendARP this needs elevation, so a refusal here is reported as a
+    permission problem naming the unprivileged alternative rather than being
+    swallowed.
+    """
+
+    row = MIB_IPNET_ROW2()
+    row.Address.si_family = WIN_AF_INET6
+    try:
+        row.Address.Ipv6.sin6_addr[:] = socket.inet_pton(socket.AF_INET6, ip)
+    except OSError:
+        return None
+
+    status = library.ResolveIpNetEntry2(ctypes.byref(row), None)
+    if status == _ERROR_ACCESS_DENIED:
+        msg = (
+            "active IPv6 resolution uses ResolveIpNetEntry2, which needs Administrator on Windows "
+            "(SendARP, used for IPv4, does not). Run elevated, or use arp_scan(), which resolves "
+            "the same addresses unprivileged"
+        )
+        raise IPScoutPermissionError(msg)
+    if status != _NO_ERROR:
+        return None
+    return format_mac(bytes(row.PhysicalAddress), int(row.PhysicalAddressLength))
+
+
 def resolve_active(ip: str) -> str | None:  # pragma: no cover - Windows only
     """Actively resolve one address, sending a real ARP request.
 
@@ -178,25 +210,25 @@ def resolve_active(ip: str) -> str | None:  # pragma: no cover - Windows only
         The hardware address, or ``None`` when nothing answered.
 
     Raises:
-        IPScoutUnsupportedError: The address is IPv6. Windows resolves those
-            through ResolveIpNetEntry2, which does require elevation, so it is
-            not offered here rather than being offered and always failing.
+        IPScoutPermissionError: IPv6 resolution was refused for want of
+            elevation. ``ResolveIpNetEntry2`` requires it; ``SendARP`` does
+            not, so IPv4 works either way.
 
     Note:
-        ``SendARP`` needs no elevation, which makes Windows the one platform
-        where active resolution fits this library's premise. It resolves a host
-        that has never been contacted, without a ping first.
+        IPv4 goes through ``SendARP``, which needs no elevation and makes
+        Windows the one platform where active resolution fits this library's
+        premise unelevated. IPv6 goes through ``ResolveIpNetEntry2``, which
+        does need it and says so rather than being withheld.
 
     """
-
-    if ":" in ip:
-        msg = "active IPv6 resolution needs elevation on Windows; sweep with arp_scan() instead"
-        raise IPScoutUnsupportedError(msg)
 
     try:
         library: Any = iphlpapi()
     except IPScoutUnsupportedError:
         return None
+
+    if ":" in ip:
+        return _resolve_ipv6(library, ip)
 
     try:
         packed = socket.inet_aton(ip)
