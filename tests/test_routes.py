@@ -9,6 +9,7 @@ is exactly the kind of variable-length walk that goes wrong silently.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import socket
 import struct
@@ -19,6 +20,8 @@ from pydantic import ValidationError
 
 import ipscout
 from ipscout import routes_macos as macos
+from ipscout import routes_windows as windows
+from ipscout import winapi
 from ipscout.cli import EXIT_NOT_REACHED, EXIT_OK, cli
 from ipscout.models import AddressFamily, RouteInfo
 
@@ -258,3 +261,60 @@ def test_the_gateway_command_can_report_the_next_hop_toward_one_address() -> Non
 
     assert payload["ok"] is True
     assert payload["data"]["gateway"] is None
+
+
+# --------------------------------------------------------------------------
+# Windows next-hop decoding, over structures built by hand
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_an_on_link_windows_route_reports_no_router() -> None:
+    # GetBestRoute2 does not leave the next hop empty for an on-link
+    # destination: it fills in the unspecified address of the right family,
+    # which decodes as a perfectly valid "0.0.0.0". Reading that as a router
+    # made every Windows job report the loopback route as routed via 0.0.0.0.
+    sockaddr = winapi.SOCKADDR_INET()
+    sockaddr.si_family = winapi.WIN_AF_INET
+
+    assert windows._next_hop(sockaddr) is None
+
+
+@pytest.mark.os_agnostic
+def test_an_unspecified_ipv6_next_hop_reports_no_router() -> None:
+    sockaddr = winapi.SOCKADDR_INET()
+    sockaddr.si_family = winapi.WIN_AF_INET6
+
+    assert windows._next_hop(sockaddr) is None
+
+
+@pytest.mark.os_agnostic
+def test_a_real_windows_next_hop_is_reported() -> None:
+    sockaddr = winapi.SOCKADDR_INET()
+    sockaddr.si_family = winapi.WIN_AF_INET
+    sockaddr.Ipv4.sin_addr[:] = (192, 168, 1, 1)
+
+    assert windows._next_hop(sockaddr) == "192.168.1.1"
+
+
+@pytest.mark.os_agnostic
+def test_a_next_hop_of_no_family_reports_no_router() -> None:
+    assert windows._next_hop(winapi.SOCKADDR_INET()) is None
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("structure", "expected"),
+    [("SOCKADDR_IN", 16), ("SOCKADDR_IN6", 28), ("SOCKADDR_INET", 28), ("IP_ADDRESS_PREFIX", 32), ("MIB_IPFORWARD_ROW2", 104)],
+)
+def test_the_windows_structures_match_their_c_layouts(structure: str, expected: int) -> None:
+    # A short structure would have GetBestRoute2 write past the buffer it was
+    # given, which corrupts memory rather than failing cleanly.
+    assert ctypes.sizeof(getattr(winapi, structure)) == expected
+
+
+@pytest.mark.os_agnostic
+def test_the_forwarding_table_rows_start_at_the_aligned_offset() -> None:
+    # NET_LUID is 64-bit, so the row array begins at 8, not at 4 where the
+    # count ends. Reading from 4 would misparse every row.
+    assert winapi.MIB_IPFORWARD_TABLE2.Table.offset == 8

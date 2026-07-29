@@ -27,6 +27,7 @@ from .errors import IPScoutUnsupportedError
 from .models import RouteInfo
 from .winapi import (
     MIB_IPFORWARD_ROW2,
+    MIB_IPFORWARD_TABLE2,
     SOCKADDR_INET,
     WIN_AF_INET,
     WIN_AF_INET6,
@@ -38,6 +39,10 @@ __all__ = ["default_gateway", "query_route"]
 
 #: NO_ERROR, the only success value GetBestRoute2 returns.
 _NO_ERROR = 0
+
+#: An all-zero next hop means the destination is on-link, not that a router
+#: lives at address zero.
+_UNSPECIFIED = frozenset({"0.0.0.0", "::"})  # noqa: S104  # nosec B104
 
 
 def _destination(address: str, family: int) -> SOCKADDR_INET | None:
@@ -54,6 +59,22 @@ def _destination(address: str, family: int) -> SOCKADDR_INET | None:
     except OSError:
         return None
     return sockaddr
+
+
+def _next_hop(sockaddr: SOCKADDR_INET) -> str | None:
+    """Return the router in a next-hop field, or None when there is none.
+
+    An on-link destination does not come back with an empty next hop. Windows
+    fills the field in with the *unspecified* address of the right family, so
+    it decodes as a perfectly valid "0.0.0.0" that would read as a router at
+    address zero. Measured on a Windows runner, where the loopback route
+    reported exactly that.
+    """
+
+    address = sockaddr_inet_to_string(sockaddr)
+    if address is None:
+        return None
+    return None if address in _UNSPECIFIED else address
 
 
 def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | None:  # pragma: no cover - Windows only
@@ -89,10 +110,8 @@ def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | N
         with contextlib.suppress(OSError, ValueError):
             interface = socket.if_indextoname(row.InterfaceIndex)
 
-    # An on-link destination comes back with the next hop left unspecified,
-    # which reads as family zero and therefore as no gateway.
     return RouteInfo(
-        gateway=sockaddr_inet_to_string(row.NextHop),
+        gateway=_next_hop(row.NextHop),
         interface=interface,
         source=sockaddr_inet_to_string(best_source),
     )
@@ -107,9 +126,50 @@ def default_gateway(family: int = socket.AF_INET) -> RouteInfo | None:  # pragma
     Returns:
         The default route, or ``None`` when this host has none.
 
+    Note:
+        Reads the forwarding table and selects the zero-length destination
+        prefix, rather than asking for the best route to the unspecified
+        address. The latter is the obvious implementation and it is a guess
+        about how the stack resolves ``0.0.0.0``; on Linux the equivalent guess
+        was measurably wrong, answering with loopback. Selecting the prefix
+        that *defines* the default route needs no such assumption.
+
     """
 
-    # The unspecified address is the lookup key the default route matches on;
-    # it is never bound to.
-    unspecified = "::" if family == socket.AF_INET6 else "0.0.0.0"  # noqa: S104  # nosec B104
-    return query_route(unspecified, family)
+    try:
+        library: Any = iphlpapi()
+    except IPScoutUnsupportedError:
+        return None
+
+    win_family = WIN_AF_INET6 if family == socket.AF_INET6 else WIN_AF_INET
+    table = ctypes.POINTER(MIB_IPFORWARD_TABLE2)()
+    if library.GetIpForwardTable2(win_family, ctypes.byref(table)) != _NO_ERROR:
+        return None
+
+    try:
+        count = int(table.contents.NumEntries)
+        # The declared array holds one row; the real table is however many the
+        # call reported. Walking a pointer of known element type keeps every
+        # field typed, which casting to a runtime-sized array does not.
+        rows = ctypes.cast(table.contents.Table, ctypes.POINTER(MIB_IPFORWARD_ROW2))
+        best: RouteInfo | None = None
+        best_metric: int | None = None
+        for index in range(count):
+            row: MIB_IPFORWARD_ROW2 = rows[index]
+            if int(row.DestinationPrefix.PrefixLength) != 0:
+                continue
+            gateway = _next_hop(row.NextHop)
+            if gateway is None:
+                continue
+            # Several default routes can coexist, one per interface; the stack
+            # prefers the lowest metric, so reporting anything else would name
+            # a router this host does not actually use.
+            if best_metric is None or int(row.Metric) < best_metric:
+                interface: str | None = None
+                if int(row.InterfaceIndex):
+                    with contextlib.suppress(OSError, ValueError):
+                        interface = socket.if_indextoname(int(row.InterfaceIndex))
+                best, best_metric = RouteInfo(gateway=gateway, interface=interface), int(row.Metric)
+        return best
+    finally:
+        library.FreeMibTable(table)

@@ -52,6 +52,7 @@ __all__ = [
     "IP_SUCCESS",
     "IP_TTL_EXPIRED_TRANSIT",
     "MIB_IPFORWARD_ROW2",
+    "MIB_IPFORWARD_TABLE2",
     "NET_LUID",
     "SOCKADDR_IN",
     "SOCKADDR_IN6",
@@ -281,6 +282,21 @@ class MIB_IPFORWARD_ROW2(ctypes.Structure):  # noqa: N801 - mirrors the Windows 
     )
 
 
+class MIB_IPFORWARD_TABLE2(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``MIB_IPFORWARD_TABLE2``: a count followed by that many rows.
+
+    Declared with a single-element array, as the C header does. The real row
+    count comes from ``NumEntries``, and the rows are read by casting to an
+    array of that length rather than by trusting this declaration's size.
+    """
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("NumEntries", ctypes.c_uint32),
+        ("Table", MIB_IPFORWARD_ROW2 * 1),
+    )
+
+
 #: Windows numbers AF_INET6 23, not the 10 that POSIX uses. Reading the
 #: platform's own socket.AF_INET6 here would decode IPv6 rows as unknown on
 #: every non-Windows host that inspects a captured structure.
@@ -450,6 +466,15 @@ def _configure(library: Any) -> None:  # pragma: no cover - Windows only
         ctypes.POINTER(MIB_IPFORWARD_ROW2),  # BestRoute, written by the call
         ctypes.POINTER(SOCKADDR_INET),  # BestSourceAddress, written by the call
     )
+
+    library.GetIpForwardTable2.restype = ctypes.c_uint32
+    library.GetIpForwardTable2.argtypes = (
+        ctypes.c_uint16,  # Family
+        ctypes.POINTER(ctypes.POINTER(MIB_IPFORWARD_TABLE2)),  # Table, allocated by the call
+    )
+
+    library.FreeMibTable.restype = None
+    library.FreeMibTable.argtypes = (ctypes.c_void_p,)
 
     library.Icmp6SendEcho2.restype = ctypes.c_uint32
     library.Icmp6SendEcho2.argtypes = (

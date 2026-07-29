@@ -47,6 +47,8 @@ __all__ = [
     "JsonError",
     "MacLookup",
     "MacScope",
+    "Neighbour",
+    "NeighbourState",
     "PackageInfo",
     "ProbeMethod",
     "ReachabilityReport",
@@ -108,6 +110,22 @@ class MacScope(str, enum.Enum):
     NEXT_HOP = "next_hop"
     #: Neither could be determined.
     UNKNOWN = "unknown"
+
+
+class NeighbourState(str, enum.Enum):
+    """How much the kernel currently trusts a neighbour-cache entry.
+
+    Worth reporting rather than flattening to present/absent: a STALE entry
+    holds a real address the kernel has not confirmed lately, while an
+    INCOMPLETE one is an unanswered query with no address at all.
+    """
+
+    REACHABLE = "reachable"
+    STALE = "stale"
+    PERMANENT = "permanent"
+    INCOMPLETE = "incomplete"
+    FAILED = "failed"
+    OTHER = "other"
 
 
 class CommandName(str, enum.Enum):
@@ -294,6 +312,21 @@ class Interface(_Frozen):
     is_up: bool = False
     is_loopback: bool = False
     mtu: int | None = None
+
+
+class Neighbour(_Frozen):
+    """One entry in this host's neighbour cache.
+
+    A record rather than an ``ip -> mac`` pair, because the interface and the
+    entry's state both change what the answer means, and a bare mapping would
+    force every caller to look them up again.
+    """
+
+    ip: str
+    mac: str | None = None
+    interface: str | None = None
+    state: NeighbourState = NeighbourState.OTHER
+    family: AddressFamily = AddressFamily.IPV4
 
 
 class RouteInfo(_Frozen):
