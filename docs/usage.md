@@ -213,6 +213,104 @@ raises `IPScoutResolutionError` rather than returning an empty list, because an 
 "host down". `reverse_dns` returns `None` when there is no PTR record, since a missing PTR record is
 a normal state of the world.
 
+## Hardware addresses, and whose they are
+
+A MAC address does not survive a router hop. The frame sent toward a routed address carries the
+next-hop router's address; the remote host's own never appears in any packet arriving here. So the
+scope is part of the answer:
+
+```python
+import ipscout
+
+answer = ipscout.lookup_mac("8.8.8.8")
+answer.mac, answer.scope, answer.via_ip
+# ('bc:24:11:4d:71:be', <MacScope.NEXT_HOP: 'next_hop'>, '192.168.1.1')
+
+ipscout.get_mac_address("8.8.8.8")  # None - refuses to pass off the gateway's
+ipscout.get_mac_address("192.168.1.5")  # 'dc:b2:2f:44:34:59' for an on-link host
+```
+
+`lookup_mac` never raises on the passive path: an address this host has no route to, or has simply
+not spoken to, comes back as `MacScope.UNKNOWN`.
+
+## The neighbour cache, and searching it
+
+`neighbours()` reports what the kernel already learned, so a host that has never been contacted
+does not appear. `arp_scan()` sweeps first and then reads, which is why it finds more:
+
+```python
+for entry in ipscout.neighbours():
+    entry.ip, entry.mac, entry.interface, entry.state
+
+found = ipscout.arp_scan("192.168.1.0/24")
+```
+
+There is no protocol that asks "who has this MAC" - RARP is dead - so the reverse search sweeps and
+searches the refreshed cache. It returns a list because one hardware address legitimately holds
+several addresses, commonly an IPv4 and an IPv6 link-local on the same NIC:
+
+```python
+ipscout.find_ip_by_mac("dc:b2:2f:44:34:59", scan=True)
+# ['192.168.1.104', 'fe80::4b42:61c4:c618:8370']
+```
+
+Any written form compares equal - `aa:bb:cc:dd:ee:ff`, `AA-BB-CC-DD-EE-FF` and `aabb.ccdd.eeff` are
+the same address.
+
+`arp_scan()` with no argument sweeps every subnet this host is attached to, and refuses a sweep
+wider than 4096 addresses, naming the network at fault. A container bridge on a `/16` is enough to
+trip it, so pass a narrower network on such a host.
+
+## Routes and subnets
+
+```python
+ipscout.default_gateway()  # RouteInfo(gateway='192.168.1.1', interface='eth0', ...)
+ipscout.query_route("8.8.8.8")  # how this host would reach one address
+ipscout.local_networks()  # the IPv4 subnets it is attached to
+
+for subnet in ipscout.subnet_info():
+    subnet.interface, subnet.address, subnet.network, subnet.broadcast, subnet.gateway, subnet.mtu
+```
+
+`subnet_info()` sends no DHCP traffic. The addressing comes from the same system calls the interface
+listing makes, and the DHCP fields are read from the lease store the OS's own client wrote - so they
+may be unset on macOS and Windows. The addressing fields work everywhere.
+
+## Port scanning
+
+```python
+states = ipscout.scan_ports("192.168.1.10", "22,80,443,8000-8100")
+open_ports = [port for port, state in states.items() if state is ipscout.PortState.OPEN]
+```
+
+Three states, not a boolean. `CLOSED` means something actively refused, which proves a host is
+there; `FILTERED` means nothing answered. Conflating them hides the firewall a scan is asked to
+find. On Windows a connect scan cannot draw that line - a closed port goes quiet rather than
+refusing - so it reports `FILTERED` where the other two report `CLOSED`.
+
+A half-open SYN scan distinguishes them everywhere it can run, and needs a raw socket:
+
+```python
+ipscout.scan_ports(host, "1-1024", method=ipscout.ScanMethod.SYN)
+# IPScoutPermissionError unprivileged, naming CAP_NET_RAW and the connect alternative
+```
+
+Both methods hold only `concurrency` probes alive at a time, so a full-range scan is bounded in
+memory rather than allocating a task per port.
+
+## Waking a host, and the path to it
+
+```python
+ipscout.wake_on_lan("aa:bb:cc:dd:ee:ff", broadcast="192.168.1.255")
+ipscout.path_mtu("8.8.8.8")  # 1500, or None where the platform cannot say
+```
+
+`wake_on_lan` returns nothing because nothing acknowledges a magic packet: a successful send means
+only that it left this host. Poll `is_reachable` to find out whether the target woke.
+
+`path_mtu` returning `None` is an answer rather than a failure. An MTU sizes packets, so a guessed
+one produces a silent black hole.
+
 ## The CLI
 
 Nine commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
@@ -411,53 +509,75 @@ print(muted.reached, muted.error)
 
 ## Public surface
 
-Everything below is exported from the package root.
+Everything below is exported from the package root. This table is generated from
+
+`ipscout.__all__`, so a name here is a name that exists.
 
 | Name               | Kind      | Purpose                                                           |
 |--------------------|-----------|-------------------------------------------------------------------|
-| `ping`             | function  | Probe one target and report what came back.                       |
-| `aping`            | coroutine | The same, without blocking the event loop.                        |
-| `ping_many`        | function  | Probe many targets concurrently from synchronous code.            |
-| `aping_many`       | coroutine | Probe many targets concurrently.                                  |
-| `is_reachable`     | function  | Total yes-or-no shortcut. Never raises, always falls back to TCP. |
 | `ais_reachable`    | coroutine | The same contract, on the event loop.                             |
-| `traceroute`       | function  | Report the path packets take to a target.                         |
-| `atraceroute`      | coroutine | The same, on the event loop.                                      |
-| `trace_path`       | function  | Walk the hop limit over a transport the caller owns.              |
+| `aping`            | coroutine | The same, without blocking the event loop.                        |
+| `aping_many`       | coroutine | Probe many targets concurrently.                                  |
+| `arp_scan`         | function  | Sweep a network, then report what the kernel learned.             |
+| `ascan_ports`      | coroutine | The same, on the event loop.                                      |
 | `atrace_path`      | coroutine | The same, over an async transport.                                |
-| `resolve`          | function  | Turn a name or literal into a list of addresses.                  |
-| `reverse_dns`      | function  | Turn an address back into a name, or `None`.                      |
-| `local_interfaces` | function  | Every local network interface.                                    |
+| `atraceroute`      | coroutine | The same, on the event loop.                                      |
+| `default_gateway`  | function  | The route used when nothing more specific matches.                |
+| `find_ip_by_mac`   | function  | Which addresses currently hold a hardware address.                |
+| `get_mac_address`  | function  | The direct layer-2 address, or None for anything routed.          |
 | `icmp_available`   | function  | Whether an ICMP probe could be made right now, per family.        |
+| `is_reachable`     | function  | Total yes-or-no shortcut. Never raises, always falls back to TCP. |
+| `local_interfaces` | function  | Every local network interface.                                    |
+| `local_networks`   | function  | The IPv4 subnets this host is directly attached to.               |
+| `lookup_mac`       | function  | A hardware address answered with its scope attached.              |
+| `neighbours`       | function  | Every entry in this host's neighbour cache.                       |
+| `normalise_mac`    | function  | One canonical form, so any written form compares equal.           |
+| `parse_ports`      | function  | Turn a 22,80,8000-8100 specification into port numbers.           |
+| `path_mtu`         | function  | The largest packet that reaches a target unfragmented.            |
+| `ping`             | function  | Probe one target and report what came back.                       |
+| `ping_many`        | function  | Probe many targets concurrently from synchronous code.            |
 | `print_info`       | function  | Print the package metadata block.                                 |
+| `query_route`      | function  | How this host would reach one destination.                        |
+| `resolve`          | function  | Turn a name or literal into a list of addresses.                  |
+| `reverse_dns`      | function  | Turn an address back into a name, or None.                        |
+| `scan_ports`       | function  | What state each of a set of ports is in.                          |
+| `subnet_info`      | function  | Addressing, gateway and stored DHCP facts per subnet.             |
+| `trace_path`       | function  | Walk the hop limit over a transport the caller owns.              |
+| `traceroute`       | function  | Report the path packets take to a target.                         |
+| `wake_on_lan`      | function  | Send a wake-on-LAN magic packet.                                  |
 
-Result models, all frozen Pydantic models:
+Result models, all frozen Pydantic models with `extra="forbid"`:
 
-| Name                 | Returned by                                              |
-|----------------------|----------------------------------------------------------|
-| `ResponseObject`     | `ping`, `aping`, `ping_many`, `aping_many`               |
-| `TraceHop`           | `traceroute`, `atraceroute`, `trace_path`, `atrace_path` |
-| `Interface`          | `local_interfaces`                                       |
-| `InterfaceAddress`   | the `ipv4` and `ipv6` fields of `Interface`              |
-| `CapabilityReport`   | the `capabilities` CLI command                           |
-| `ReachabilityReport` | the `reachable` CLI command                              |
-| `ResolveReport`      | the `resolve` CLI command                                |
-| `ReverseDnsReport`   | the `reverse-dns` CLI command                            |
-| `PackageInfo`        | the `info` CLI command                                   |
+| Name                 | Returned by                                      |
+|----------------------|--------------------------------------------------|
+| `CapabilityReport`   | the capabilities CLI command                     |
+| `Interface`          | local_interfaces                                 |
+| `InterfaceAddress`   | the ipv4 and ipv6 fields of Interface            |
+| `LeaseInfo`          | the DHCP fields folded into SubnetInfo           |
+| `MacLookup`          | lookup_mac                                       |
+| `Neighbour`          | neighbours, arp_scan                             |
+| `PackageInfo`        | the info CLI command                             |
+| `ReachabilityReport` | the reachable CLI command                        |
+| `ResolveReport`      | the resolve CLI command                          |
+| `ResponseObject`     | ping, aping, ping_many, aping_many               |
+| `ReverseDnsReport`   | the reverse-dns CLI command                      |
+| `RouteInfo`          | query_route, default_gateway                     |
+| `SubnetInfo`         | subnet_info                                      |
+| `TraceHop`           | traceroute, atraceroute, trace_path, atrace_path |
 
 Enums, all `str` subclasses so their members are already strings on the wire:
 
-| Name            | Members                         |
-|-----------------|---------------------------------|
-| `AddressFamily` | `IPV4`, `IPV6`                  |
-| `ProbeMethod`   | `ICMP`, `TCP`                   |
-| `MacScope`      | `DIRECT`, `NEXT_HOP`, `UNKNOWN` |
-| `CommandName`   | one member per CLI subcommand   |
+| Name             | Members                                                |
+|------------------|--------------------------------------------------------|
+| `AddressFamily`  | IPV4, IPV6                                             |
+| `CommandName`    | one member per CLI subcommand                          |
+| `MacScope`       | DIRECT, NEXT_HOP, UNKNOWN                              |
+| `NeighbourState` | REACHABLE, STALE, PERMANENT, INCOMPLETE, FAILED, OTHER |
+| `PortState`      | OPEN, CLOSED, FILTERED                                 |
+| `ProbeMethod`    | ICMP, TCP                                              |
+| `ScanMethod`     | CONNECT, SYN                                           |
 
-`MacLookup`, `SubnetInfo` and `MacScope` are exported result types for the local-network inspection
-layer. No public callable returns one in this release.
-
-Exceptions: `IPScoutError`, `IPScoutPermissionError`, `IPScoutResolutionError`,
-`IPScoutUnsupportedError`.
+Exceptions: `IPScoutError`, `IPScoutPermissionError`, `IPScoutResolutionError`, `IPScoutUnsupportedError`. Every public callable
+reports failure through this hierarchy, so `except IPScoutError` catches all of them.
 
 For a module-by-module breakdown, see [systemdesign/module_reference.md](systemdesign/module_reference.md).

@@ -124,6 +124,15 @@ ipscout ping 127.0.0.1 -c 2
 ipscout ping-many 127.0.0.1 ::1 -c 1
 ipscout reachable example.com
 ipscout traceroute 1.1.1.1 --max-hops 10
+ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
+ipscout mac 8.8.8.8                     # the gateway's, labelled NEXT_HOP
+ipscout find-ip dc:b2:2f:44:34:59 --scan
+ipscout arp-scan --network 192.168.1.0/24
+ipscout neighbours
+ipscout gateway
+ipscout subnet
+ipscout mtu 8.8.8.8
+ipscout wake aa:bb:cc:dd:ee:ff --broadcast 192.168.1.255
 ipscout resolve localhost
 ipscout interfaces
 ipscout capabilities
@@ -131,6 +140,27 @@ ipscout --help
 ```
 
 `python -m ipscout` and `uvx ipscout` run the same entry point.
+
+## More than ping
+
+The same surface is available as a library, and most of it needs no elevation:
+
+```python
+import ipscout
+
+ipscout.lookup_mac("8.8.8.8")  # the router's address, labelled NEXT_HOP
+ipscout.find_ip_by_mac(mac, scan=True)  # sweep, then search the refreshed cache
+ipscout.arp_scan("192.168.1.0/24")  # every hardware address on a subnet
+ipscout.default_gateway()  # and query_route() for any destination
+ipscout.subnet_info()  # addressing, gateway, stored DHCP facts
+ipscout.scan_ports(host, "22,80,8000-8100")
+ipscout.path_mtu("8.8.8.8")
+ipscout.wake_on_lan(mac, broadcast="192.168.1.255")
+```
+
+A MAC address does not survive a router hop, so `lookup_mac` puts the scope in the answer and
+`get_mac_address` returns `None` for anything routed rather than passing off the gateway's as the
+host's. Full worked examples are in [docs/usage.md](docs/usage.md).
 
 ## Output for machines
 
