@@ -114,6 +114,31 @@ def _wanted(ports: str | list[int]) -> list[int]:
     return parse_ports(ports) if isinstance(ports, str) else sorted(set(ports))
 
 
+def _source_for(host: str) -> str | None:
+    """Return the address this host would send to ``host`` from.
+
+    The route lookup answers this where the kernel recorded a preferred
+    source, but it often does not for on-link and loopback destinations - the
+    loopback route on a stock CI runner carries none. Connecting a datagram
+    socket resolves it in every one of those cases: it picks the route and
+    binds a local address without putting anything on the wire.
+    """
+
+    route = query_route(host)
+    if route is not None and route.source:
+        return route.source
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            # Port 9 is discard; nothing is sent, so this only has to be a
+            # valid destination for the kernel to choose a source for.
+            sock.connect((host, 9))
+            name = sock.getsockname()
+    except OSError:
+        return None
+    return name[0] if isinstance(name, tuple) and isinstance(name[0], str) else None
+
+
 def syn_scan(host: str, ports: list[int], *, timeout: float = 1.0) -> dict[int, PortState]:
     """Scan ports half-open, sending a SYN and never completing the handshake.
 
@@ -144,8 +169,7 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = 1.0) -> dict[int, 
         msg = "Windows blocks raw TCP sends, so a SYN scan is unavailable at any privilege level; use the connect method"
         raise IPScoutUnsupportedError(msg)
 
-    route = query_route(host)
-    source_ip = route.source if route else None
+    source_ip = _source_for(host)
     if source_ip is None:
         msg = f"no route to {host}, so no source address to send a SYN from"
         raise IPScoutUnsupportedError(msg)
