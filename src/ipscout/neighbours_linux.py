@@ -16,6 +16,7 @@ Note:
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import socket
 import struct
 
@@ -73,20 +74,24 @@ def format_mac(raw: bytes) -> str | None:
         raw: The hardware address as the kernel reported it.
 
     Returns:
-        The lowercase colon-separated form, or ``None`` when the length is not
-        an Ethernet address. Loopback and tunnel interfaces report zero-length
-        or oversized link addresses, and inventing a MAC for them would be
-        worse than saying nothing.
+        The lowercase colon-separated form, or ``None`` when this is not a
+        learned Ethernet address. Loopback and tunnel interfaces report
+        zero-length or oversized link addresses, and point-to-point interfaces
+        report all zeros, which means no address was learned rather than an
+        address of zero. Inventing a MAC for any of them would be worse than
+        saying nothing.
 
     Examples:
         >>> format_mac(bytes.fromhex("aabbccddeeff"))
         'aa:bb:cc:dd:ee:ff'
         >>> format_mac(b"") is None
         True
+        >>> format_mac(bytes(6)) is None
+        True
 
     """
 
-    if len(raw) != _MAC_LENGTH:
+    if len(raw) != _MAC_LENGTH or not any(raw):
         return None
     return ":".join(f"{octet:02x}" for octet in raw)
 
@@ -98,6 +103,22 @@ def _state_of(state: int) -> NeighbourState:
         if state & bit:
             return name
     return NeighbourState.OTHER
+
+
+def _is_not_a_neighbour(ip: str) -> bool:
+    """Return whether an address cannot name a neighbour worth reporting.
+
+    Multicast entries carry a MAC derived from the group address rather than
+    learned from a host, and the unspecified address names nobody. Both appear
+    in a raw dump and both would be noise in a scan that answers "which host
+    has this hardware address".
+    """
+
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:  # pragma: no cover - the kernel does not emit these
+        return True
+    return address.is_multicast or address.is_unspecified
 
 
 def parse_neighbour_dump(data: bytes) -> tuple[list[Neighbour], bool]:
@@ -139,7 +160,7 @@ def parse_neighbour_dump(data: bytes) -> tuple[list[Neighbour], bool]:
             elif attribute == _NDA_LLADDR:
                 mac = format_mac(value)
 
-        if ip is None or mac is None:
+        if ip is None or mac is None or _is_not_a_neighbour(ip):
             continue
 
         interface: str | None = None

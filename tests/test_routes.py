@@ -19,9 +19,9 @@ from click.testing import CliRunner
 from pydantic import ValidationError
 
 import ipscout
+from ipscout import bsdroute, winapi
 from ipscout import routes_macos as macos
 from ipscout import routes_windows as windows
-from ipscout import winapi
 from ipscout.cli import EXIT_NOT_REACHED, EXIT_OK, cli
 from ipscout.models import AddressFamily, RouteInfo
 
@@ -93,8 +93,8 @@ def _sockaddr_in(address: str) -> bytes:
 def _rt_message(*, flags: int, addrs: int, payload: bytes, pid: int = 4242, seq: int = 1, index: int = 0, errno: int = 0) -> bytes:
     """Build one routing message with the documented rt_msghdr layout."""
 
-    header = macos._RT_MSGHDR.pack(
-        macos._RT_MSGHDR.size + len(payload),
+    header = bsdroute.RT_MSGHDR.pack(
+        bsdroute.RT_MSGHDR.size + len(payload),
         macos._RTM_VERSION,
         macos._RTM_GET,
         index,
@@ -114,14 +114,14 @@ def _rt_message(*, flags: int, addrs: int, payload: bytes, pid: int = 4242, seq:
 def test_the_header_matches_the_documented_c_layout() -> None:
     # 92 bytes is what the C struct comes to; a mismatch means every sockaddr
     # after it is read from the wrong offset.
-    assert macos._RT_MSGHDR.size == 92
+    assert bsdroute.RT_MSGHDR.size == 92
 
 
 @pytest.mark.os_agnostic
 def test_a_routed_reply_yields_the_next_hop() -> None:
     message = _rt_message(
-        flags=macos._RTF_UP | macos._RTF_GATEWAY,
-        addrs=macos._RTA_DST | macos._RTA_GATEWAY,
+        flags=bsdroute.RTF_UP | bsdroute.RTF_GATEWAY,
+        addrs=bsdroute.RTA_DST | bsdroute.RTA_GATEWAY,
         payload=_sockaddr_in("8.8.8.8") + _sockaddr_in("192.168.1.1"),
     )
 
@@ -137,8 +137,8 @@ def test_an_on_link_reply_reports_no_gateway_even_though_one_is_present() -> Non
     # address rather than a router. Reading it without checking RTF_GATEWAY
     # would invent a next hop for a directly-attached host.
     message = _rt_message(
-        flags=macos._RTF_UP,
-        addrs=macos._RTA_DST | macos._RTA_GATEWAY,
+        flags=bsdroute.RTF_UP,
+        addrs=bsdroute.RTA_DST | bsdroute.RTA_GATEWAY,
         payload=_sockaddr_in("192.168.1.5") + _sockaddr_in("192.168.1.5"),
     )
 
@@ -154,8 +154,8 @@ def test_a_zero_length_sockaddr_still_consumes_its_slot() -> None:
     # sockaddr. Treating that as zero bytes slides every later address out of
     # position, so the gateway would be read from the middle of nowhere.
     message = _rt_message(
-        flags=macos._RTF_UP | macos._RTF_GATEWAY,
-        addrs=macos._RTA_DST | macos._RTA_GATEWAY,
+        flags=bsdroute.RTF_UP | bsdroute.RTF_GATEWAY,
+        addrs=bsdroute.RTA_DST | bsdroute.RTA_GATEWAY,
         payload=b"\x00\x00\x00\x00" + _sockaddr_in("192.168.1.1"),
     )
 
@@ -169,8 +169,8 @@ def test_a_zero_length_sockaddr_still_consumes_its_slot() -> None:
 def test_another_process_reply_is_not_mistaken_for_ours() -> None:
     # A route socket is shared: every listener sees every message.
     message = _rt_message(
-        flags=macos._RTF_UP | macos._RTF_GATEWAY,
-        addrs=macos._RTA_DST | macos._RTA_GATEWAY,
+        flags=bsdroute.RTF_UP | bsdroute.RTF_GATEWAY,
+        addrs=bsdroute.RTA_DST | bsdroute.RTA_GATEWAY,
         payload=_sockaddr_in("8.8.8.8") + _sockaddr_in("192.168.1.1"),
         pid=9999,
     )
@@ -181,8 +181,8 @@ def test_another_process_reply_is_not_mistaken_for_ours() -> None:
 @pytest.mark.os_agnostic
 def test_a_reply_to_an_older_query_is_not_mistaken_for_this_one() -> None:
     message = _rt_message(
-        flags=macos._RTF_UP,
-        addrs=macos._RTA_DST,
+        flags=bsdroute.RTF_UP,
+        addrs=bsdroute.RTA_DST,
         payload=_sockaddr_in("8.8.8.8"),
         seq=7,
     )
@@ -192,14 +192,14 @@ def test_a_reply_to_an_older_query_is_not_mistaken_for_this_one() -> None:
 
 @pytest.mark.os_agnostic
 def test_a_route_that_is_down_is_not_a_route() -> None:
-    message = _rt_message(flags=0, addrs=macos._RTA_DST, payload=_sockaddr_in("8.8.8.8"))
+    message = _rt_message(flags=0, addrs=bsdroute.RTA_DST, payload=_sockaddr_in("8.8.8.8"))
 
     assert macos.parse_route_reply(message, pid=4242, seq=1) is None
 
 
 @pytest.mark.os_agnostic
 def test_a_kernel_error_reply_is_not_a_route() -> None:
-    message = _rt_message(flags=macos._RTF_UP, addrs=macos._RTA_DST, payload=_sockaddr_in("8.8.8.8"), errno=65)
+    message = _rt_message(flags=bsdroute.RTF_UP, addrs=bsdroute.RTA_DST, payload=_sockaddr_in("8.8.8.8"), errno=65)
 
     assert macos.parse_route_reply(message, pid=4242, seq=1) is None
 
@@ -207,7 +207,7 @@ def test_a_kernel_error_reply_is_not_a_route() -> None:
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("size", [0, 1, 40, 91])
 def test_a_truncated_message_is_refused_rather_than_misread(size: int) -> None:
-    message = _rt_message(flags=macos._RTF_UP, addrs=macos._RTA_DST, payload=_sockaddr_in("8.8.8.8"))
+    message = _rt_message(flags=bsdroute.RTF_UP, addrs=bsdroute.RTA_DST, payload=_sockaddr_in("8.8.8.8"))
 
     assert macos.parse_route_reply(message[:size]) is None
 
@@ -216,7 +216,7 @@ def test_a_truncated_message_is_refused_rather_than_misread(size: int) -> None:
 def test_a_sockaddr_claiming_more_bytes_than_it_has_does_not_read_past_the_end() -> None:
     # A hostile or corrupt length must not walk off the buffer.
     truncated = _sockaddr_in("8.8.8.8")[:8]
-    message = _rt_message(flags=macos._RTF_UP | macos._RTF_GATEWAY, addrs=macos._RTA_DST | macos._RTA_GATEWAY, payload=truncated)
+    message = _rt_message(flags=bsdroute.RTF_UP | bsdroute.RTF_GATEWAY, addrs=bsdroute.RTA_DST | bsdroute.RTA_GATEWAY, payload=truncated)
 
     route = macos.parse_route_reply(message, pid=4242, seq=1)
 
@@ -228,7 +228,7 @@ def test_a_link_layer_sockaddr_carries_no_ip_address() -> None:
     # AF_LINK appears in real replies; the interface comes from rtm_index.
     link = struct.pack("=BB", 8, 18) + b"\x00" * 6
 
-    assert macos._address_of(link) is None
+    assert bsdroute.address_of(link) is None
 
 
 # --------------------------------------------------------------------------

@@ -53,12 +53,15 @@ __all__ = [
     "IP_TTL_EXPIRED_TRANSIT",
     "MIB_IPFORWARD_ROW2",
     "MIB_IPFORWARD_TABLE2",
+    "MIB_IPNET_ROW2",
+    "MIB_IPNET_TABLE2",
     "NET_LUID",
     "SOCKADDR_IN",
     "SOCKADDR_IN6",
     "SOCKADDR_INET",
     "WIN_AF_INET",
     "WIN_AF_INET6",
+    "WIN_AF_UNSPEC",
     "iphlpapi",
     "ipv4_to_string",
     "ipv6_words_to_string",
@@ -297,9 +300,41 @@ class MIB_IPFORWARD_TABLE2(ctypes.Structure):  # noqa: N801 - mirrors the Window
     )
 
 
+class MIB_IPNET_ROW2(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``MIB_IPNET_ROW2``: one neighbour-cache entry.
+
+    The flags field is a bitfield in the C header. It is declared here as the
+    ULONG it occupies rather than as named bits, because nothing reads it and
+    an approximate bitfield would only be a way to get the size wrong.
+    """
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("Address", SOCKADDR_INET),
+        ("InterfaceIndex", ctypes.c_uint32),
+        ("InterfaceLuid", NET_LUID),
+        ("PhysicalAddress", ctypes.c_uint8 * 32),
+        ("PhysicalAddressLength", ctypes.c_uint32),
+        ("State", ctypes.c_uint32),
+        ("Flags", ctypes.c_uint32),
+        ("ReachabilityTime", ctypes.c_uint32),
+    )
+
+
+class MIB_IPNET_TABLE2(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``MIB_IPNET_TABLE2``: a count followed by that many neighbour rows."""
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("NumEntries", ctypes.c_uint32),
+        ("Table", MIB_IPNET_ROW2 * 1),
+    )
+
+
 #: Windows numbers AF_INET6 23, not the 10 that POSIX uses. Reading the
 #: platform's own socket.AF_INET6 here would decode IPv6 rows as unknown on
 #: every non-Windows host that inspects a captured structure.
+WIN_AF_UNSPEC = 0
 WIN_AF_INET = 2
 WIN_AF_INET6 = 23
 
@@ -471,6 +506,12 @@ def _configure(library: Any) -> None:  # pragma: no cover - Windows only
     library.GetIpForwardTable2.argtypes = (
         ctypes.c_uint16,  # Family
         ctypes.POINTER(ctypes.POINTER(MIB_IPFORWARD_TABLE2)),  # Table, allocated by the call
+    )
+
+    library.GetIpNetTable2.restype = ctypes.c_uint32
+    library.GetIpNetTable2.argtypes = (
+        ctypes.c_uint16,  # Family
+        ctypes.POINTER(ctypes.POINTER(MIB_IPNET_TABLE2)),  # Table, allocated by the call
     )
 
     library.FreeMibTable.restype = None

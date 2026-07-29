@@ -53,6 +53,8 @@ from .models import (
     InterfaceAddress,
     MacLookup,
     MacScope,
+    Neighbour,
+    NeighbourState,
     PackageInfo,
     ProbeMethod,
     ReachabilityReport,
@@ -63,8 +65,10 @@ from .models import (
     SubnetInfo,
     TraceHop,
 )
+from .neighbours import get_mac_address, lookup_mac, neighbours, normalise_mac
 from .resolve import resolve, reverse_dns
 from .routes import default_gateway, query_route
+from .scan import arp_scan, find_ip_by_mac, local_networks
 from .traceroute import atrace_path, atraceroute, trace_path, traceroute
 
 __all__ = [
@@ -79,6 +83,8 @@ __all__ = [
     "InterfaceAddress",
     "MacLookup",
     "MacScope",
+    "Neighbour",
+    "NeighbourState",
     "PackageInfo",
     "ProbeMethod",
     "ReachabilityReport",
@@ -91,12 +97,19 @@ __all__ = [
     "ais_reachable",
     "aping",
     "aping_many",
+    "arp_scan",
     "atrace_path",
     "atraceroute",
     "default_gateway",
+    "find_ip_by_mac",
+    "get_mac_address",
     "icmp_available",
     "is_reachable",
     "local_interfaces",
+    "local_networks",
+    "lookup_mac",
+    "neighbours",
+    "normalise_mac",
     "ping",
     "ping_many",
     "print_info",

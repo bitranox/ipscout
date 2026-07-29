@@ -182,6 +182,7 @@ omit = [
   "src/ipscout/interfaces_windows.py",
   "src/ipscout/routes_linux.py",
   "src/ipscout/routes_windows.py",
+  "src/ipscout/neighbours_windows.py",
 ]
 fail_under = 85
 show_missing = true
@@ -231,13 +232,15 @@ root_package = "ipscout"
 name = "Layered dependencies point one way only"
 type = "layers"
 layers = [
+  "ipscout.scan",
   "ipscout.api",
   "ipscout.traceroute",
+  "ipscout.neighbours",
   "ipscout.interfaces : ipscout.routes",
   "ipscout.service",
   "ipscout.factory",
-  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows : ipscout.routes_linux : ipscout.routes_macos : ipscout.routes_windows",
-  "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi",
+  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows : ipscout.routes_linux : ipscout.routes_macos : ipscout.routes_windows : ipscout.neighbours_linux : ipscout.neighbours_macos : ipscout.neighbours_windows",
+  "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi : ipscout.netlink : ipscout.bsdroute",
   "ipscout.models",
   "ipscout.errors",
 ]

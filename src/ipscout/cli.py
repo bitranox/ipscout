@@ -43,15 +43,20 @@ from .models import (
     CommandName,
     JsonEnvelope,
     JsonError,
+    MacLookup,
+    MacScope,
+    Neighbour,
     PackageInfo,
     ReachabilityReport,
     ResolveReport,
     ReverseDnsReport,
     RouteInfo,
 )
+from .neighbours import get_mac_address, lookup_mac, neighbours
 from .resolve import resolve as resolve_target
 from .resolve import reverse_dns
 from .routes import default_gateway, query_route
+from .scan import arp_scan, find_ip_by_mac
 from .serialize import dumps, to_jsonable
 from .traceroute import traceroute
 from .typed_click import argument, option, version_option
@@ -404,6 +409,86 @@ def cli_gateway(ctx: click.Context, *, ipv4: bool, ipv6: bool, destination: str 
         console.print(table)
 
     _emit(ctx, CommandName.GATEWAY, route, human)
+
+
+def _neighbour_table(entries: tuple[Neighbour, ...]) -> Table:
+    """Render neighbour records as a table."""
+
+    table = Table("ip", "mac", "interface", "state", "family")
+    for entry in entries:
+        table.add_row(entry.ip, entry.mac or "-", entry.interface or "-", entry.state.value, entry.family.value)
+    return table
+
+
+@cli.command("neighbours", context_settings=CLICK_CONTEXT_SETTINGS)
+@click.pass_context
+def cli_neighbours(ctx: click.Context) -> None:
+    """List the neighbour cache: which addresses this host has learned."""
+
+    entries = neighbours()
+    _emit(ctx, CommandName.NEIGHBOURS, entries, lambda: console.print(_neighbour_table(entries)))
+    if not entries:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("mac", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("ip")
+@option("--strict", is_flag=True, default=False, help="Answer only for a directly-attached host; refuse anything routed.")
+@click.pass_context
+def cli_mac(ctx: click.Context, ip: str, *, strict: bool) -> None:
+    """Show the hardware address for an address, and whose it is."""
+
+    if strict:
+        address = get_mac_address(ip)
+        payload = MacLookup(ip=ip, mac=address, scope=MacScope.DIRECT if address else MacScope.UNKNOWN)
+    else:
+        payload = lookup_mac(ip)
+
+    def human() -> None:
+        table = Table("ip", "mac", "scope", "via", "interface")
+        table.add_row(payload.ip, payload.mac or "-", payload.scope.value, payload.via_ip or "-", payload.interface or "-")
+        console.print(table)
+
+    _emit(ctx, CommandName.MAC, payload, human)
+    if payload.mac is None:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("find-ip", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("mac")
+@option("--scan", is_flag=True, default=False, help="Sweep the subnet first, so hosts not spoken to recently are found.")
+@option("--network", default=None, help="CIDR to sweep. Defaults to the subnets this host is attached to.")
+@click.pass_context
+def cli_find_ip(ctx: click.Context, mac: str, *, scan: bool, network: str | None) -> None:
+    """Find which addresses currently hold a hardware address."""
+
+    try:
+        addresses = find_ip_by_mac(mac, scan=scan, network=network)
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, CommandName.FIND_IP, exc)
+        return
+
+    _emit(ctx, CommandName.FIND_IP, addresses, lambda: console.print("\n".join(addresses) or "(not found)", highlight=False))
+    if not addresses:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("arp-scan", context_settings=CLICK_CONTEXT_SETTINGS)
+@option("--network", default=None, help="CIDR to sweep. Defaults to the subnets this host is attached to.")
+@option("--concurrency", type=int, default=64, show_default=True, help="Probes in flight at once.")
+@click.pass_context
+def cli_arp_scan(ctx: click.Context, *, network: str | None, concurrency: int) -> None:
+    """Sweep a network, then report every hardware address it learned."""
+
+    try:
+        entries = arp_scan(network, concurrency=concurrency)
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, CommandName.ARP_SCAN, exc)
+        return
+
+    _emit(ctx, CommandName.ARP_SCAN, entries, lambda: console.print(_neighbour_table(entries)))
+    if not entries:
+        ctx.exit(EXIT_NOT_REACHED)
 
 
 @cli.command("capabilities", context_settings=CLICK_CONTEXT_SETTINGS)

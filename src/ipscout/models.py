@@ -143,6 +143,10 @@ class CommandName(str, enum.Enum):
     REVERSE_DNS = "reverse-dns"
     INTERFACES = "interfaces"
     GATEWAY = "gateway"
+    NEIGHBOURS = "neighbours"
+    MAC = "mac"
+    FIND_IP = "find-ip"
+    ARP_SCAN = "arp-scan"
     CAPABILITIES = "capabilities"
     INFO = "info"
 

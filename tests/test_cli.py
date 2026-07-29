@@ -32,6 +32,11 @@ ALL_COMMANDS: list[list[str]] = [
     ["resolve", "localhost"],
     ["reverse-dns", "127.0.0.1"],
     ["interfaces"],
+    ["gateway"],
+    ["neighbours"],
+    ["mac", "127.0.0.1"],
+    ["find-ip", "aa:bb:cc:dd:ee:ff"],
+    ["arp-scan", "--network", "127.0.0.0/30"],
     ["capabilities"],
     ["info"],
 ]
@@ -68,7 +73,7 @@ def _skip_what_this_host_cannot_do(args: list[str]) -> None:
     test failure would dress a documented platform limit up as a defect.
     """
 
-    if args[0] in {"ping", "ping-many", "traceroute"} and not ipscout.icmp_available():
+    if args[0] in {"ping", "ping-many", "traceroute", "arp-scan"} and not ipscout.icmp_available():
         pytest.skip("unprivileged ICMP unavailable on this host")
     if args[0] == "traceroute" and not _traceroute_supported():
         pytest.skip("this platform does not surface ICMP Time Exceeded to an unprivileged process")
