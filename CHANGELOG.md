@@ -23,7 +23,6 @@ subprocess is spawned, and no administrator or root rights are needed on the def
   permission indistinguishable from a dead host. Pass `raise_on_error=False` to report failures on
   `.error` instead. `ping_many` and `aping_many` default to `raise_on_error=False`, because one bad
   name in a sweep of two hundred should not destroy the other 199 results.
-
 - **Async API.** `aping`, `aping_many`, `ais_reachable`, `atraceroute` and `atrace_path`. Genuinely
   asynchronous on Linux and macOS, where the ICMP socket is registered with the event loop, so a
   sweep of thousands runs on one thread. On Windows `IcmpSendEcho` is a blocking C call with no
@@ -54,6 +53,11 @@ subprocess is spawned, and no administrator or root rights are needed on the def
 - **Frozen Pydantic result models.** `ResponseObject`, `TraceHop`, `Interface`, `InterfaceAddress`,
   `MacLookup`, `SubnetInfo`, `CapabilityReport`, plus the CLI report types. Derived statistics are
   computed fields, so a model dump carries them rather than silently dropping them.
+- **A Claude Code skill, shipped with the package.** The repo is a single-plugin marketplace
+  (`.claude-plugin/`) carrying `skills/python-network-probe/`, so an LLM agent can install it
+  from any project and get the no-admin story, the error contract, the JSON output and the
+  measured platform limits rather than guessing at an API. Mirrored in the bitranox marketplace
+  as `coding-python-network-probe`.
 - **Enums for the fixed value sets.** `AddressFamily`, `ProbeMethod`, `MacScope`, `CommandName`.
 - **Token-based reply matching.** An unprivileged datagram ICMP socket does not let the process
   choose its ICMP identifier; the kernel rewrites it. Measured on Linux, an echo sent with identifier

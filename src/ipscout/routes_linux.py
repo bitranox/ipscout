@@ -122,6 +122,24 @@ def _parse_attributes(payload: bytes, family: int) -> RouteInfo:
     return RouteInfo(gateway=gateway, interface=interface, source=source)
 
 
+def _open_netlink_socket() -> socket.socket | None:
+    """Return a netlink route socket, or None where there is none to open.
+
+    ``AF_NETLINK`` is Linux-only, so it is looked up by name rather than
+    accessed as an attribute: a direct ``socket.AF_NETLINK`` fails type
+    checking on the macOS and Windows runs even though it is guarded at
+    runtime, and silencing that per platform would hide real errors with it.
+    """
+
+    af_netlink = getattr(socket, "AF_NETLINK", None)
+    if not isinstance(af_netlink, int):  # pragma: no cover - non-Linux
+        return None
+    try:
+        return socket.socket(af_netlink, socket.SOCK_RAW, _NETLINK_ROUTE)
+    except OSError:  # pragma: no cover - Linux without netlink
+        return None
+
+
 def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | None:
     """Ask the kernel which route reaches ``destination``.
 
@@ -145,9 +163,8 @@ def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | N
     except OSError:
         return None
 
-    try:
-        sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_ROUTE)
-    except (AttributeError, OSError):  # pragma: no cover - non-Linux
+    sock = _open_netlink_socket()
+    if sock is None:  # pragma: no cover - non-Linux, or netlink unavailable
         return None
 
     try:

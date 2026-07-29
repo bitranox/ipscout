@@ -189,6 +189,29 @@ Exit codes are independent of the output format:
 | 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.   |
 | 2    | Error. A bad name, a missing permission, or a capability this host lacks. |
 
+## For LLMs and coding agents
+
+The JSON envelope above is half the story. The other half is that an agent has to pick the right
+tool in the first place, and the popular answers to "ping a host from Python" quietly need
+administrator rights. So this repo is also a Claude Code plugin marketplace, and it ships a skill:
+
+```
+/plugin marketplace add bitranox/ipscout
+/plugin install ipscout
+```
+
+The skill covers the parts an agent otherwise guesses at: that ICMP here needs no elevation and
+spawns nothing, that setup problems raise while network conditions do not, that `--json` exists so a
+failure arrives as data rather than a traceback, and which platform limits are real. It also names
+the alternatives that fail the no-admin requirement and why, `icmplib` in particular, whose
+`privileged=False` reads as "no elevation needed" and is overridden on Windows.
+
+It documents only what this release actually exposes, and says so explicitly, so an agent asked for
+a MAC address looks the API up instead of inventing a plausible call.
+
+The same skill is available from the [bitranox marketplace](https://github.com/bitranox/bitranox-skills)
+as `coding-python-network-probe`.
+
 ## Platform matrix
 
 Measured on real CI runners, not assumed.
@@ -230,6 +253,7 @@ raises and always tries TCP, because that is the entire point of a yes-or-no sho
 ## Documentation
 
 - [Installation](docs/installation.md)
+- [Skill for coding agents](skills/python-network-probe/SKILL.md)
 - [Usage](docs/usage.md)
 - [Development](docs/development.md)
 - [Module Reference](docs/systemdesign/module_reference.md)

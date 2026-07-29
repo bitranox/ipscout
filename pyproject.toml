@@ -234,7 +234,7 @@ layers = [
   "ipscout.interfaces",
   "ipscout.service",
   "ipscout.factory",
-  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows",
+  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows : ipscout.routes_linux",
   "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi",
   "ipscout.models",
   "ipscout.errors",

@@ -46,16 +46,37 @@ def _invoke(runner: CliRunner, args: list[str]) -> Any:
     return runner.invoke(cli, args, standalone_mode=False)
 
 
-def _skip_without_icmp(args: list[str]) -> None:
-    """Skip when the command puts an echo on the wire and ICMP is forbidden."""
+def _traceroute_supported() -> bool:
+    """Return whether this host can observe expired hops.
+
+    Asked of the CLI's own ``capabilities`` command rather than of
+    ``sys.platform``, because that is what the library itself acts on: setting
+    a hop limit and observing its expiry come apart on macOS, so a platform
+    name is the wrong thing to branch on.
+    """
+
+    result = CliRunner().invoke(cli, ["--json", "capabilities"], standalone_mode=False)
+    return bool(json.loads(result.output)["data"]["traceroute"])
+
+
+def _skip_what_this_host_cannot_do(args: list[str]) -> None:
+    """Skip a command this host is not equipped to run.
+
+    Two distinct reasons, and they are not the same thing: ICMP may be
+    forbidden outright, or it may work while the platform still refuses to
+    surface Time Exceeded to an unprivileged process. Reporting either as a
+    test failure would dress a documented platform limit up as a defect.
+    """
 
     if args[0] in {"ping", "ping-many", "traceroute"} and not ipscout.icmp_available():
         pytest.skip("unprivileged ICMP unavailable on this host")
+    if args[0] == "traceroute" and not _traceroute_supported():
+        pytest.skip("this platform does not surface ICMP Time Exceeded to an unprivileged process")
 
 
 @pytest.mark.parametrize("args", ALL_COMMANDS, ids=lambda a: a[0])
 def test_every_command_emits_a_valid_json_envelope(runner: CliRunner, args: list[str]) -> None:
-    _skip_without_icmp(args)
+    _skip_what_this_host_cannot_do(args)
 
     payload = json.loads(_invoke(runner, ["--json", *args]).output)
 
@@ -66,7 +87,7 @@ def test_every_command_emits_a_valid_json_envelope(runner: CliRunner, args: list
 
 @pytest.mark.parametrize("args", ALL_COMMANDS, ids=lambda a: a[0])
 def test_every_command_also_renders_for_a_human(runner: CliRunner, args: list[str]) -> None:
-    _skip_without_icmp(args)
+    _skip_what_this_host_cannot_do(args)
 
     output = _invoke(runner, args).output
 
@@ -77,7 +98,7 @@ def test_every_command_also_renders_for_a_human(runner: CliRunner, args: list[st
 
 @pytest.mark.parametrize("args", ALL_COMMANDS, ids=lambda a: a[0])
 def test_bare_mode_drops_the_envelope(runner: CliRunner, args: list[str]) -> None:
-    _skip_without_icmp(args)
+    _skip_what_this_host_cannot_do(args)
 
     payload = json.loads(_invoke(runner, ["--json-bare", *args]).output)
 
@@ -140,7 +161,7 @@ def test_reaching_a_host_exits_zero() -> None:
 def test_a_silent_host_exits_one_rather_than_zero() -> None:
     # Click returns ctx.exit()'s code instead of raising it when standalone
     # mode is off, so anything that drops that value collapses every outcome
-    # into success. lib_cli_exit_tools did exactly that before 2.3.4.
+    # into success. That is what the lib_cli_exit_tools>=2.3.4 floor buys.
     if not ipscout.icmp_available():
         pytest.skip("unprivileged ICMP unavailable on this host")
 
