@@ -125,6 +125,10 @@ convention = "google"
 
 [tool.pyright]
 typeCheckingMode = "strict"
+# Check against the declared floor, not whatever the local venv happens to run.
+# Without this, a 3.14 development interpreter accepts typeshed symbols that are
+# guarded to 3.14+ (ctypes _layout_, for one) and CI rejects them at the floor.
+pythonVersion = "3.10"
 extraPaths = [
   "src",
 ]

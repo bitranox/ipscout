@@ -42,10 +42,15 @@ collect_ignore = ["conftest.py"]
 
 #: Call fragments that put an ICMP echo on the wire. ``is_reachable`` is
 #: deliberately absent: it falls back to TCP and stays truthful without ICMP.
-_POSIX_ONLY = (
-    "PosixEchoTransport(",
-    "AsyncPosixEchoTransport(",
-)
+#: Modules whose doctests can only run on one platform, matched on the node id
+#: rather than on the example source. Naming the module is exact, where source
+#: scanning would have to guess which calls are portable.
+_POSIX_ONLY_MODULES = ("transport_posix.py", "interfaces_posix.py")
+# winapi.py is deliberately absent: its address and status helpers are pure
+# byte manipulation that runs anywhere, and that portability is what lets the
+# Windows encoding be verified from Linux. Only its DLL loading is Windows-only,
+# and that is guarded inside the function.
+_WINDOWS_ONLY_MODULES = ("transport_windows.py", "interfaces_windows.py")
 
 _NEEDS_ICMP = (
     "ping(",
@@ -74,6 +79,25 @@ def _icmp_available() -> bool:
     return icmp_available()
 
 
+def _skip_foreign_platform_doctests(items: list[pytest.Item]) -> None:
+    """Skip doctests in a backend that cannot execute on this platform.
+
+    ``getifaddrs`` does not exist on Windows and ``iphlpapi`` does not exist
+    anywhere else, so those modules' examples are real but unrunnable off their
+    own platform.
+    """
+
+    if sys.platform == "win32":
+        foreign, reason = _POSIX_ONLY_MODULES, "POSIX-only backend; Windows uses iphlpapi"
+    else:
+        foreign, reason = _WINDOWS_ONLY_MODULES, "Windows-only backend; this platform uses the POSIX APIs"
+
+    skip = pytest.mark.skip(reason=f"doctest lives in a {reason}")
+    for item in items:
+        if _doctest_source(item) and any(module in item.nodeid for module in foreign):
+            item.add_marker(skip)
+
+
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Skip doctests that need ICMP when this machine cannot provide it.
 
@@ -87,13 +111,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
     """
 
-    if sys.platform == "win32":
-        # These construct a POSIX ICMP socket directly, which does not exist on
-        # Windows however available ICMP itself is through iphlpapi.
-        posix_only = pytest.mark.skip(reason="the doctest drives a POSIX ICMP socket, which Windows does not have")
-        for item in items:
-            if any(marker in _doctest_source(item) for marker in _POSIX_ONLY):
-                item.add_marker(posix_only)
+    _skip_foreign_platform_doctests(items)
 
     candidates = [item for item in items if any(marker in _doctest_source(item) for marker in _NEEDS_ICMP)]
     if not candidates or _icmp_available():

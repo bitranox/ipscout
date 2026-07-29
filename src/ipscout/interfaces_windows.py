@@ -70,8 +70,11 @@ class _SocketAddress(ctypes.Structure):
 class _IpAdapterUnicastAddress(ctypes.Structure):
     """``IP_ADAPTER_UNICAST_ADDRESS``, to the prefix-length field."""
 
+    _layout_ = _MS_LAYOUT
 
-_IpAdapterUnicastAddress._layout_ = _MS_LAYOUT
+
+# Only the fields are deferred: a struct that points at itself cannot name its
+# own type inside the class body.
 _IpAdapterUnicastAddress._fields_ = (
     ("Length", ctypes.c_uint32),
     ("Flags", ctypes.c_uint32),
@@ -90,8 +93,9 @@ _IpAdapterUnicastAddress._fields_ = (
 class _IpAdapterAddresses(ctypes.Structure):
     """``IP_ADAPTER_ADDRESSES``, declared as far as the fields used here."""
 
+    _layout_ = _MS_LAYOUT
 
-_IpAdapterAddresses._layout_ = _MS_LAYOUT
+
 _IpAdapterAddresses._fields_ = (
     # The leading union is Length + IfIndex, which is what the alignment
     # member overlays.
