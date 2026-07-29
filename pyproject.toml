@@ -175,14 +175,23 @@ omit = [
   # gate therefore measures the portable core, which is the part it can measure
   # uniformly across the matrix. The interface backends are here for the same
   # reason: getifaddrs and GetAdaptersAddresses read the same facts through
-  # APIs that exist on only one platform each.
+  # APIs that exist on only one platform each, and the route, neighbour and
+  # lease backends for the same reason again. The rule is applied to the
+  # whole set rather than to whichever members happened to sink the number:
+  # a per-platform backend is either measurable everywhere or not, and
+  # omitting some while keeping others made routes_linux exempt while
+  # neighbours_linux was not, which is not a distinction anything supports.
   "src/ipscout/transport_posix.py",
   "src/ipscout/transport_windows.py",
   "src/ipscout/interfaces_posix.py",
   "src/ipscout/interfaces_windows.py",
   "src/ipscout/routes_linux.py",
+  "src/ipscout/routes_macos.py",
   "src/ipscout/routes_windows.py",
+  "src/ipscout/neighbours_linux.py",
+  "src/ipscout/neighbours_macos.py",
   "src/ipscout/neighbours_windows.py",
+  "src/ipscout/leases_linux.py",
 ]
 fail_under = 85
 show_missing = true

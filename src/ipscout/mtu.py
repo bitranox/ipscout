@@ -136,7 +136,7 @@ def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
             library.IcmpCloseHandle(handle)
 
 
-def _bsd_mtu(address: str) -> int | None:
+def _bsd_mtu(address: str) -> int | None:  # pragma: no cover - macOS and the BSDs only
     """Return the path MTU by probing with don't-fragment set.
 
     macOS and the BSDs have no ``IP_MTU`` to ask, so the size is narrowed by

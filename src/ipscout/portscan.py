@@ -189,6 +189,20 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = 1.0) -> dict[int, 
         msg = f"a SYN scan needs a raw socket, which this host refused: {exc}"
         raise IPScoutPermissionError(msg) from exc
 
+    return _syn_exchange(sender, receiver, host, ports, source_ip=source_ip, timeout=timeout)
+
+
+def _syn_exchange(  # noqa: PLR0913 - one parameter per piece of the exchange, all required
+    sender: socket.socket,
+    receiver: socket.socket,
+    host: str,
+    ports: list[int],
+    *,
+    source_ip: str,
+    timeout: float,
+) -> dict[int, PortState]:  # pragma: no cover - past the raw socket, so privileged only
+    """Send the SYNs and collect whatever answers within the timeout."""
+
     # Ports the target never answers about stay FILTERED, which is the honest
     # reading of silence rather than an assumption that they are closed.
     found: dict[int, PortState] = dict.fromkeys(ports, PortState.FILTERED)

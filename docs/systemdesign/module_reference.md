@@ -41,6 +41,12 @@ setup problems separate from network conditions.
    derived statistics are computed fields so a dump cannot drop them.
 5. **One JSON boundary.** All CLI commands render through a single helper, so no command can
    support JSON on its success path and forget it elsewhere.
+6. **Wire formats are pure functions.** Every parser - ICMP, netlink, BSD routing messages, ARP,
+   neighbour discovery, TCP - is bytes in and a record out, with no socket in sight. That is what
+   lets the macOS and Windows formats be tested adversarially from Linux, and the privileged ones
+   be tested without privilege.
+7. **Privilege is refused, never faked.** The three operations that need elevation raise with the
+   requirement named. None of them degrades to a weaker measurement under the same name.
 
 ---
 
@@ -52,13 +58,19 @@ The import-linter contract `Layered dependencies point one way only` is enforced
 listed highest first; each may import only from those below it.
 
 ```
+scan : subnet : portscan : mtu : wol   sweeps and single-purpose probes
 api          ping / aping / ping_many / aping_many / is_reachable / ais_reachable
 traceroute   traceroute / atraceroute / trace_path / atrace_path
-interfaces   local_interfaces
+leases_linux the OS lease store
+neighbours   neighbours / lookup_mac / get_mac_address / resolve_active
+interfaces : routes
 service      probe sequencing and aggregation
 factory      picks the backend for this platform, family and options
-transport_posix : transport_windows : transport_tcp : interfaces_posix : interfaces_windows
-packet : resolve : ports : winapi
+transport_posix : transport_windows : transport_tcp
+  : interfaces_posix : interfaces_windows
+  : routes_linux : routes_macos : routes_windows
+  : neighbours_linux : neighbours_macos : neighbours_windows
+packet : resolve : ports : winapi : netlink : bsdroute : arp : tcpsyn
 models
 errors
 ```
@@ -136,22 +148,28 @@ Established by running the suite on real CI runners, not by reading documentatio
 | Capability              | Linux                              | macOS                                | Windows                           |
 |-------------------------|------------------------------------|--------------------------------------|-----------------------------------|
 | ICMP echo, no elevation | `SOCK_DGRAM`/`IPPROTO_ICMP`        | `SOCK_DGRAM`/`IPPROTO_ICMP`          | `IcmpSendEcho` via `iphlpapi.dll` |
-| Traceroute              | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | no, raises `IPScoutUnsupportedError` | yes, `IP_TTL_EXPIRED_TRANSIT`     |
+| Traceroute              | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | only on a raw socket, so root        | yes, `IP_TTL_EXPIRED_TRANSIT`     |
 | Async model             | one socket on the event loop       | one socket on the event loop         | blocking C call in a thread pool  |
 | Interface enumeration   | `getifaddrs`                       | `getifaddrs`                         | `GetAdaptersAddresses`            |
 | Route lookup            | netlink `RTM_GETROUTE`             | not implemented                      | not implemented                   |
 
 ### Traceroute on macOS
 
-Measured on a macOS runner: `MSG_ERRQUEUE` is not defined there, and a plain receive on the ICMP
-socket returns nothing at all, so an unprivileged process never observes ICMP Time Exceeded.
-`traceroute` raises `IPScoutUnsupportedError` rather than returning a column of silent hops, which
-would look like a broken network instead of a missing capability. The exception type is distinct
-from `IPScoutPermissionError` for a concrete reason: running as root fixes a permission problem and
-does not fix this.
+Measured on a macOS runner: `MSG_ERRQUEUE` is not defined there, and a plain receive on an
+unprivileged datagram ICMP socket returns nothing at all, so such a process never observes ICMP
+Time Exceeded. Rather than returning a column of silent hops - which would look like a broken
+network instead of a missing capability - `traceroute` refuses.
 
-The refusal is taken from the transport's own `supports_ttl_discovery` rather than from
-`sys.platform`, so the TCP transport is refused through the same code path for the same reason.
+What it refuses on is the point. The capability is read from the transport's own
+`supports_ttl_discovery`, which asks the socket in hand rather than `sys.platform`. Linux surfaces
+expired hops on the error queue, on any socket. macOS surfaces them nowhere on a datagram socket
+but delivers them as ordinary ICMP Time Exceeded packets on a **raw** one, which a privileged
+process gets - so macOS traces perfectly well as root, through exactly the same code.
+
+An earlier version of this document said root did not fix it. That was a conclusion drawn from
+measuring only the unprivileged case, and it was wrong: the distinction was never the operating
+system, it was the socket type. The TCP transport is refused through the same predicate for the
+same reason, having no hop limit to expire at all.
 
 ### The Linux socket-option fallback
 
@@ -182,6 +200,13 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `api.py`        | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.           |
 | `traceroute.py` | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                           |
 | `interfaces.py` | `local_interfaces`, dispatching to the per-OS backend.                                                          |
+| `routes.py`     | `query_route`, `default_gateway`, dispatching to the per-OS backend.                                            |
+| `neighbours.py` | `neighbours`, `lookup_mac`, `get_mac_address`, `resolve_active`, `normalise_mac`.                               |
+| `scan.py`       | `arp_scan`, `find_ip_by_mac`, `local_networks`. Sweep, then read what the kernel learned.                       |
+| `subnet.py`     | `subnet_info`, composing interfaces, routes and the stored lease.                                               |
+| `portscan.py`   | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                         |
+| `mtu.py`        | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                |
+| `wol.py`        | `wake_on_lan` and the magic packet it builds.                                                                   |
 | `resolve.py`    | `resolve`, `resolve_one`, `reverse_dns`, `family_of`.                                                           |
 | `factory.py`    | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path. |
 
@@ -194,6 +219,10 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `ports.py`   | `EchoResult`, `EchoTransport`, `AsyncEchoTransport`. The seams.                   |
 | `packet.py`  | ICMP encode and decode. Total functions over bytes: no sockets, no clock, no I/O. |
 | `service.py` | `PingRequest`, `run_ping`, `arun_ping`. Probe sequencing and aggregation.         |
+| `netlink.py` | Message and attribute walkers for the Linux route and neighbour backends.        |
+| `bsdroute.py`| Routing-message and `sockaddr` walkers for the macOS backends, plus `sysctl`.     |
+| `arp.py`     | ARP and NDP codecs. Testable without the privilege the sockets need.              |
+| `tcpsyn.py`  | TCP SYN codec and its pseudo-header checksum, for the half-open scan.             |
 
 ### Platform backends
 
@@ -205,13 +234,19 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `interfaces_posix.py`   | `getifaddrs`, handling the Linux/BSD `sockaddr` disagreement.                                                            |
 | `interfaces_windows.py` | `GetAdaptersAddresses`.                                                                                                  |
 | `winapi.py`             | ctypes bindings for `iphlpapi.dll`. Imports safely on every platform.                                                    |
-| `routes_linux.py`       | Netlink `RTM_GETROUTE`, asking the kernel which route it would actually use.                                             |
+| `routes_linux.py`       | Netlink `RTM_GETROUTE` for one route, and a table dump for the default.                                                  |
+| `routes_macos.py`       | `RTM_GET` on a routing socket, matched on pid and sequence because the socket is shared.                                  |
+| `routes_windows.py`     | `GetBestRoute2`, and `GetIpForwardTable2` for the zero-length prefix.                                                     |
+| `neighbours_linux.py`   | `RTM_GETNEIGH` for both families in one dump; `AF_PACKET` ARP and raw ICMPv6 for the active path.                        |
+| `neighbours_macos.py`   | `NET_RT_FLAGS` sysctl dump; BPF for the active path.                                                                     |
+| `neighbours_windows.py` | `GetIpNetTable2`; `SendARP` and `ResolveIpNetEntry2` for the active path.                                                |
+| `leases_linux.py`       | systemd-networkd and dhclient lease stores. Reads a file; sends no DHCP traffic.                                          |
 
 ### CLI adapter
 
 | Module              | Role                                                                       |
 |---------------------|----------------------------------------------------------------------------|
-| `cli.py`            | The rich-click group, nine subcommands, `_emit` and `_fail`, and `main`.   |
+| `cli.py`            | The rich-click group, seventeen subcommands, `_emit` and `_fail`, `main`. |
 | `serialize.py`      | `to_jsonable` and `dumps` at the output boundary.                          |
 | `typed_click.py`    | Typed facade over rich-click's partially-typed decorators.                 |
 | `__main__.py`       | `python -m ipscout`.                                                       |
