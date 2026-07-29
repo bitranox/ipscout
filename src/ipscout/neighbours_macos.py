@@ -21,6 +21,7 @@ import select
 import socket
 import struct
 import time
+from typing import Protocol, cast
 
 from .arp import (
     build_arp_request,
@@ -149,6 +150,27 @@ _BPF_HDR = struct.Struct("=iiIIH")
 _MAX_BPF_DEVICES = 64
 
 
+class _Fcntl(Protocol):
+    """The one ``fcntl`` call this module makes, in the one form used.
+
+    ``fcntl`` is a Unix module, so on the Windows type-check its attributes
+    are unknown even though the import sits on a macOS-only path. Casting the
+    module onto this Protocol gives the call sites complete types on every
+    platform without turning a rule off, which would blind this file to real
+    errors as well.
+    """
+
+    def ioctl(self, fd: int, request: int, arg: bytes, /) -> bytes: ...
+
+
+def _fcntl() -> _Fcntl:
+    """Return the ``fcntl`` module, typed, importing it on first use."""
+
+    import fcntl  # noqa: PLC0415 - Unix-only, and only on the active path
+
+    return cast("_Fcntl", fcntl)
+
+
 def _iow(number: int, size: int) -> int:
     """Return the ioctl number for a write-direction request."""
 
@@ -204,10 +226,7 @@ def iter_bpf_frames(buffer: bytes) -> list[bytes]:
 def _open_bpf(interface: str) -> tuple[int, int]:  # pragma: no cover - macOS only
     """Open a free BPF device bound to one interface, and its buffer size."""
 
-    # fcntl is a Unix module. Imported here rather than at the top so this
-    # file still imports on Windows, where its tests read the decoders.
-    import fcntl  # noqa: PLC0415 - Unix-only, and only on the active path
-
+    fcntl = _fcntl()
     last: OSError | None = None
     for number in range(_MAX_BPF_DEVICES):
         try:
