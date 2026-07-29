@@ -158,3 +158,48 @@ def test_the_identifier_we_send_is_carried_but_never_relied_upon() -> None:
 
     assert parsed is not None
     assert parsed.identifier == 0xBEEF
+
+
+@pytest.mark.os_agnostic
+def test_a_reply_arriving_with_its_ip_header_is_still_understood() -> None:
+    # Found by CI on macOS, which prepends the full IPv4 header to a datagram
+    # received on an ICMP socket while Linux hands over the ICMP message alone.
+    # Parsing the IP header as the ICMP header gives type 0x45, matching no
+    # ICMP type, so every reply was discarded and a healthy host read as 100%
+    # loss.
+    datagram, token = packet.build_echo_request(sequence=7, token=b"ABCDEFGH")
+    reply = bytearray(datagram)
+    reply[0] = packet.ECHO_REPLY_V4
+    with_ip_header = b"\x45\x00" + bytes(18) + bytes(reply)
+
+    parsed = packet.parse_echo_reply(with_ip_header)
+
+    assert parsed is not None
+    assert parsed.sequence == 7
+    assert parsed.token == token
+    assert packet.is_echo_reply(parsed, is_ipv6=False)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("ihl_words", [5, 6, 15])
+def test_a_variable_length_ip_header_is_measured_not_assumed(ihl_words: int) -> None:
+    # IPv4 headers carry options, so the length comes from the IHL field
+    # rather than being a fixed 20 bytes.
+    datagram, token = packet.build_echo_request(sequence=3, token=b"12345678")
+    reply = bytearray(datagram)
+    reply[0] = packet.ECHO_REPLY_V4
+    header = bytes([0x40 | ihl_words]) + bytes(ihl_words * 4 - 1)
+
+    parsed = packet.parse_echo_reply(header + bytes(reply))
+
+    assert parsed is not None
+    assert parsed.token == token
+
+
+@pytest.mark.os_agnostic
+def test_an_icmp_message_is_never_mistaken_for_an_ip_header() -> None:
+    # Safe because every ICMPv4 type is below 16, so the high nibble of a real
+    # ICMP header is always 0 and can never look like IPv4's version 4.
+    for icmp_type in range(16):
+        raw = struct.pack("!BBHHH", icmp_type, 0, 0, 1, 1) + packet.MAGIC + b"TOKEN123"
+        assert packet.strip_ip_header(raw) == raw

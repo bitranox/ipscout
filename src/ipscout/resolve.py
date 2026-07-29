@@ -109,6 +109,22 @@ def resolve(target: str, *, family: AddressFamily | None = None) -> list[str]:
 
     """
 
+    # A blank target is a caller mistake, but resolvers disagree about it:
+    # Windows happily resolves "" to the local host, so is_reachable("") would
+    # answer True. Reject it here so every platform agrees.
+    if not target or not target.strip():
+        msg = "target must not be empty"
+        raise IPScoutResolutionError(msg)
+
+    # Decide a literal's family before consulting the resolver, because the
+    # resolvers disagree here too: asking macOS for the IPv6 address of an IPv4
+    # literal succeeds, returning a v4-mapped ::ffff: form, while Linux fails.
+    # Neither is a usable IPv6 address for the caller, so settle it up front.
+    literal = family_of(target)
+    if family is not None and literal is not None and literal is not family:
+        msg = f"{target!r} has no {family.value} address"
+        raise IPScoutResolutionError(msg)
+
     requested = _SOCKET_FAMILY.get(family) if family is not None else socket.AF_UNSPEC
     try:
         infos = socket.getaddrinfo(target, None, requested or socket.AF_UNSPEC, socket.SOCK_DGRAM)

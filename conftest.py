@@ -24,6 +24,7 @@ Note:
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -41,6 +42,11 @@ collect_ignore = ["conftest.py"]
 
 #: Call fragments that put an ICMP echo on the wire. ``is_reachable`` is
 #: deliberately absent: it falls back to TCP and stays truthful without ICMP.
+_POSIX_ONLY = (
+    "PosixEchoTransport(",
+    "AsyncPosixEchoTransport(",
+)
+
 _NEEDS_ICMP = (
     "ping(",
     "aping(",
@@ -80,6 +86,14 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         wasteful and could itself hit a descriptor limit.
 
     """
+
+    if sys.platform == "win32":
+        # These construct a POSIX ICMP socket directly, which does not exist on
+        # Windows however available ICMP itself is through iphlpapi.
+        posix_only = pytest.mark.skip(reason="the doctest drives a POSIX ICMP socket, which Windows does not have")
+        for item in items:
+            if any(marker in _doctest_source(item) for marker in _POSIX_ONLY):
+                item.add_marker(posix_only)
 
     candidates = [item for item in items if any(marker in _doctest_source(item) for marker in _NEEDS_ICMP)]
     if not candidates or _icmp_available():

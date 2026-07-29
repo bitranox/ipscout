@@ -50,6 +50,7 @@ __all__ = [
     "checksum",
     "is_echo_reply",
     "parse_echo_reply",
+    "strip_ip_header",
 ]
 
 #: ICMP type numbers. IPv4 and IPv6 disagree on every one of these.
@@ -71,6 +72,11 @@ TOKEN_SIZE = 8
 
 #: Smallest payload that can still carry magic and token.
 MIN_PAYLOAD_SIZE = len(MAGIC) + TOKEN_SIZE
+
+#: IPv4 version nibble, and the smallest legal IPv4 header. Used to recognise a
+#: header that some platforms prepend to a received ICMP datagram.
+_IPV4_VERSION = 4
+_IPV4_MIN_HEADER = 20
 
 
 @dataclass(frozen=True)
@@ -247,12 +253,60 @@ def build_echo_request(
     return _HEADER_STRUCT.pack(icmp_type, 0, checksum(blank), identifier, sequence) + payload, actual_token
 
 
+def strip_ip_header(datagram: bytes) -> bytes:
+    """Return the datagram with any leading IPv4 header removed.
+
+    Whether a received datagram begins at the IP header or at the ICMP header
+    is not consistent across platforms. Linux ping sockets hand over just the
+    ICMP message; macOS prepends the full IPv4 header, as raw sockets do on
+    every BSD. Parsing the IP header as though it were the ICMP header yields a
+    type byte of 0x45, which matches no ICMP type, so every reply would be
+    silently discarded and a perfectly healthy host would read as 100% loss.
+
+    The prefix is detected from the data rather than from ``sys.platform``,
+    which is both simpler and more robust: ICMPv4 type numbers are all below 16,
+    so a first byte whose high nibble is 4 can only be an IPv4 version field and
+    never an ICMP type.
+
+    Args:
+        datagram: Bytes exactly as received.
+
+    Returns:
+        The bytes starting at the ICMP header.
+
+    Examples:
+        >>> icmp_only = b"\\x00\\x00\\x00\\x00\\x00\\x01\\x00\\x02payload"
+        >>> strip_ip_header(icmp_only) == icmp_only
+        True
+
+        A 20-byte IPv4 header (version 4, IHL 5) is recognised and removed:
+
+        >>> with_header = b"\\x45" + b"\\x00" * 19 + icmp_only
+        >>> strip_ip_header(with_header) == icmp_only
+        True
+
+        A header claiming more length than the datagram holds is left alone
+        rather than truncating everything away:
+
+        >>> strip_ip_header(b"\\x4f" + b"\\x00" * 5)
+        b'O\\x00\\x00\\x00\\x00\\x00'
+
+    """
+
+    if len(datagram) < _IPV4_MIN_HEADER or (datagram[0] >> 4) != _IPV4_VERSION:
+        return datagram
+    header_len = (datagram[0] & 0x0F) * 4
+    if header_len < _IPV4_MIN_HEADER or header_len >= len(datagram):
+        return datagram
+    return datagram[header_len:]
+
+
 def parse_echo_reply(datagram: bytes) -> ParsedReply | None:
     """Decode a received datagram into its identifying fields.
 
     Args:
-        datagram: Bytes as received. On an unprivileged datagram socket this
-            starts at the ICMP header, with no IP header prepended.
+        datagram: Bytes as received. A leading IPv4 header is removed first
+            when one is present, since macOS delivers it and Linux does not.
 
     Returns:
         The parsed reply, or ``None`` when the datagram is too short to hold
@@ -284,15 +338,16 @@ def parse_echo_reply(datagram: bytes) -> ParsedReply | None:
 
     """
 
-    if len(datagram) < HEADER_SIZE:
+    body = strip_ip_header(datagram)
+    if len(body) < HEADER_SIZE:
         return None
-    icmp_type, code, _sum, identifier, sequence = _HEADER_STRUCT.unpack(datagram[:HEADER_SIZE])
+    icmp_type, code, _sum, identifier, sequence = _HEADER_STRUCT.unpack(body[:HEADER_SIZE])
     return ParsedReply(
         icmp_type=icmp_type,
         code=code,
         identifier=identifier,
         sequence=sequence,
-        payload=EchoPayload.from_bytes(datagram[HEADER_SIZE:]),
+        payload=EchoPayload.from_bytes(body[HEADER_SIZE:]),
     )
 
 

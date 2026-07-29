@@ -34,11 +34,31 @@ def _offset(struct_type: type[ctypes.Structure], field: str) -> int:
     return int(getattr(struct_type, field).offset)
 
 
-def test_no_field_uses_a_platform_dependent_integer_width() -> None:
+def test_every_integer_field_has_the_width_the_c_header_declares() -> None:
     # The trap this guards: c_ulong is 4 bytes on Windows (LLP64) and 8 on
-    # 64-bit Linux (LP64). One c_ulong anywhere below would make every later
-    # field land on a different offset depending on where Python is running.
-    forbidden = {ctypes.c_ulong, ctypes.c_long}
+    # 64-bit Linux (LP64), so one c_ulong would make every later field land at
+    # a different offset depending on where Python happens to run.
+    #
+    # This checks widths rather than type identity, because identity cannot be
+    # checked portably: on Windows ctypes.c_uint32 *is* ctypes.c_ulong, so a
+    # "no c_ulong anywhere" assertion passes on Linux and fails on Windows
+    # while the layout is in fact correct on both.
+    expected = {
+        "Ttl": 1,
+        "Tos": 1,
+        "Flags": 1,
+        "OptionsSize": 1,
+        "Address": None,  # a struct in one type, a uint32 in the other
+        "Status": 4,
+        "RoundTripTime": 4,
+        "DataSize": 2,
+        "Reserved": 2,
+        "sin6_port": 2,
+        "sin6_family": 2,
+        "sin6_flowinfo": 4,
+        "sin6_scope_id": 4,
+        "sin6_addr": 16,
+    }
     structures = (
         winapi.IP_OPTION_INFORMATION,
         winapi.ICMP_ECHO_REPLY,
@@ -49,7 +69,11 @@ def test_no_field_uses_a_platform_dependent_integer_width() -> None:
 
     for structure in structures:
         for name, field_type, *_ in structure._fields_:
-            assert field_type not in forbidden, f"{structure.__name__}.{name} uses a platform-dependent width"
+            width = expected.get(name)
+            if width is None:
+                continue
+            actual = ctypes.sizeof(field_type)
+            assert actual == width, f"{structure.__name__}.{name} is {actual} bytes, expected {width}"
 
 
 def test_the_option_block_matches_the_c_layout() -> None:

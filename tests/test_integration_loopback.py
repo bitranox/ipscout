@@ -13,6 +13,7 @@ hardened runner reports an honest skip instead of a red build.
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -55,6 +56,7 @@ def test_loopback_answers_in_both_families(address: str, family: AddressFamily) 
     assert all(rtt is not None for rtt in result.rtts_ms)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows reaches ICMP through iphlpapi, not a socket")
 def test_the_kernel_rewrites_our_identifier_and_matching_still_works() -> None:
     # The design constraint this whole library is built around. If the kernel
     # ever stopped rewriting it, matching would still work; if we had matched

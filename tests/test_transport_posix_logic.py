@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -29,7 +30,13 @@ from ipscout.transport_posix import AsyncPosixEchoTransport, PosixEchoTransport
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-pytestmark = pytest.mark.os_agnostic
+pytestmark = [
+    pytest.mark.os_posix,
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="PosixEchoTransport is POSIX-only, and loop.add_reader is unsupported on the Windows Proactor loop",
+    ),
+]
 
 
 class _EchoResponder:

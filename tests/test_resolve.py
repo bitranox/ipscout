@@ -80,3 +80,26 @@ def test_a_missing_ptr_record_is_an_answer_not_an_error() -> None:
 @pytest.mark.os_agnostic
 def test_loopback_has_a_reverse_name() -> None:
     assert reverse_dns("127.0.0.1") is not None
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("blank", ["", "   ", "\t", "\n"])
+def test_a_blank_target_is_refused_on_every_platform(blank: str) -> None:
+    # Found by CI on Windows, where getaddrinfo("") happily resolves to the
+    # local host, so is_reachable("") answered True. Resolvers disagree here,
+    # so the rejection has to be ours rather than theirs.
+    with pytest.raises(IPScoutResolutionError, match="must not be empty"):
+        resolve(blank)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("literal", "wrong_family"),
+    [("127.0.0.1", AddressFamily.IPV6), ("::1", AddressFamily.IPV4), ("192.168.1.1", AddressFamily.IPV6)],
+)
+def test_a_literal_is_never_coerced_into_the_other_family(literal: str, wrong_family: AddressFamily) -> None:
+    # Found by CI on macOS, where getaddrinfo returns a v4-mapped ::ffff: form
+    # instead of failing as it does on Linux. Neither is a usable address of
+    # the requested family, so the answer must be the same on both.
+    with pytest.raises(IPScoutResolutionError, match="has no"):
+        resolve(literal, family=wrong_family)

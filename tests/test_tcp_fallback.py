@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -54,6 +55,10 @@ def test_an_open_port_answers(listening_port: int) -> None:
     assert result.source == "127.0.0.1"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows silently drops rather than sending RST for a bound-then-closed port, so a refusal cannot be provoked",
+)
 def test_a_refused_port_still_proves_the_host_is_alive(closed_port: int) -> None:
     # A RST is an answer: only a live host sends one. Treating refusal as
     # "unreachable" would call every firewalled-but-running server dead.
