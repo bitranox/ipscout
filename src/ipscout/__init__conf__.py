@@ -24,9 +24,9 @@ import sys
 #: Distribution name declared in ``pyproject.toml``.
 name = "ipscout"
 #: Human-readable summary shown in CLI help output.
-title = "Template for backward compatible python libs with registered cli commands"
+title = "Ping, traceroute and local-network inspection in pure Python - no subprocess, no admin rights"
 #: Current release version pulled from ``pyproject.toml`` by automation.
-version = "1.1.3"
+version = "1.0.0"
 #: Repository homepage presented to users.
 homepage = "https://github.com/bitranox/ipscout"
 #: Author attribution surfaced in CLI output.

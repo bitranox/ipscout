@@ -44,7 +44,7 @@ __all__ = [
 NO_TIME_MS = -1.0
 
 #: Value the old library used for "no address determined".
-UNKNOWN_IP = "0.0.0.0"  # noqa: S104 - a sentinel echoed for compatibility, never bound to
+UNKNOWN_IP = "0.0.0.0"  # noqa: S104  # nosec B104 - reported as a value for compatibility, never bound to
 
 
 class AddressFamily(enum.Enum):
