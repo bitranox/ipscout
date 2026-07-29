@@ -180,9 +180,13 @@ omit = [
   # by per-OS marked suites that run in the CI matrix, and their layouts are
   # additionally pinned from any platform by tests/test_winapi_layout.py. The
   # gate therefore measures the portable core, which is the part it can measure
-  # uniformly across the matrix.
+  # uniformly across the matrix. The interface backends are here for the same
+  # reason: getifaddrs and GetAdaptersAddresses read the same facts through
+  # APIs that exist on only one platform each.
   "src/ipscout/transport_posix.py",
   "src/ipscout/transport_windows.py",
+  "src/ipscout/interfaces_posix.py",
+  "src/ipscout/interfaces_windows.py",
 ]
 fail_under = 85
 show_missing = true
@@ -234,9 +238,10 @@ type = "layers"
 layers = [
   "ipscout.api",
   "ipscout.traceroute",
+  "ipscout.interfaces",
   "ipscout.service",
   "ipscout.factory",
-  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp",
+  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows",
   "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi",
   "ipscout.models",
   "ipscout.errors",

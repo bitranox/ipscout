@@ -49,6 +49,7 @@ from .errors import (
     IPScoutUnsupportedError,
 )
 from .factory import icmp_available
+from .interfaces import local_interfaces
 from .models import (
     AddressFamily,
     Interface,
@@ -82,6 +83,7 @@ __all__ = [
     "atraceroute",
     "icmp_available",
     "is_reachable",
+    "local_interfaces",
     "ping",
     "ping_many",
     "print_info",
