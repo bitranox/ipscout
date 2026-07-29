@@ -44,16 +44,24 @@ __all__ = [
     "ICMP_ECHO_REPLY",
     "INVALID_HANDLE_VALUE",
     "IPV6_ADDRESS_EX",
+    "IP_ADDRESS_PREFIX",
     "IP_DEST_HOST_UNREACHABLE",
     "IP_DEST_NET_UNREACHABLE",
     "IP_OPTION_INFORMATION",
     "IP_REQ_TIMED_OUT",
     "IP_SUCCESS",
     "IP_TTL_EXPIRED_TRANSIT",
+    "MIB_IPFORWARD_ROW2",
+    "NET_LUID",
+    "SOCKADDR_IN",
     "SOCKADDR_IN6",
+    "SOCKADDR_INET",
+    "WIN_AF_INET",
+    "WIN_AF_INET6",
     "iphlpapi",
     "ipv4_to_string",
     "ipv6_words_to_string",
+    "sockaddr_inet_to_string",
     "status_message",
     "string_to_ipv4",
 ]
@@ -203,6 +211,109 @@ class SOCKADDR_IN6(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type
     )
 
 
+class SOCKADDR_IN(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``sockaddr_in``, the IPv4 arm of :class:`SOCKADDR_INET`."""
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("sin_family", ctypes.c_uint16),
+        ("sin_port", ctypes.c_uint16),
+        ("sin_addr", ctypes.c_uint8 * 4),
+        ("sin_zero", ctypes.c_uint8 * 8),
+    )
+
+
+class SOCKADDR_INET(ctypes.Union):  # noqa: N801 - mirrors the Windows C type name
+    """``SOCKADDR_INET``: either address family, tagged by the family field.
+
+    Every arm begins with the family, which is what makes reading ``si_family``
+    first and then the matching arm well defined rather than a guess.
+    """
+
+    _fields_ = (
+        ("Ipv4", SOCKADDR_IN),
+        ("Ipv6", SOCKADDR_IN6),
+        ("si_family", ctypes.c_uint16),
+    )
+
+
+class NET_LUID(ctypes.Union):  # noqa: N801 - mirrors the Windows C type name
+    """``NET_LUID``: an opaque 64-bit interface identifier."""
+
+    _fields_ = (("Value", ctypes.c_uint64),)
+
+
+class IP_ADDRESS_PREFIX(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``IP_ADDRESS_PREFIX``: an address plus its prefix length."""
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("Prefix", SOCKADDR_INET),
+        ("PrefixLength", ctypes.c_uint8),
+    )
+
+
+class MIB_IPFORWARD_ROW2(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``MIB_IPFORWARD_ROW2``: one row of the IP forwarding table.
+
+    Declared in full even though only the next hop and interface index are
+    read. A short structure would make ``GetBestRoute2`` write past the buffer
+    it was given, which corrupts memory rather than failing cleanly.
+    """
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("InterfaceLuid", NET_LUID),
+        ("InterfaceIndex", ctypes.c_uint32),
+        ("DestinationPrefix", IP_ADDRESS_PREFIX),
+        ("NextHop", SOCKADDR_INET),
+        ("SitePrefixLength", ctypes.c_uint8),
+        ("ValidLifetime", ctypes.c_uint32),
+        ("PreferredLifetime", ctypes.c_uint32),
+        ("Metric", ctypes.c_uint32),
+        ("Protocol", ctypes.c_uint32),
+        ("Loopback", ctypes.c_uint8),
+        ("AutoconfigureAddress", ctypes.c_uint8),
+        ("Publish", ctypes.c_uint8),
+        ("Immortal", ctypes.c_uint8),
+        ("Age", ctypes.c_uint32),
+        ("Origin", ctypes.c_uint32),
+    )
+
+
+#: Windows numbers AF_INET6 23, not the 10 that POSIX uses. Reading the
+#: platform's own socket.AF_INET6 here would decode IPv6 rows as unknown on
+#: every non-Windows host that inspects a captured structure.
+WIN_AF_INET = 2
+WIN_AF_INET6 = 23
+
+
+def sockaddr_inet_to_string(sockaddr: SOCKADDR_INET) -> str | None:
+    """Return the address held in a ``SOCKADDR_INET``, or None if it holds none.
+
+    Args:
+        sockaddr: The union to read.
+
+    Returns:
+        The printable address, or ``None`` when the family is neither IPv4 nor
+        IPv6 (an unspecified next hop reads as family zero, which is how an
+        on-link route reports having no router).
+
+    Examples:
+        >>> blank = SOCKADDR_INET()
+        >>> sockaddr_inet_to_string(blank) is None
+        True
+
+    """
+
+    family = sockaddr.si_family
+    if family == WIN_AF_INET:
+        return socket.inet_ntop(socket.AF_INET, bytes(sockaddr.Ipv4.sin_addr))
+    if family == WIN_AF_INET6:
+        return socket.inet_ntop(socket.AF_INET6, bytes(sockaddr.Ipv6.sin6_addr))
+    return None
+
+
 def ipv4_to_string(address: int) -> str:
     """Return the dotted-quad form of an ``IPAddr``.
 
@@ -327,6 +438,17 @@ def _configure(library: Any) -> None:  # pragma: no cover - Windows only
         ctypes.c_void_p,  # ReplyBuffer
         ctypes.c_uint32,  # ReplySize
         ctypes.c_uint32,  # Timeout, milliseconds
+    )
+
+    library.GetBestRoute2.restype = ctypes.c_uint32
+    library.GetBestRoute2.argtypes = (
+        ctypes.POINTER(NET_LUID),  # InterfaceLuid, optional
+        ctypes.c_uint32,  # InterfaceIndex
+        ctypes.POINTER(SOCKADDR_INET),  # SourceAddress, optional
+        ctypes.POINTER(SOCKADDR_INET),  # DestinationAddress
+        ctypes.c_uint32,  # AddressSortOptions
+        ctypes.POINTER(MIB_IPFORWARD_ROW2),  # BestRoute, written by the call
+        ctypes.POINTER(SOCKADDR_INET),  # BestSourceAddress, written by the call
     )
 
     library.Icmp6SendEcho2.restype = ctypes.c_uint32

@@ -53,6 +53,7 @@ __all__ = [
     "ResolveReport",
     "ResponseObject",
     "ReverseDnsReport",
+    "RouteInfo",
     "SubnetInfo",
     "TraceHop",
 ]
@@ -123,6 +124,7 @@ class CommandName(str, enum.Enum):
     RESOLVE = "resolve"
     REVERSE_DNS = "reverse-dns"
     INTERFACES = "interfaces"
+    GATEWAY = "gateway"
     CAPABILITIES = "capabilities"
     INFO = "info"
 
@@ -292,6 +294,23 @@ class Interface(_Frozen):
     is_up: bool = False
     is_loopback: bool = False
     mtu: int | None = None
+
+
+class RouteInfo(_Frozen):
+    """How this host would reach one destination.
+
+    Attributes:
+        gateway: The next-hop router, or ``None`` when the destination is
+            on-link. That distinction is the whole point of the lookup: it is
+            what separates a MAC this host can learn from one it cannot.
+        interface: Outgoing interface name, where one could be resolved.
+        source: The source address the kernel would use.
+
+    """
+
+    gateway: str | None = None
+    interface: str | None = None
+    source: str | None = None
 
 
 class MacLookup(_Frozen):

@@ -47,9 +47,11 @@ from .models import (
     ReachabilityReport,
     ResolveReport,
     ReverseDnsReport,
+    RouteInfo,
 )
 from .resolve import resolve as resolve_target
 from .resolve import reverse_dns
+from .routes import default_gateway, query_route
 from .serialize import dumps, to_jsonable
 from .traceroute import traceroute
 from .typed_click import argument, option, version_option
@@ -377,6 +379,31 @@ def cli_interfaces(ctx: click.Context) -> None:
         console.print(table)
 
     _emit(ctx, CommandName.INTERFACES, interfaces, human)
+
+
+@cli.command("gateway", context_settings=CLICK_CONTEXT_SETTINGS)
+@option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
+@option("--to", "destination", default=None, help="Report the next hop toward this address instead of the default route.")
+@click.pass_context
+def cli_gateway(ctx: click.Context, *, ipv4: bool, ipv6: bool, destination: str | None) -> None:
+    """Show the default route, or the next hop toward one address."""
+
+    family = _family(ipv4=ipv4, ipv6=ipv6) or AddressFamily.IPV4
+    route = query_route(destination, family) if destination else default_gateway(family)
+
+    if route is None:
+        empty = RouteInfo()
+        _emit(ctx, CommandName.GATEWAY, empty, lambda: console.print("(no route)", highlight=False))
+        ctx.exit(EXIT_NOT_REACHED)
+        return
+
+    def human() -> None:
+        table = Table("gateway", "interface", "source")
+        table.add_row(route.gateway or "(on-link)", route.interface or "-", route.source or "-")
+        console.print(table)
+
+    _emit(ctx, CommandName.GATEWAY, route, human)
 
 
 @cli.command("capabilities", context_settings=CLICK_CONTEXT_SETTINGS)

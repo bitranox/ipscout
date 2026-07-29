@@ -59,10 +59,12 @@ from .models import (
     ResolveReport,
     ResponseObject,
     ReverseDnsReport,
+    RouteInfo,
     SubnetInfo,
     TraceHop,
 )
 from .resolve import resolve, reverse_dns
+from .routes import default_gateway, query_route
 from .traceroute import atrace_path, atraceroute, trace_path, traceroute
 
 __all__ = [
@@ -83,6 +85,7 @@ __all__ = [
     "ResolveReport",
     "ResponseObject",
     "ReverseDnsReport",
+    "RouteInfo",
     "SubnetInfo",
     "TraceHop",
     "ais_reachable",
@@ -90,12 +93,14 @@ __all__ = [
     "aping_many",
     "atrace_path",
     "atraceroute",
+    "default_gateway",
     "icmp_available",
     "is_reachable",
     "local_interfaces",
     "ping",
     "ping_many",
     "print_info",
+    "query_route",
     "resolve",
     "reverse_dns",
     "trace_path",
