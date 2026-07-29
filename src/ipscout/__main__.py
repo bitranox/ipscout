@@ -1,6 +1,6 @@
 """Module entry point for python -m execution.
 
-Provide the ``python -m lib_ping`` path mandated by the
+Provide the ``python -m ipscout`` path mandated by the
 project's packaging guidelines. This delegates to the CLI main function
 ensuring consistent behavior between module execution and console scripts.
 

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve **lib_ping**. This page covers the day-to-day
+Thanks for helping improve **ipscout**. This page covers the day-to-day
 workflow and the checks a change must pass before it merges. For the tooling details, see
 [docs/development.md](docs/development.md).
 

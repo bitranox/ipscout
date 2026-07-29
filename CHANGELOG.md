@@ -99,4 +99,4 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - Set coverage output to JSON to avoid SQL locks
 
 ## [1.0.0] - 2025-11-04
-- Bootstrap `lib_ping`
+- Bootstrap `ipscout`

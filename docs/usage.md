@@ -8,8 +8,8 @@ Replace the placeholder behaviors with your own once you clone it.
 
 The CLI is built on [rich-click](https://github.com/ewels/rich-click), so help, errors and
 tracebacks render with Rich styling while keeping click's ergonomics. Both console commands
-(`lib_ping` and `bitranox-template-py-cli`) and `python -m
-lib_ping` invoke the same entry point.
+(`ipscout` and `bitranox-template-py-cli`) and `python -m
+ipscout` invoke the same entry point.
 
 ### Commands
 
@@ -30,16 +30,16 @@ lib_ping` invoke the same entry point.
 ### Examples
 
 ```bash
-lib_ping hello                 # -> Hello World
-lib_ping info                  # metadata block
-lib_ping fail                  # full traceback, exit code 1
-lib_ping --no-traceback fail   # one-line error, exit code 1
-lib_ping --version
+ipscout hello                 # -> Hello World
+ipscout info                  # metadata block
+ipscout fail                  # full traceback, exit code 1
+ipscout --no-traceback fail   # one-line error, exit code 1
+ipscout --version
 
 # same behavior, other entry points:
 bitranox-template-py-cli info
-python -m lib_ping info
-uvx lib_ping info
+python -m ipscout info
+uvx ipscout info
 ```
 
 ### Exit codes
@@ -52,7 +52,7 @@ other uncaught exception (after printing the error).
 The public surface is re-exported from the package root:
 
 ```python
-import lib_ping as lib
+import ipscout as lib
 
 # success path: write the canonical greeting to a stream (default: stdout)
 lib.emit_greeting()

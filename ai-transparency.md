@@ -48,7 +48,7 @@ before a release publishes to PyPI. The badges at the top of the README report t
 
 You do not have to take any of this on faith.
 
-- The source is small and available. Read `src/lib_ping/`; the module-by-module
+- The source is small and available. Read `src/ipscout/`; the module-by-module
   map with source anchors is in [docs/systemdesign/module_reference.md](docs/systemdesign/module_reference.md).
 - The history is available too. Decisions and reversals show up over time.
 - The tests live in `tests/` and the doctests live in the modules. Run `make test` and see.

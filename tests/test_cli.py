@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from lib_ping import __init__conf__
-from lib_ping import cli as cli_mod
+from ipscout import __init__conf__
+from ipscout import cli as cli_mod
 
 if TYPE_CHECKING:
     from click.testing import CliRunner, Result

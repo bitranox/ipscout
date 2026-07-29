@@ -1,5 +1,5 @@
 [project]
-name = "lib_ping"
+name = "ipscout"
 version = "1.1.3"
 description = "Template for backward compatible python libs with registered cli commands"
 readme = "README.md"
@@ -37,9 +37,9 @@ system-dependencies-windows-choco = []
 os = ["ubuntu-latest", "windows-latest", "macos-latest"]
 
 [project.urls]
-Homepage = "https://github.com/bitranox/lib_ping"
-Repository = "https://github.com/bitranox/lib_ping.git"
-Issues = "https://github.com/bitranox/lib_ping/issues"
+Homepage = "https://github.com/bitranox/ipscout"
+Repository = "https://github.com/bitranox/ipscout.git"
+Issues = "https://github.com/bitranox/ipscout/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -81,8 +81,8 @@ dev = [
 ]
 
 [project.scripts]
-lib_ping = "lib_ping.cli:main"
-bitranox-template-py-cli = "lib_ping.cli:main"
+ipscout = "ipscout.cli:main"
+bitranox-template-py-cli = "ipscout.cli:main"
 
 [build-system]
 requires = [
@@ -92,8 +92,8 @@ requires = [
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/lib_ping"]
-include = ["src/lib_ping/py.typed"]
+packages = ["src/ipscout"]
+include = ["src/ipscout/py.typed"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -165,7 +165,7 @@ markers = [
 branch = true
 parallel = false
 data_file = ".coverage.unit"
-source = ["src/lib_ping"]
+source = ["src/ipscout"]
 
 [tool.coverage.report]
 omit = [
@@ -213,14 +213,14 @@ coverage-report-file = "coverage.xml"
 src-path = "src"
 
 [tool.importlinter]
-root_package = "lib_ping"
+root_package = "ipscout"
 
 [[tool.importlinter.contracts]]
 name = "CLI depends on behaviors only"
 type = "layers"
 layers = [
-  "lib_ping.cli",
-  "lib_ping.behaviors",
+  "ipscout.cli",
+  "ipscout.behaviors",
 ]
 
 [tool.pip-audit]

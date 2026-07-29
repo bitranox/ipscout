@@ -1,6 +1,6 @@
 ---
 name: new-public-python-library
-description: Use when creating or scaffolding a NEW public bitranox Python library - a pip-installable package with a rich-click CLI, CI across Python 3.9-3.14 on Linux/macOS/Windows, and a PyPI release - or when installing or using a library built from the lib_ping template. Keywords - new library, scaffold, project template, rename-project, bmk, make test, make release, uv pip install.
+description: Use when creating or scaffolding a NEW public bitranox Python library - a pip-installable package with a rich-click CLI, CI across Python 3.9-3.14 on Linux/macOS/Windows, and a PyPI release - or when installing or using a library built from the ipscout template. Keywords - new library, scaffold, project template, rename-project, bmk, make test, make release, uv pip install.
 ---
 
 # New public Python library (from the bitranox template)
@@ -8,7 +8,7 @@ description: Use when creating or scaffolding a NEW public bitranox Python libra
 ## Overview
 
 Do not hand-build a new public Python library. Clone the template
-`lib_ping` (https://github.com/bitranox/lib_ping),
+`ipscout` (https://github.com/bitranox/ipscout),
 rename it to your package, and you inherit a working layout, strict typing, a
 CLI, and a full CI/test/release pipeline. This skill is the scaffold-install-use
 sequence plus the pitfalls that a from-memory guess gets wrong.
@@ -28,7 +28,7 @@ first. Copy the template, detach the template remote, rename, then reset the his
 
 ```bash
 # copy the template into a new dir named for your package
-git clone --depth 1 https://github.com/bitranox/lib_ping.git lib_wombat
+git clone --depth 1 https://github.com/bitranox/ipscout.git lib_wombat
 cd lib_wombat
 git remote remove origin         # detach from the template so nothing pushes back to it
 git branch -m master main        # NEW repos use main, never master
@@ -117,6 +117,6 @@ consequences that a plain library does not have:
 ## Reference
 
 The template's docs go deeper - open them on the default branch (latest) under
-`https://github.com/bitranox/lib_ping/blob/master/docs/`: `installation.md`,
+`https://github.com/bitranox/ipscout/blob/master/docs/`: `installation.md`,
 `usage.md`, `development.md`, and the `systemdesign/` reference. A repo you generate from the template
 carries these same files locally, so inside your new project the plain `docs/...` paths resolve.

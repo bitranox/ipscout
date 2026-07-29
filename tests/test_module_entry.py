@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from lib_ping import cli as cli_mod
+from ipscout import cli as cli_mod
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -17,10 +17,10 @@ if TYPE_CHECKING:
 @pytest.mark.os_agnostic
 def test_when_module_entry_returns_zero_the_story_matches_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     """Module entry should successfully execute hello command."""
-    monkeypatch.setattr(sys, "argv", ["lib_ping", "hello"], raising=False)
+    monkeypatch.setattr(sys, "argv", ["ipscout", "hello"], raising=False)
 
     with pytest.raises(SystemExit) as exc:
-        runpy.run_module("lib_ping.__main__", run_name="__main__")
+        runpy.run_module("ipscout.__main__", run_name="__main__")
 
     assert exc.value.code == 0
 
@@ -31,10 +31,10 @@ def test_when_module_entry_raises_the_exit_helpers_format_the_song(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Module entry should handle exceptions and return non-zero exit code."""
-    monkeypatch.setattr(sys, "argv", ["lib_ping", "fail"], raising=False)
+    monkeypatch.setattr(sys, "argv", ["ipscout", "fail"], raising=False)
 
     with pytest.raises(SystemExit) as exc:
-        runpy.run_module("lib_ping.__main__", run_name="__main__")
+        runpy.run_module("ipscout.__main__", run_name="__main__")
 
     assert exc.value.code != 0
     assert exc.value.code is not None
@@ -47,10 +47,10 @@ def test_when_traceback_flag_is_used_via_module_entry_the_full_poem_is_printed(
     strip_ansi: Callable[[str], str],
 ) -> None:
     """Module entry with --traceback should show full traceback."""
-    monkeypatch.setattr(sys, "argv", ["lib_ping", "--traceback", "fail"])
+    monkeypatch.setattr(sys, "argv", ["ipscout", "--traceback", "fail"])
 
     with pytest.raises(SystemExit) as exc:
-        runpy.run_module("lib_ping.__main__", run_name="__main__")
+        runpy.run_module("ipscout.__main__", run_name="__main__")
 
     captured = capsys.readouterr()
     plain_out = strip_ansi(captured.out)

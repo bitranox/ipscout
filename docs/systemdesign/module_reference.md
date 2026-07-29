@@ -1,4 +1,4 @@
-# Module Reference: lib_ping
+# Module Reference: ipscout
 
 ## Status
 
@@ -6,18 +6,18 @@ Template / Scaffold (v1.1.2)
 
 ## Links & References
 
-**Repository:** https://github.com/bitranox/lib_ping
-**PyPI:** https://pypi.org/project/lib-ping/
+**Repository:** https://github.com/bitranox/ipscout
+**PyPI:** https://pypi.org/project/ipscout/
 **Documentation:** README.md, INSTALL.md, DEVELOPMENT.md, CONTRIBUTING.md, CHANGELOG.md
 **Related Files:**
 
-* src/lib_ping/__init__.py (public API surface)
-* src/lib_ping/behaviors.py (domain behaviors)
-* src/lib_ping/cli.py (rich-click CLI adapter)
-* src/lib_ping/typed_click.py (strict-typed click decorator wrappers)
-* src/lib_ping/__init__conf__.py (static metadata / platform adapter)
-* src/lib_ping/__main__.py (python -m entry point)
-* src/lib_ping/py.typed (PEP 561 marker)
+* src/ipscout/__init__.py (public API surface)
+* src/ipscout/behaviors.py (domain behaviors)
+* src/ipscout/cli.py (rich-click CLI adapter)
+* src/ipscout/typed_click.py (strict-typed click decorator wrappers)
+* src/ipscout/__init__conf__.py (static metadata / platform adapter)
+* src/ipscout/__main__.py (python -m entry point)
+* src/ipscout/py.typed (PEP 561 marker)
 * tests/test_behaviors.py, tests/test_cli.py, tests/test_metadata.py, tests/test_module_entry.py
 
 ---
@@ -40,7 +40,7 @@ working, tested, lint-clean baseline rather than an empty `src/`.
 
 ## Solution Overview
 
-`lib_ping` provides:
+`ipscout` provides:
 
 1. **Layered Skeleton** - CLI adapter, domain behaviors, and a metadata/platform adapter
    with enforced dependency direction.
@@ -97,7 +97,7 @@ module layout.
 **Exports:** `CANONICAL_GREETING`, `WritableStream`, `emit_greeting`, `noop_main`,
 `print_info`, `raise_intentional_failure`.
 
-**Location:** src/lib_ping/__init__.py
+**Location:** src/ipscout/__init__.py
 
 ---
 
@@ -110,7 +110,7 @@ Framework-free helpers that other modules import instead of duplicating literals
 **Purpose:** Structural type for any object exposing `write(str) -> object`. `flush` is
 optional and duck-typed at runtime.
 
-**Location:** src/lib_ping/behaviors.py:29
+**Location:** src/ipscout/behaviors.py:29
 
 ---
 
@@ -118,7 +118,7 @@ optional and duck-typed at runtime.
 
 **Purpose:** Single source of the greeting text (`"Hello World"`) shared by the CLI and tests.
 
-**Location:** src/lib_ping/behaviors.py:39
+**Location:** src/ipscout/behaviors.py:39
 
 ---
 
@@ -132,12 +132,12 @@ the stream supports it.
 
 **Output:** None (writes to the stream).
 
-**Location:** src/lib_ping/behaviors.py:62
+**Location:** src/ipscout/behaviors.py:62
 
 **Example:**
 ```python
 from io import StringIO
-from lib_ping import emit_greeting
+from ipscout import emit_greeting
 
 buffer = StringIO()
 emit_greeting(stream=buffer)
@@ -153,7 +153,7 @@ failure and traceback handling.
 
 **Raises:** `RuntimeError` unconditionally.
 
-**Location:** src/lib_ping/behaviors.py:92
+**Location:** src/ipscout/behaviors.py:92
 
 ---
 
@@ -162,7 +162,7 @@ failure and traceback handling.
 **Purpose:** Explicit placeholder callable for tools that expect a module-level `main` while
 the domain is still stubbed. Performs no work.
 
-**Location:** src/lib_ping/behaviors.py:113
+**Location:** src/ipscout/behaviors.py:113
 
 ---
 
@@ -176,7 +176,7 @@ Wires the behavior helpers into a rich-click interface.
 
 **Attributes:** `traceback: bool = True` - whether to show a full traceback on error.
 
-**Location:** src/lib_ping/cli.py:59
+**Location:** src/ipscout/cli.py:59
 
 ---
 
@@ -185,7 +185,7 @@ Wires the behavior helpers into a rich-click interface.
 **Purpose:** Root group carrying the global `--traceback/--no-traceback` flag and the
 `--version` option. With no subcommand and a default flag value it prints help.
 
-**Location:** src/lib_ping/cli.py:99
+**Location:** src/ipscout/cli.py:99
 
 ---
 
@@ -193,7 +193,7 @@ Wires the behavior helpers into a rich-click interface.
 
 **Purpose:** Print resolved package metadata via `__init__conf__.print_info()`.
 
-**Location:** src/lib_ping/cli.py:151
+**Location:** src/ipscout/cli.py:151
 
 ---
 
@@ -201,7 +201,7 @@ Wires the behavior helpers into a rich-click interface.
 
 **Purpose:** Demonstrate the success path by emitting the canonical greeting.
 
-**Location:** src/lib_ping/cli.py:157
+**Location:** src/ipscout/cli.py:157
 
 ---
 
@@ -209,7 +209,7 @@ Wires the behavior helpers into a rich-click interface.
 
 **Purpose:** Demonstrate error handling by calling `raise_intentional_failure()`.
 
-**Location:** src/lib_ping/cli.py:163
+**Location:** src/ipscout/cli.py:163
 
 ---
 
@@ -223,7 +223,7 @@ normalized exit code.
 
 **Output:** Exit code (0 success, `SystemExit` code when raised, 1 on caught exception).
 
-**Location:** src/lib_ping/cli.py:169
+**Location:** src/ipscout/cli.py:169
 
 ---
 
@@ -235,7 +235,7 @@ third-party gap lives here.
 
 **Exports:** `option`, `version_option`.
 
-**Location:** src/lib_ping/typed_click.py
+**Location:** src/ipscout/typed_click.py
 
 ---
 
@@ -248,16 +248,16 @@ module-level constants, kept in sync with `pyproject.toml` by automation.
 **Key function:** `print_info() -> None` renders the metadata block for the CLI `info`
 command.
 
-**Location:** src/lib_ping/__init__conf__.py
+**Location:** src/ipscout/__init__conf__.py
 
 ---
 
 ### `__main__` Module (Module Entry Point)
 
-**Purpose:** Bridge `python -m lib_ping` to `cli.main()`, exiting with its
+**Purpose:** Bridge `python -m ipscout` to `cli.main()`, exiting with its
 return code.
 
-**Location:** src/lib_ping/__main__.py
+**Location:** src/ipscout/__main__.py
 
 ---
 
@@ -296,7 +296,7 @@ docstring examples in `behaviors.py`, `cli.py`, and `__init__conf__.py` run as t
 **OS markers:** `os_agnostic`, `os_windows`, `os_macos`, `os_posix`, `os_linux`, and
 `local_only` scope tests to platforms and to local-only runs (skipped in CI).
 
-**Coverage gate:** `fail_under = 85` over `src/lib_ping`.
+**Coverage gate:** `fail_under = 85` over `src/ipscout`.
 
 ---
 
@@ -364,7 +364,7 @@ docstring examples in `behaviors.py`, `cli.py`, and `__init__conf__.py` run as t
 
 ```python
 # Python API
-from lib_ping import (
+from ipscout import (
     CANONICAL_GREETING,
     WritableStream,
     emit_greeting,
@@ -381,10 +381,10 @@ emit_greeting(stream=buffer)  # writes "Hello World\n"
 
 ```bash
 # CLI usage
-lib_ping info          # print resolved metadata
-lib_ping hello         # emit the canonical greeting
-lib_ping fail          # exercise the failure path
-lib_ping --no-traceback fail   # one-line error, no traceback
+ipscout info          # print resolved metadata
+ipscout hello         # emit the canonical greeting
+ipscout fail          # exercise the failure path
+ipscout --no-traceback fail   # one-line error, no traceback
 
-python -m lib_ping hello       # module entry point
+python -m ipscout hello       # module entry point
 ```

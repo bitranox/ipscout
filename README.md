@@ -1,15 +1,15 @@
-# lib_ping
+# ipscout
 
 <!-- Badges -->
-[![CI](https://github.com/bitranox/lib_ping/actions/workflows/default_cicd_public.yml/badge.svg)](https://github.com/bitranox/lib_ping/actions/workflows/default_cicd_public.yml)
-[![CodeQL](https://github.com/bitranox/lib_ping/actions/workflows/codeql.yml/badge.svg)](https://github.com/bitranox/lib_ping/actions/workflows/codeql.yml)
+[![CI](https://github.com/bitranox/ipscout/actions/workflows/default_cicd_public.yml/badge.svg)](https://github.com/bitranox/ipscout/actions/workflows/default_cicd_public.yml)
+[![CodeQL](https://github.com/bitranox/ipscout/actions/workflows/codeql.yml/badge.svg)](https://github.com/bitranox/ipscout/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Open in Codespaces](https://img.shields.io/badge/Codespaces-Open-blue?logo=github&logoColor=white&style=flat-square)](https://codespaces.new/bitranox/lib_ping?quickstart=1)
-[![PyPI](https://img.shields.io/pypi/v/lib_ping.svg)](https://pypi.org/project/lib_ping/)
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/lib_ping.svg)](https://pypi.org/project/lib_ping/)
+[![Open in Codespaces](https://img.shields.io/badge/Codespaces-Open-blue?logo=github&logoColor=white&style=flat-square)](https://codespaces.new/bitranox/ipscout?quickstart=1)
+[![PyPI](https://img.shields.io/pypi/v/ipscout.svg)](https://pypi.org/project/ipscout/)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/ipscout.svg)](https://pypi.org/project/ipscout/)
 [![Code Style: Ruff](https://img.shields.io/badge/Code%20Style-Ruff-46A3FF?logo=ruff&labelColor=000)](https://docs.astral.sh/ruff/)
-[![codecov](https://codecov.io/gh/bitranox/lib_ping/graph/badge.svg?token=UFBaUDIgRk)](https://codecov.io/gh/bitranox/lib_ping)
-[![Maintainability](https://qlty.sh/badges/041ba2c1-37d6-40bb-85a0-ec5a8a0aca0c/maintainability.svg)](https://qlty.sh/gh/bitranox/projects/lib_ping)
+[![codecov](https://codecov.io/gh/bitranox/ipscout/graph/badge.svg?token=UFBaUDIgRk)](https://codecov.io/gh/bitranox/ipscout)
+[![Maintainability](https://qlty.sh/badges/041ba2c1-37d6-40bb-85a0-ec5a8a0aca0c/maintainability.svg)](https://qlty.sh/gh/bitranox/projects/ipscout)
 [![security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
 A scaffold for backward-compatible (Python 3.9+) libraries that ship a registered CLI command,
@@ -49,7 +49,7 @@ the rename**, so name it for your library first.
 
 ```bash
 # copy the template into a new dir named for your package
-git clone --depth 1 https://github.com/bitranox/lib_ping.git lib_wombat
+git clone --depth 1 https://github.com/bitranox/ipscout.git lib_wombat
 cd lib_wombat
 git remote remove origin      # detach from the template so nothing ever pushes back to it
 git branch -m master main     # new repos use main, not master
@@ -76,28 +76,28 @@ To see what you get, install the template's own package from PyPI (uv recommende
 works too):
 
 ```bash
-uv pip install lib_ping
+uv pip install ipscout
 ```
 
 Run the CLI:
 
 ```bash
-lib_ping hello     # -> Hello World
-lib_ping info      # print resolved package metadata
-lib_ping --help
+ipscout hello     # -> Hello World
+ipscout info      # print resolved package metadata
+ipscout --help
 ```
 
 Or run it without installing:
 
 ```bash
-uvx lib_ping hello
-python -m lib_ping hello
+uvx ipscout hello
+python -m ipscout hello
 ```
 
 Use it as a library:
 
 ```python
-import lib_ping as lib
+import ipscout as lib
 
 lib.emit_greeting()  # writes "Hello World" to stdout
 lib.print_info()  # print the package metadata block

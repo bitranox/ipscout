@@ -1,7 +1,7 @@
 # skill-writer checklist - coding-python-new-public-library (2026-07-19, new skill)
 
 Change: NEW reference/technique skill. Teaches scaffolding a new public bitranox Python
-library from the lib_ping template (clone, rename via the shipped
+library from the ipscout template (clone, rename via the shipped
 rename_dry.sh/rename.sh, fresh git init on main), installing it, using its rich-click CLI
 and library API, and developing/releasing it with bmk. Also flags that a repo which ships a
 skill is a marketplace (protect the branch, bump the plugin version).
@@ -33,7 +33,7 @@ skill is a marketplace (protect the branch, bump the plugin version).
       (per-skill listing is not enforced; category exemplars only).
 - [x] Version: plugins/bitranox/.claude-plugin/plugin.json bumped 5.91.0 -> 5.92.0 (MINOR, new skill).
 - [x] Trigger map rebuilt (build_skill_triggers.py) and repo-gate.py run clean before commit.
-- [x] Mirrored: identical body ships in the source repo lib_ping at
+- [x] Mirrored: identical body ships in the source repo ipscout at
       skills/new-public-python-library/ (repo copy keeps its own name, per the mirror convention).
 
 ## Update 2 (2026-07-19): scaffold procedure aligned with the template README

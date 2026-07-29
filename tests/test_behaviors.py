@@ -7,7 +7,7 @@ from io import StringIO
 
 import pytest
 
-from lib_ping import behaviors
+from ipscout import behaviors
 
 
 @pytest.mark.os_agnostic

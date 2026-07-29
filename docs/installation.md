@@ -1,7 +1,7 @@
 # Installation
 
-`lib_ping` is a normal PEP 621 package. Every method below registers two
-console commands on your PATH: `lib_ping` and `bitranox-template-py-cli`
+`ipscout` is a normal PEP 621 package. Every method below registers two
+console commands on your PATH: `ipscout` and `bitranox-template-py-cli`
 (both point at the same CLI).
 
 The examples use [uv](https://docs.astral.sh/uv/), a fast Rust-based replacement for
@@ -28,9 +28,9 @@ python -m pip install uv
 ```bash
 uv venv
 source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
-uv pip install lib_ping
+uv pip install ipscout
 # from GitHub instead of PyPI:
-uv pip install "git+https://github.com/bitranox/lib_ping"
+uv pip install "git+https://github.com/bitranox/ipscout"
 ```
 
 ## 2. As a persistent CLI tool (uv)
@@ -38,17 +38,17 @@ uv pip install "git+https://github.com/bitranox/lib_ping"
 Installs into an isolated environment and puts the commands on your PATH:
 
 ```bash
-uv tool install lib_ping
-uv tool upgrade lib_ping
+uv tool install ipscout
+uv tool upgrade ipscout
 # from GitHub:
-uv tool install --from "git+https://github.com/bitranox/lib_ping.git" bitranox-template-py-cli
+uv tool install --from "git+https://github.com/bitranox/ipscout.git" bitranox-template-py-cli
 ```
 
 ## 3. Run once, without installing (uvx)
 
 ```bash
-uvx lib_ping info
-uvx --from "git+https://github.com/bitranox/lib_ping.git" lib_ping info
+uvx ipscout info
+uvx --from "git+https://github.com/bitranox/ipscout.git" ipscout info
 ```
 
 ## 4. Plain pip
@@ -56,9 +56,9 @@ uvx --from "git+https://github.com/bitranox/lib_ping.git" lib_ping info
 ```bash
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install lib_ping
+pip install ipscout
 # from GitHub:
-pip install "git+https://github.com/bitranox/lib_ping"
+pip install "git+https://github.com/bitranox/ipscout"
 # editable, with dev tooling, for working on the package itself:
 pip install -e ".[dev]"
 ```
@@ -66,7 +66,7 @@ pip install -e ".[dev]"
 ## 5. Per-user install (no virtualenv)
 
 ```bash
-pip install --user lib_ping
+pip install --user ipscout
 ```
 
 This respects PEP 668, so it is refused on an externally-managed system Python. Make sure
@@ -75,13 +75,13 @@ This respects PEP 668, so it is refused on an externally-managed system Python. 
 ## 6. pipx
 
 ```bash
-pipx install lib_ping
-pipx upgrade lib_ping
+pipx install ipscout
+pipx upgrade ipscout
 ```
 
 ## 7. From build artifacts
 
 ```bash
 python -m build
-pip install dist/lib_ping-*.whl
+pip install dist/ipscout-*.whl
 ```

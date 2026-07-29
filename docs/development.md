@@ -70,7 +70,7 @@ message.
 ## Versioning and metadata
 
 - `pyproject.toml` `[project]` is the single source of truth for version and metadata.
-- `src/lib_ping/__init__conf__.py` holds static constants synced from
+- `src/ipscout/__init__conf__.py` holds static constants synced from
   `pyproject.toml` by automation; `make test` regenerates them. Runtime code imports these
   constants instead of querying `importlib.metadata`.
 - Bump only `pyproject.toml` and `CHANGELOG.md`; never hand-edit the version in code.
