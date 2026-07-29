@@ -134,6 +134,7 @@ ipscout subnet
 ipscout mtu 8.8.8.8
 ipscout wake aa:bb:cc:dd:ee:ff --broadcast 192.168.1.255
 ipscout resolve localhost
+ipscout reverse-dns 1.1.1.1
 ipscout interfaces
 ipscout capabilities
 ipscout --help

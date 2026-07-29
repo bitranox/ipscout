@@ -365,6 +365,15 @@ ipscout reachable example.com             # 'yes' or 'no'
 ipscout resolve localhost -4
 ipscout reverse-dns 127.0.0.1
 ipscout interfaces
+ipscout gateway                           # the default route, or --to an address
+ipscout neighbours                        # the ARP/NDP cache
+ipscout mac 8.8.8.8                       # with its scope: direct or next_hop
+ipscout find-ip dc:b2:2f:44:34:59 --scan  # which addresses hold a MAC
+ipscout arp-scan --network 192.168.1.0/24 # sweep, then read what was learned
+ipscout subnet                            # addressing, gateway, stored DHCP facts
+ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
+ipscout mtu 8.8.8.8
+ipscout wake aa:bb:cc:dd:ee:ff --broadcast 192.168.1.255
 ipscout capabilities
 ipscout info
 ```
