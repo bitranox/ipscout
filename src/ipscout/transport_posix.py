@@ -34,7 +34,7 @@ import asyncio
 import contextlib
 import socket
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 from . import packet
 from .errors import IPScoutPermissionError
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     #: hosts where opening an ICMP socket is not permitted at all.
     SocketFactory = Callable[[AddressFamily], socket.socket]
 
-__all__ = ["AsyncPosixEchoTransport", "PosixEchoTransport", "open_socket"]
+__all__ = ["AsyncPosixEchoTransport", "PosixEchoTransport", "RecvMsg", "open_socket", "recvmsg_of", "socket_const"]
 
 _FAMILY_TO_SOCKET = {
     AddressFamily.IPV4: (socket.AF_INET, socket.IPPROTO_ICMP),
@@ -96,6 +96,56 @@ def open_socket(family: AddressFamily) -> socket.socket:
         except OSError as raw_error:
             msg = f"{_REMEDIATION}\n  (datagram socket: {dgram_error}; raw socket: {raw_error})"
             raise IPScoutPermissionError(msg) from raw_error
+
+
+class RecvMsg(Protocol):
+    """The shape of ``socket.recvmsg``, which exists only on POSIX."""
+
+    def __call__(self, bufsize: int, ancbufsize: int = ..., flags: int = ..., /) -> tuple[bytes, list[tuple[int, int, bytes]], int, object]: ...
+
+
+def socket_const(name: str) -> int | None:
+    """Return a socket constant that only some platforms define.
+
+    ``IP_RECVERR`` and ``MSG_ERRQUEUE`` are Linux-only and absent from the
+    macOS and Windows type stubs, so a direct attribute access fails type
+    checking there even when it is guarded at runtime. Looking them up by name
+    keeps every call site typed without silencing the checker per platform.
+
+    Args:
+        name: The constant's name in the ``socket`` module.
+
+    Returns:
+        The value, or ``None`` where this platform does not define it.
+
+    Examples:
+        >>> socket_const("SO_REUSEADDR") is not None
+        True
+        >>> socket_const("NO_SUCH_SOCKET_CONSTANT") is None
+        True
+
+    """
+
+    value = getattr(socket, name, None)
+    return value if isinstance(value, int) else None
+
+
+def recvmsg_of(sock: socket.socket) -> RecvMsg | None:
+    """Return the socket's ``recvmsg``, or None where the platform lacks it.
+
+    Windows has no ``recvmsg`` at all, so reading the error queue - and with it
+    unprivileged traceroute - is simply unavailable there and is served by the
+    IP Helper API instead.
+
+    Args:
+        sock: The socket to take the bound method from.
+
+    Returns:
+        The bound method, or ``None`` on a platform without it.
+
+    """
+
+    return cast("RecvMsg | None", getattr(sock, "recvmsg", None))
 
 
 def _matches(parsed: packet.ParsedReply, *, sequence: int, token: bytes, is_ipv6: bool) -> bool:
