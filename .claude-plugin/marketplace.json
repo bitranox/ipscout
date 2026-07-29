@@ -1,0 +1,16 @@
+{
+  "name": "ipscout",
+  "owner": {
+    "name": "bitranox"
+  },
+  "metadata": {
+    "description": "ipscout delivered as a single Claude Code plugin: a skill for probing network reachability and inspecting the local network from Python or the shell, in-process and without administrator rights."
+  },
+  "plugins": [
+    {
+      "name": "ipscout",
+      "source": ".",
+      "description": "Ping, sweep, traceroute and interface enumeration from Python or the CLI, unprivileged and without a subprocess. Covers the library API, the JSON output for machine consumers, and the platform limits measured on Linux, macOS and Windows."
+    }
+  ]
+}
