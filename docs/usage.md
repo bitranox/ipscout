@@ -1,89 +1,463 @@
 # Usage
 
-This is a template, so the shipped CLI and API are deliberately small: enough to prove that
-packaging, entry points, error handling and doctests all work end to end, and nothing more.
-Replace the placeholder behaviors with your own once you clone it.
+Task-oriented guide to the library and the CLI. Every example here was run before it was written
+down.
 
-## Command-line interface
+- [Ping one host](#ping-one-host)
+- [Sweep many hosts](#sweep-many-hosts)
+- [Async](#async)
+- [Traceroute](#traceroute)
+- [Is it reachable at all](#is-it-reachable-at-all)
+- [Local interfaces](#local-interfaces)
+- [Resolve and reverse-resolve](#resolve-and-reverse-resolve)
+- [The CLI](#the-cli)
+- [JSON output](#json-output)
+- [Error handling](#error-handling)
+- [Public surface](#public-surface)
 
-The CLI is built on [rich-click](https://github.com/ewels/rich-click), so help, errors and
-tracebacks render with Rich styling while keeping click's ergonomics. Both console commands
-(`ipscout` and `bitranox-template-py-cli`) and `python -m
-ipscout` invoke the same entry point.
-
-### Commands
-
-| Command | What it does                                                            |
-|---------|-------------------------------------------------------------------------|
-| `info`  | Print resolved package metadata (name, version, homepage, author, ...). |
-| `hello` | Emit the canonical greeting `Hello World`.                              |
-| `fail`  | Raise an intentional `RuntimeError` to exercise error handling.         |
-
-### Global options
-
-| Option                         | Effect                                                                                 |
-|--------------------------------|----------------------------------------------------------------------------------------|
-| `--traceback / --no-traceback` | Show a full Rich traceback on error, or a single-line message. Default: `--traceback`. |
-| `--version`                    | Print the version and exit.                                                            |
-| `-h`, `--help`                 | Show help and exit.                                                                    |
-
-### Examples
-
-```bash
-ipscout hello                 # -> Hello World
-ipscout info                  # metadata block
-ipscout fail                  # full traceback, exit code 1
-ipscout --no-traceback fail   # one-line error, exit code 1
-ipscout --version
-
-# same behavior, other entry points:
-bitranox-template-py-cli info
-python -m ipscout info
-uvx ipscout info
-```
-
-### Exit codes
-
-`main()` returns `0` on success, the `SystemExit` code when one is raised, and `1` for any
-other uncaught exception (after printing the error).
-
-## Library API
-
-The public surface is re-exported from the package root:
+## Ping one host
 
 ```python
-import ipscout as lib
+import ipscout
 
-# success path: write the canonical greeting to a stream (default: stdout)
-lib.emit_greeting()
+result = ipscout.ping("127.0.0.1", 2, interval=0)
 
-# to any object with a write() method:
-from io import StringIO
-
-buffer = StringIO()
-lib.emit_greeting(stream=buffer)
-assert buffer.getvalue() == "Hello World\n"
-
-# deterministic failure, for exercising error handling:
-try:
-    lib.raise_intentional_failure()
-except RuntimeError as exc:
-    print(f"caught expected failure: {exc}")  # I should fail
-
-# print the package metadata block:
-lib.print_info()
+result.reached  # True
+result.ip  # '127.0.0.1'
+result.packets_sent  # 2
+result.packets_received  # 2
+result.n_packets_lost  # 0
+result.packets_lost_percentage  # 0
+result.time_min_ms  # fastest round trip in ms
+result.time_avg_ms  # mean round trip in ms
+result.time_max_ms  # slowest round trip in ms
+result.jitter_ms  # population stdev, or -1.0 with fewer than two replies
+result.family  # AddressFamily.IPV4
+result.method  # ProbeMethod.ICMP
+result.str_result  # the one-line summary, in its documented format
 ```
 
-### Exported names
+`ResponseObject` is frozen and every derived value is a real model field, so `model_dump()` carries
+the statistics rather than dropping them.
 
-| Name                        | Kind     | Purpose                                                 |
-|-----------------------------|----------|---------------------------------------------------------|
-| `CANONICAL_GREETING`        | constant | The greeting text (`"Hello World"`).                    |
-| `WritableStream`            | Protocol | Structural type for any object with `write(str)`.       |
-| `emit_greeting`             | function | Write the greeting to a stream (keyword-only `stream`). |
-| `raise_intentional_failure` | function | Always raise `RuntimeError("I should fail")`.           |
-| `noop_main`                 | function | Placeholder callable that does nothing.                 |
-| `print_info`                | function | Print the metadata block used by the `info` command.    |
+The full signature:
 
-For a module-by-module breakdown with source anchors, see
-[systemdesign/module_reference.md](systemdesign/module_reference.md).
+```python
+ipscout.ping(
+    target,                      # hostname or IP literal
+    times=4,                     # echoes to send
+    *,
+    timeout=2.0,                 # seconds to wait per reply
+    interval=0.2,                # seconds between the start of consecutive echoes
+    family=None,                 # AddressFamily.IPV4 / IPV6, or None for the resolver preference
+    payload_size=56,             # bytes of ICMP payload
+    allow_tcp_fallback=False,    # probe over TCP when ICMP is unavailable
+    tcp_port=443,                # port used only when the TCP fallback engages
+    raise_on_error=True,         # False reports failures on .error instead of raising
+)
+```
+
+Forcing a family, and using the TCP fallback on a host without ICMP permission:
+
+```python
+import ipscout
+
+v6 = ipscout.ping("::1", 1, family=ipscout.AddressFamily.IPV6)
+print(v6.reached, v6.family.value)
+
+fallback = ipscout.ping("example.com", 1, allow_tcp_fallback=True, tcp_port=443)
+print(fallback.reached, fallback.method.value)  # method tells you which protocol answered
+```
+
+A TCP result is never substituted silently. `allow_tcp_fallback=True` engages only when ICMP is
+*unavailable* to the process, and the `method` field records what actually happened.
+
+## Sweep many hosts
+
+```python
+import ipscout
+
+results = ipscout.ping_many(["127.0.0.1", "::1", "localhost"], times=1, concurrency=32)
+
+for target, result in results.items():
+    print(target, result.reached, result.error)
+```
+
+The result is a dict keyed by target, in the order the targets were given. Duplicates collapse.
+`raise_on_error` defaults to `False` here, unlike `ping`: one bad name among two hundred should not
+destroy the other 199 results, so the failure lands on that target's own `.error` instead.
+
+`ping_many` refuses to run inside a running event loop, where it would deadlock. Await
+`aping_many` there.
+
+## Async
+
+```python
+import asyncio
+import ipscout
+
+
+async def main():
+    one = await ipscout.aping("127.0.0.1", 1)
+    many = await ipscout.aping_many(["127.0.0.1", "::1"], times=1, concurrency=64)
+    alive = await ipscout.ais_reachable("127.0.0.1")
+    return one.reached, {t: r.reached for t, r in many.items()}, alive
+
+
+print(asyncio.run(main()))
+```
+
+`aping` and `aping_many` take the same arguments as their synchronous counterparts and honour the
+same contract. On Linux and macOS the ICMP socket is registered with the event loop, so a sweep of
+thousands runs on one thread. On Windows `IcmpSendEcho` is a blocking C call with no asyncio
+integration, so the async path is executor-backed. Behaviour is identical; scaling is not.
+
+Echoes within one target stay sequential and paced even in the async path, so timings stay
+comparable. Concurrency happens between targets.
+
+## Traceroute
+
+```python
+import ipscout
+
+hops = ipscout.traceroute("1.1.1.1", max_hops=10, timeout=2.0)
+
+for hop in hops:
+    print(hop.ttl, hop.address, hop.rtt_ms, hop.reached, hop.hostname)
+```
+
+Each `TraceHop` carries `ttl`, `address`, `rtt_ms`, `reached` and `hostname`. A silent hop is
+recorded with `address=None` rather than dropped, because a firewall ignoring one hop in an
+otherwise complete path is information, and dropping it would misnumber every hop after it. The walk
+stops at the first hop that is the target itself.
+
+`resolve_names=True` adds a reverse-DNS lookup per responding hop. It is off by default because it
+costs a DNS round trip per hop.
+
+The async form:
+
+```python
+import asyncio
+import ipscout
+
+hops = asyncio.run(ipscout.atraceroute("127.0.0.1", max_hops=3, timeout=2.0))
+print([(h.ttl, h.address, h.reached) for h in hops])
+# [(1, '127.0.0.1', True)]
+```
+
+Hops stay sequential rather than concurrent: the walk has to stop at the hop that answers, and
+firing all thirty at once would probe far past the target on every short path.
+
+If you already own a transport, `trace_path` and `atrace_path` drive it directly:
+
+```python
+import ipscout
+from ipscout.factory import make_transport
+from ipscout.resolve import resolve_one
+
+address, family = resolve_one("127.0.0.1")
+with make_transport(address, family) as transport:
+    hops = ipscout.trace_path(transport, max_hops=3, timeout=1.0)
+print([(h.ttl, h.address, h.reached) for h in hops])
+# [(1, '127.0.0.1', True)]
+```
+
+**Traceroute is not supported on macOS.** See [Error handling](#error-handling).
+
+## Is it reachable at all
+
+```python
+import ipscout
+
+ipscout.is_reachable("127.0.0.1")  # True
+ipscout.is_reachable("nothing.invalid")  # False
+```
+
+This is the deliberate exception to the error contract. It never raises, and it always tries TCP
+when ICMP does not answer or is unavailable. That is what makes it a shortcut.
+
+It is not `ping(target).reached`. `ping` reports whether *ICMP* succeeded and raises on a bad name;
+`is_reachable` reports whether the host is alive by any route and answers `False` for a bad name.
+Use `ping` when that distinction matters.
+
+## Local interfaces
+
+```python
+import ipscout
+
+for item in ipscout.local_interfaces():
+    print(item.name, item.is_up, item.is_loopback, item.mac, item.mtu)
+    for address in item.ipv4:
+        print("  v4", address.address, address.prefix_len)
+    for address in item.ipv6:
+        print("  v6", address.address, address.prefix_len)
+```
+
+Interfaces that are down are included, since a down interface is a fact worth reporting rather than
+an omission. The POSIX backend uses `getifaddrs`, the Windows backend uses `GetAdaptersAddresses`,
+and both return the same frozen `Interface` record.
+
+## Resolve and reverse-resolve
+
+```python
+import ipscout
+
+ipscout.resolve("localhost")  # ['127.0.0.1', '::1']
+ipscout.resolve("::1", family=ipscout.AddressFamily.IPV6)  # ['::1']
+ipscout.reverse_dns("127.0.0.1")  # 'localhost'
+ipscout.reverse_dns("this is not an address")  # None
+```
+
+`resolve` deduplicates and preserves resolver order. Asking for a family the target does not have
+raises `IPScoutResolutionError` rather than returning an empty list, because an empty list reads as
+"host down". `reverse_dns` returns `None` when there is no PTR record, since a missing PTR record is
+a normal state of the world.
+
+## The CLI
+
+Nine commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
+
+| Command        | What it does                                                 |
+|----------------|--------------------------------------------------------------|
+| `ping`         | Ping a host and report what came back.                       |
+| `ping-many`    | Ping many hosts concurrently.                                |
+| `reachable`    | Answer whether a host responds, by ICMP or failing that TCP. |
+| `traceroute`   | Report the path packets take to a host.                      |
+| `resolve`      | Resolve a hostname to its addresses.                         |
+| `reverse-dns`  | Resolve an address back to a hostname.                       |
+| `interfaces`   | List local network interfaces.                               |
+| `capabilities` | Report what this host can actually do.                       |
+| `info`         | Print resolved package metadata.                             |
+
+Global options, which live on the group so they compose with every subcommand:
+
+| Option                       | Effect                                                                    |
+|------------------------------|---------------------------------------------------------------------------|
+| `--json`, `-j`               | Emit a JSON envelope: `{ok, command, data`\|`error}`.                     |
+| `--json-bare`                | Emit the JSON payload at top level, without the envelope.                 |
+| `--traceback/--no-traceback` | Show a full Python traceback on unexpected errors. Default `--traceback`. |
+| `--version`                  | Print the version and exit.                                               |
+| `-h`, `--help`               | Show help and exit.                                                       |
+
+`--json` and `--json-bare` are mutually exclusive.
+
+Per-command options:
+
+| Command        | Options                                                                                                   |
+|----------------|-----------------------------------------------------------------------------------------------------------|
+| `ping`         | `--times/-c` (4), `--timeout` (2.0), `--interval` (0.2), `-4`, `-6`, `--tcp-fallback`, `--tcp-port` (443) |
+| `ping-many`    | `--times/-c` (4), `--timeout` (2.0), `--concurrency` (64)                                                 |
+| `reachable`    | `--timeout` (2.0), `--tcp-port` (443)                                                                     |
+| `traceroute`   | `--max-hops` (30), `--timeout` (2.0), `-4`, `-6`, `--resolve-names`                                       |
+| `resolve`      | `-4`, `-6`                                                                                                |
+| `reverse-dns`  | none beyond the global flags                                                                              |
+| `interfaces`   | none beyond the global flags                                                                              |
+| `capabilities` | none beyond the global flags                                                                              |
+| `info`         | none beyond the global flags                                                                              |
+
+`-4` and `-6` are mutually exclusive.
+
+```bash
+ipscout ping 127.0.0.1 -c 2
+# [127.0.0.1] pinged 2 times, min: 0.04ms, avg: 0.04ms, max: 0.04ms, 0% Packet loss
+
+ipscout ping-many 127.0.0.1 ::1 -c 1      # a table of target, reached, loss, avg ms, error
+ipscout traceroute 1.1.1.1 --max-hops 10 --resolve-names
+ipscout reachable example.com             # 'yes' or 'no'
+ipscout resolve localhost -4
+ipscout reverse-dns 127.0.0.1
+ipscout interfaces
+ipscout capabilities
+ipscout info
+```
+
+Exit codes are independent of the output format:
+
+| Code | Meaning                                                                   |
+|------|---------------------------------------------------------------------------|
+| 0    | Reached, or the command otherwise succeeded.                              |
+| 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.   |
+| 2    | Error. A bad name, a missing permission, or a capability this host lacks. |
+
+`ping-many` exits 1 only when no target at all was reached.
+
+## JSON output
+
+`--json` wraps the result so a reader parsing only stdout gets a boolean it can always see, rather
+than an exit code it may not have captured:
+
+```bash
+ipscout --json reachable 127.0.0.1
+```
+
+```json
+{
+  "ok": true,
+  "command": "reachable",
+  "data": {
+    "target": "127.0.0.1",
+    "reachable": true
+  },
+  "error": null
+}
+```
+
+`--json-bare` drops the envelope, which is what you want in a `jq` pipeline:
+
+```bash
+ipscout --json-bare resolve localhost
+```
+
+```json
+{
+  "target": "localhost",
+  "addresses": [
+    "127.0.0.1",
+    "::1"
+  ]
+}
+```
+
+```bash
+ipscout --json-bare interfaces | jq -r '.[] | select(.is_up) | .name'
+ipscout --json ping 127.0.0.1 -c 1 | jq '.data.time_avg_ms'
+```
+
+Errors are serialised into the same envelope rather than printed as a traceback into a stream you
+are parsing:
+
+```bash
+ipscout --json ping nothing.invalid   # exit code 2
+```
+
+```json
+{
+  "ok": false,
+  "command": "ping",
+  "data": null,
+  "error": {
+    "type": "IPScoutResolutionError",
+    "message": "cannot resolve 'nothing.invalid': Name or service not known"
+  }
+}
+```
+
+## Error handling
+
+The contract in one sentence: setup problems raise, network conditions do not. A host that is down,
+a packet that times out, a link losing everything all come back as a `ResponseObject` with
+`reached=False`. Missing ICMP permission, an unresolvable name, or a nonsensical argument raise,
+because no amount of retrying fixes them.
+
+| Exception                 | Raised when                                                            | What to do about it                                     |
+|---------------------------|------------------------------------------------------------------------|---------------------------------------------------------|
+| `IPScoutResolutionError`  | The target does not resolve, or has no address in the demanded family. | Fix the name, or drop the `-4`/`-6` restriction.        |
+| `IPScoutPermissionError`  | Neither an unprivileged nor a raw ICMP socket could be opened.         | Apply one of the fixes in the message. Root would help. |
+| `IPScoutUnsupportedError` | No backend implements this here, such as traceroute on macOS.          | Use another capability. Root would not help.            |
+| `ValueError`              | `times`, `timeout`, `interval` or `max_hops` is out of range.          | Fix the argument.                                       |
+
+All three ipscout errors derive from `IPScoutError`, so one `except` catches the family without also
+catching unrelated `OSError` noise.
+
+```python
+import ipscout
+
+try:
+    result = ipscout.ping("some.host.example", 4)
+except ipscout.IPScoutPermissionError as exc:
+    print(f"cannot send ICMP from this process: {exc}")
+except ipscout.IPScoutResolutionError as exc:
+    print(f"bad target: {exc}")
+except ipscout.IPScoutError as exc:
+    print(f"ipscout could not run this probe: {exc}")
+else:
+    print("down" if not result.reached else f"up, {result.time_avg_ms:.2f}ms")
+```
+
+The distinction between the permission error and the unsupported error is load-bearing. Running as
+root fixes a permission problem and does not fix an unsupported one.
+
+```python
+import ipscout
+
+try:
+    hops = ipscout.traceroute("example.com")
+except ipscout.IPScoutUnsupportedError as exc:
+    # macOS reaches this: neither MSG_ERRQUEUE nor a plain receive surfaces
+    # ICMP Time Exceeded to an unprivileged process there.
+    print(f"traceroute is not available on this platform: {exc}")
+```
+
+To find out before provoking an error, ask the host:
+
+```python
+import ipscout
+
+ipscout.icmp_available()  # True when ICMP v4 could be used right now
+ipscout.icmp_available(ipscout.AddressFamily.IPV6)  # availability genuinely differs per family
+```
+
+`ipscout capabilities` is the CLI form and additionally reports whether traceroute works here.
+
+To report failures on the result instead of raising, for one call, pass `raise_on_error=False`:
+
+```python
+import ipscout
+
+muted = ipscout.ping("nothing.invalid", raise_on_error=False)
+print(muted.reached, muted.error)
+# False cannot resolve 'nothing.invalid': Name or service not known
+```
+
+## Public surface
+
+Everything below is exported from the package root.
+
+| Name               | Kind      | Purpose                                                           |
+|--------------------|-----------|-------------------------------------------------------------------|
+| `ping`             | function  | Probe one target and report what came back.                       |
+| `aping`            | coroutine | The same, without blocking the event loop.                        |
+| `ping_many`        | function  | Probe many targets concurrently from synchronous code.            |
+| `aping_many`       | coroutine | Probe many targets concurrently.                                  |
+| `is_reachable`     | function  | Total yes-or-no shortcut. Never raises, always falls back to TCP. |
+| `ais_reachable`    | coroutine | The same contract, on the event loop.                             |
+| `traceroute`       | function  | Report the path packets take to a target.                         |
+| `atraceroute`      | coroutine | The same, on the event loop.                                      |
+| `trace_path`       | function  | Walk the hop limit over a transport the caller owns.              |
+| `atrace_path`      | coroutine | The same, over an async transport.                                |
+| `resolve`          | function  | Turn a name or literal into a list of addresses.                  |
+| `reverse_dns`      | function  | Turn an address back into a name, or `None`.                      |
+| `local_interfaces` | function  | Every local network interface.                                    |
+| `icmp_available`   | function  | Whether an ICMP probe could be made right now, per family.        |
+| `print_info`       | function  | Print the package metadata block.                                 |
+
+Result models, all frozen Pydantic models:
+
+| Name                 | Returned by                                              |
+|----------------------|----------------------------------------------------------|
+| `ResponseObject`     | `ping`, `aping`, `ping_many`, `aping_many`               |
+| `TraceHop`           | `traceroute`, `atraceroute`, `trace_path`, `atrace_path` |
+| `Interface`          | `local_interfaces`                                       |
+| `InterfaceAddress`   | the `ipv4` and `ipv6` fields of `Interface`              |
+| `CapabilityReport`   | the `capabilities` CLI command                           |
+| `ReachabilityReport` | the `reachable` CLI command                              |
+| `ResolveReport`      | the `resolve` CLI command                                |
+| `ReverseDnsReport`   | the `reverse-dns` CLI command                            |
+| `PackageInfo`        | the `info` CLI command                                   |
+
+Enums, all `str` subclasses so their members are already strings on the wire:
+
+| Name            | Members                         |
+|-----------------|---------------------------------|
+| `AddressFamily` | `IPV4`, `IPV6`                  |
+| `ProbeMethod`   | `ICMP`, `TCP`                   |
+| `MacScope`      | `DIRECT`, `NEXT_HOP`, `UNKNOWN` |
+| `CommandName`   | one member per CLI subcommand   |
+
+`MacLookup`, `SubnetInfo` and `MacScope` are exported result types for the local-network inspection
+layer. No public callable returns one in this release.
+
+Exceptions: `IPScoutError`, `IPScoutPermissionError`, `IPScoutResolutionError`,
+`IPScoutUnsupportedError`.
+
+For a module-by-module breakdown, see [systemdesign/module_reference.md](systemdesign/module_reference.md).

@@ -6,9 +6,9 @@ of those are answers, not errors, and come back as a ``ResponseObject`` with
 ``reached=False``. An exception here always means the caller asked for something
 this process cannot do, and no amount of retrying will change it.
 
-The old library swallowed everything through ``except: ... finally: return
-response``, which made a missing ICMP permission look exactly like an
-unreachable host. Splitting the two apart is the point of this module.
+Keeping the two apart is the point of this module: a missing ICMP permission
+and an unreachable host need different responses from the caller, so they are
+reported through different channels rather than collapsed into one flag.
 
 Contents:
     IPScoutError: Base class, so callers can catch the whole family.

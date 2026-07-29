@@ -1,390 +1,342 @@
-# Module Reference: ipscout
+# Module reference: ipscout
 
-## Status
-
-Template / Scaffold (v1.1.2)
-
-## Links & References
+## Links and references
 
 **Repository:** https://github.com/bitranox/ipscout
 **PyPI:** https://pypi.org/project/ipscout/
-**Documentation:** README.md, INSTALL.md, DEVELOPMENT.md, CONTRIBUTING.md, CHANGELOG.md
-**Related Files:**
-
-* src/ipscout/__init__.py (public API surface)
-* src/ipscout/behaviors.py (domain behaviors)
-* src/ipscout/cli.py (rich-click CLI adapter)
-* src/ipscout/typed_click.py (strict-typed click decorator wrappers)
-* src/ipscout/__init__conf__.py (static metadata / platform adapter)
-* src/ipscout/__main__.py (python -m entry point)
-* src/ipscout/py.typed (PEP 561 marker)
-* tests/test_behaviors.py, tests/test_cli.py, tests/test_metadata.py, tests/test_module_entry.py
+**Documentation:** [README.md](../../README.md), [installation](../installation.md),
+[usage](../usage.md), [development](../development.md), [CHANGELOG](../../CHANGELOG.md)
 
 ---
 
-## Problem Statement
+## Problem statement
 
-Starting a new backward-compatible Python library that ships a registered CLI command
-means re-solving the same structural problems every time:
+Probing whether a host answers is the sort of thing that looks solved until you look at how it is
+usually done. The common approach spawns the system `ping` binary and scrapes its output with
+regular expressions. That has four consequences worth naming:
 
-1. A clean separation between the command-line transport and the domain logic it calls.
-2. A single, auditable source of package metadata that stays in sync with `pyproject.toml`.
-3. A strict-typed (pyright) codebase without disabling rules for third-party gaps.
-4. Consistent entry points for both console scripts and `python -m` execution.
-5. Enforced import contracts so the transport never leaks into the domain layer.
+1. The output of `ping` is a message written for a human, so it changes with locale, distribution
+   and version. A parser built on it fails silently on a machine configured differently.
+2. One process per probe. A sweep of a thousand hosts is a thousand `fork`/`exec` pairs.
+3. Raw sockets are the usual alternative, and they need root or `CAP_NET_RAW`.
+4. Errors and network conditions collapse into one answer. A permission problem and a dead host
+   read identically.
 
-This package is the scaffold that answers those once, so a new library starts from a
-working, tested, lint-clean baseline rather than an empty `src/`.
-
----
-
-## Solution Overview
-
-`ipscout` provides:
-
-1. **Layered Skeleton** - CLI adapter, domain behaviors, and a metadata/platform adapter
-   with enforced dependency direction.
-2. **Placeholder Domain** - `emit_greeting`, `raise_intentional_failure`, and `noop_main`
-   exercise the success, failure, and no-op paths end to end.
-3. **rich-click CLI** - `info`, `hello`, and `fail` commands plus a global
-   `--traceback/--no-traceback` toggle.
-4. **Strict Typing** - pyright strict mode, with the single untyped third-party boundary
-   isolated in `typed_click.py`.
-5. **Generated Metadata** - constants in `__init__conf__.py` kept in sync with
-   `pyproject.toml` by development automation, so runtime code never queries
-   `importlib.metadata`.
+ipscout answers all four in-process. ICMP goes over an unprivileged socket on Linux and macOS and
+through the IP Helper API on Windows, no subprocess is ever spawned, and the error contract keeps
+setup problems separate from network conditions.
 
 ---
 
-## Architecture Integration
+## Solution overview
 
-**Layer Structure:**
+1. **Unprivileged ICMP everywhere.** `SOCK_DGRAM`/`IPPROTO_ICMP` on Linux and macOS,
+   `IcmpSendEcho` via `iphlpapi.dll` on Windows. A raw socket is tried only as a fallback, so
+   running as root keeps working on a host where ping sockets are disabled.
+2. **Transports behind a protocol.** The probing policy depends on the protocols in `ports.py` and
+   never on a concrete backend.
+3. **A strict error contract.** Setup problems raise a typed exception whose message names the fix.
+   Network conditions come back as data.
+4. **Frozen Pydantic results.** Every public callable returns a validated model, never a dict, and
+   derived statistics are computed fields so a dump cannot drop them.
+5. **One JSON boundary.** All CLI commands render through a single helper, so no command can
+   support JSON on its success path and forget it elsewhere.
+
+---
+
+## Architecture
+
+### Layer structure
+
+The import-linter contract `Layered dependencies point one way only` is enforced in CI. Layers are
+listed highest first; each may import only from those below it.
+
 ```
-CLI Layer (cli.py, typed_click.py, __main__.py)
-    | imports
-Domain Layer (behaviors.py)              <- no framework dependencies
-    ^
-    | imports (metadata only)
-Platform Adapter (__init__conf__.py)     <- static package metadata
-```
-
-**Data Flow:**
-1. A console script or `python -m` invocation calls `cli.main()`.
-2. `main()` installs the rich traceback handler (unless suppressed) and dispatches
-   the click command group.
-3. Each command delegates to a behavior helper (`emit_greeting`, `raise_intentional_failure`)
-   or to `__init__conf__.print_info()`.
-4. Exit codes are normalized: 0 on success, the `SystemExit` code when raised, 1 on a
-   caught exception.
-
-**Dependency Direction:** CLI depends on behaviors, never the reverse. This is enforced in
-CI by import-linter (`tool.importlinter` contract "CLI depends on behaviors only").
-
-**Dependencies:**
-* **Runtime:** `rich-click>=1.9.8`, `rtoml>=0.13`.
-* **Development:** pytest, ruff, pyright, bandit, build, twine, import-linter, pip-audit,
-   pydantic, textual (install with the `[dev]` extra).
-
----
-
-## Core Components
-
-### `__init__` Module (Public API)
-
-Re-exports the stable public surface so importers depend on the package, not its internal
-module layout.
-
-**Exports:** `CANONICAL_GREETING`, `WritableStream`, `emit_greeting`, `noop_main`,
-`print_info`, `raise_intentional_failure`.
-
-**Location:** src/ipscout/__init__.py
-
----
-
-### `behaviors` Module (Domain Layer)
-
-Framework-free helpers that other modules import instead of duplicating literals.
-
-#### `WritableStream` (Protocol)
-
-**Purpose:** Structural type for any object exposing `write(str) -> object`. `flush` is
-optional and duck-typed at runtime.
-
-**Location:** src/ipscout/behaviors.py:29
-
----
-
-#### `CANONICAL_GREETING`
-
-**Purpose:** Single source of the greeting text (`"Hello World"`) shared by the CLI and tests.
-
-**Location:** src/ipscout/behaviors.py:39
-
----
-
-#### `emit_greeting(*, stream: WritableStream | None = None) -> None`
-
-**Purpose:** Write the canonical greeting plus a newline to the target stream, flushing when
-the stream supports it.
-
-**Input:** `stream` (optional) - text stream to receive the greeting; defaults to
-`sys.stdout`.
-
-**Output:** None (writes to the stream).
-
-**Location:** src/ipscout/behaviors.py:62
-
-**Example:**
-```python
-from io import StringIO
-from ipscout import emit_greeting
-
-buffer = StringIO()
-emit_greeting(stream=buffer)
-assert buffer.getvalue() == "Hello World\n"
+api          ping / aping / ping_many / aping_many / is_reachable / ais_reachable
+traceroute   traceroute / atraceroute / trace_path / atrace_path
+interfaces   local_interfaces
+service      probe sequencing and aggregation
+factory      picks the backend for this platform, family and options
+transport_posix : transport_windows : transport_tcp : interfaces_posix : interfaces_windows
+packet : resolve : ports : winapi
+models
+errors
 ```
 
----
+`cli.py`, `serialize.py`, `typed_click.py` and `__main__.py` sit outside the contract as the CLI
+adapter.
 
-#### `raise_intentional_failure() -> None`
+### Why the layers are split this way
 
-**Purpose:** Always raise `RuntimeError("I should fail")` so transports and tests can exercise
-failure and traceback handling.
+**Transports sit behind a protocol, not behind a base class.** `ports.py` declares `EchoTransport`
+and `AsyncEchoTransport` as `Protocol`s. `service.py` and `traceroute.py` are written against those
+protocols and import no concrete backend, which is why their tests hand them a real in-process fake
+rather than monkeypatching a module attribute. The substitution point is a constructor argument.
+There is no `mock.patch` of this package's own internals anywhere in the suite.
 
-**Raises:** `RuntimeError` unconditionally.
+**Only the factory knows the platform.** `factory.py` is the one module that branches on
+`sys.platform`. Everything above it is platform-free and therefore runnable on any machine under
+test. Everything below it is a single platform's implementation detail.
 
-**Location:** src/ipscout/behaviors.py:92
+**The service owns policy, the transport owns transit.** How many echoes, how far apart, what counts
+as reached is `service.py`. How one echo travels is a transport. Splitting them is what lets a probe
+be paced identically across ICMP, TCP, POSIX and Windows.
 
----
+**The API layer owns the error contract**, because it is the only layer that knows both what the
+caller asked for and what the machine could do. A transport reports what happened, including
+"nothing came back", and raises only when it cannot probe at all.
 
-#### `noop_main() -> None`
+### Data flow, one ping
 
-**Purpose:** Explicit placeholder callable for tools that expect a module-level `main` while
-the domain is still stubbed. Performs no work.
-
-**Location:** src/ipscout/behaviors.py:113
-
----
-
-### `cli` Module (Transport Adapter)
-
-Wires the behavior helpers into a rich-click interface.
-
-#### `CliContext` (dataclass)
-
-**Purpose:** Typed replacement for Click's untyped `ctx.obj` dict.
-
-**Attributes:** `traceback: bool = True` - whether to show a full traceback on error.
-
-**Location:** src/ipscout/cli.py:59
-
----
-
-#### Command group: `cli`
-
-**Purpose:** Root group carrying the global `--traceback/--no-traceback` flag and the
-`--version` option. With no subcommand and a default flag value it prints help.
-
-**Location:** src/ipscout/cli.py:99
+1. `api.ping` resolves the target once through `resolve.resolve_one`, which fixes the address
+   family up front rather than guessing it later.
+2. `api._prepare` builds a `service.PingRequest`. Pydantic field bounds reject a bad `times`,
+   `timeout` or `interval` here, before any packet moves, identically for every caller path.
+3. `factory.make_transport` picks the backend.
+4. `service.run_ping` sends the echoes, paced against the run's start so a slow reply does not push
+   every later echo later, and folds the outcomes into a `ResponseObject`.
+5. On the CLI path, `cli._emit` renders it as text or as JSON through `serialize.dumps`.
 
 ---
 
-#### Command: `info`
+## Token matching, and why the identifier is useless
 
-**Purpose:** Print resolved package metadata via `__init__conf__.print_info()`.
+An unprivileged datagram ICMP socket does not let the process choose its ICMP identifier. The kernel
+overwrites that field with a value of its own derived from the socket, so the identifier that comes
+back is not the one that was sent. Measured on Linux: an echo sent with identifier `0xBEEF` produced
+a reply carrying `0x4C36`.
 
-**Location:** src/ipscout/cli.py:151
+Matching replies on the identifier, which is what a textbook implementation does, would therefore
+never match, and every healthy host would read as 100% loss. So every request embeds a random token
+in its payload, behind an `IPSCOUT1` magic prefix, and a reply counts as ours only if the sequence
+number and the payload token both come back intact.
 
----
+That rule is independent of the kernel's rewriting, so the same matching logic is correct on
+datagram sockets, on raw sockets, and on the Windows API backend. It also solves a second problem:
+several processes on one host can hold ICMP sockets at once and may be handed copies of each other's
+replies. A foreign reply fails the token check and is discarded rather than counted as an answer to
+a probe nobody sent.
 
-#### Command: `hello`
+Two other wire-level facts are handled in `packet.py`:
 
-**Purpose:** Demonstrate the success path by emitting the canonical greeting.
-
-**Location:** src/ipscout/cli.py:157
-
----
-
-#### Command: `fail`
-
-**Purpose:** Demonstrate error handling by calling `raise_intentional_failure()`.
-
-**Location:** src/ipscout/cli.py:163
-
----
-
-#### `main(argv: Sequence[str] | None = None) -> int`
-
-**Purpose:** Entry point for console scripts and `python -m`. Installs the rich traceback
-handler unless `--no-traceback` is present, dispatches the command group, and returns a
-normalized exit code.
-
-**Input:** `argv` (optional) - argument sequence; `None` uses `sys.argv[1:]`.
-
-**Output:** Exit code (0 success, `SystemExit` code when raised, 1 on caught exception).
-
-**Location:** src/ipscout/cli.py:169
+- **A leading IP header may or may not be present.** Linux ping sockets deliver the ICMP message
+  alone; macOS prepends the full IPv4 header, as BSD raw sockets do. Parsing the IP header as an
+  ICMP header yields a type byte of `0x45`, which matches no ICMP type, so every reply would be
+  discarded. The prefix is detected from the data, not from `sys.platform`: ICMPv4 type numbers are
+  all below 16, so a first byte whose high nibble is 4 can only be an IPv4 version field.
+- **IPv6 checksums are the kernel's job.** The ICMPv6 checksum covers a pseudo-header containing the
+  source address, which user space does not reliably know, so the field is sent as zero.
 
 ---
 
-### `typed_click` Module (Type Boundary)
+## Measured platform matrix
 
-**Purpose:** Wrap click's `option` and `version_option` behind fully-known signatures so the
-rest of the CLI stays strict-clean under pyright. The only `# pyright: ignore` for this
-third-party gap lives here.
+Established by running the suite on real CI runners, not by reading documentation.
 
-**Exports:** `option`, `version_option`.
+| Capability              | Linux                              | macOS                                | Windows                           |
+|-------------------------|------------------------------------|--------------------------------------|-----------------------------------|
+| ICMP echo, no elevation | `SOCK_DGRAM`/`IPPROTO_ICMP`        | `SOCK_DGRAM`/`IPPROTO_ICMP`          | `IcmpSendEcho` via `iphlpapi.dll` |
+| Traceroute              | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | no, raises `IPScoutUnsupportedError` | yes, `IP_TTL_EXPIRED_TRANSIT`     |
+| Async model             | one socket on the event loop       | one socket on the event loop         | blocking C call in a thread pool  |
+| Interface enumeration   | `getifaddrs`                       | `getifaddrs`                         | `GetAdaptersAddresses`            |
+| Route lookup            | netlink `RTM_GETROUTE`             | not implemented                      | not implemented                   |
 
-**Location:** src/ipscout/typed_click.py
+### Traceroute on macOS
 
----
+Measured on a macOS runner: `MSG_ERRQUEUE` is not defined there, and a plain receive on the ICMP
+socket returns nothing at all, so an unprivileged process never observes ICMP Time Exceeded.
+`traceroute` raises `IPScoutUnsupportedError` rather than returning a column of silent hops, which
+would look like a broken network instead of a missing capability. The exception type is distinct
+from `IPScoutPermissionError` for a concrete reason: running as root fixes a permission problem and
+does not fix this.
 
-### `__init__conf__` Module (Platform Adapter)
+The refusal is taken from the transport's own `supports_ttl_discovery` rather than from
+`sys.platform`, so the TCP transport is refused through the same code path for the same reason.
 
-**Purpose:** Expose static package metadata (name, title, version, homepage, author,
-`shell_command`, and the `LAYEREDCONF_*` identifiers for lib_layered_config paths) as
-module-level constants, kept in sync with `pyproject.toml` by automation.
+### The Linux socket-option fallback
 
-**Key function:** `print_info() -> None` renders the metadata block for the CLI `info`
-command.
+CPython only began exposing `IP_RECVERR` and `IPV6_RECVERR` in 3.14. On 3.10 through 3.13 the
+lookup came back empty and the capability check honestly answered "traceroute unsupported" on Linux.
+`transport_posix.py` therefore falls back to the kernel ABI values (`IP_RECVERR` 11 from
+`linux/in.h`, `IPV6_RECVERR` 25 from `linux/in6.h`). Those are fixed forever, since changing one
+would break every compiled binary on the platform.
 
-**Location:** src/ipscout/__init__conf__.py
+The failure was invisible twice over: absent on a 3.14 development machine, and absent in CI, whose
+Linux runners refuse ICMP outright and skip those tests.
 
----
+### Windows timing resolution
 
-### `__main__` Module (Module Entry Point)
-
-**Purpose:** Bridge `python -m ipscout` to `cli.main()`, exiting with its
-return code.
-
-**Location:** src/ipscout/__main__.py
-
----
-
-## Implementation Details
-
-**Exit-code normalization (`_exit_code_from`):**
-1. Return the `SystemExit.code` when it is an int.
-2. Otherwise return 1 when the code is truthy, 0 when falsy.
-
-**Traceback handling:**
-- `main()` inspects `argv` for `--no-traceback`; when absent it installs the rich traceback
-  handler with locals.
-- On a caught exception `_print_error` renders either a full rich `Traceback` (with locals)
-  or a single red one-line message, depending on the toggle.
-
-**Metadata sync:**
-- Constants in `__init__conf__.py` mirror `pyproject.toml`. After changing project metadata,
-  `make test` regenerates the module before commit, so runtime code never calls
-  `importlib.metadata`.
+`IcmpSendEcho` reports round-trip time in whole milliseconds, so anything faster than 1 ms reads as
+zero. `transport_windows.py` measures with `time.perf_counter` around the call and uses the API's
+own value only as a fallback, which keeps loopback and LAN timings meaningful.
 
 ---
 
-## Testing Approach
+## Modules
 
-**Test modules:**
-- `tests/test_behaviors.py` - domain helpers (`emit_greeting`, `raise_intentional_failure`,
-  `noop_main`) and the `WritableStream` contract.
-- `tests/test_cli.py` - command dispatch, exit codes, and the traceback toggle.
-- `tests/test_metadata.py` - metadata constants and `print_info` rendering.
-- `tests/test_module_entry.py` - the `python -m` entry point.
-- `tests/conftest.py` - shared fixtures.
+### Public surface
 
-**Doctests:** enabled via `--doctest-modules` (see `tool.pytest.ini_options`), so the
-docstring examples in `behaviors.py`, `cli.py`, and `__init__conf__.py` run as tests.
+| Module          | Role                                                                                                            |
+|-----------------|-----------------------------------------------------------------------------------------------------------------|
+| `__init__.py`   | Re-exports the public API so importers depend on the package, not its layout.                                   |
+| `api.py`        | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.           |
+| `traceroute.py` | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                           |
+| `interfaces.py` | `local_interfaces`, dispatching to the per-OS backend.                                                          |
+| `resolve.py`    | `resolve`, `resolve_one`, `reverse_dns`, `family_of`.                                                           |
+| `factory.py`    | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path. |
 
-**OS markers:** `os_agnostic`, `os_windows`, `os_macos`, `os_posix`, `os_linux`, and
-`local_only` scope tests to platforms and to local-only runs (skipped in CI).
+### Core
 
-**Coverage gate:** `fail_under = 85` over `src/ipscout`.
+| Module       | Role                                                                              |
+|--------------|-----------------------------------------------------------------------------------|
+| `errors.py`  | `IPScoutError` and its three subclasses. No dependencies.                         |
+| `models.py`  | Frozen result models and the `str`-subclass enums.                                |
+| `ports.py`   | `EchoResult`, `EchoTransport`, `AsyncEchoTransport`. The seams.                   |
+| `packet.py`  | ICMP encode and decode. Total functions over bytes: no sockets, no clock, no I/O. |
+| `service.py` | `PingRequest`, `run_ping`, `arun_ping`. Probe sequencing and aggregation.         |
 
----
+### Platform backends
 
-## Known Limitations & Future Enhancements
+| Module                  | Role                                                                                                                     |
+|-------------------------|--------------------------------------------------------------------------------------------------------------------------|
+| `transport_posix.py`    | ICMP over the unprivileged datagram socket, sync and asyncio, plus the raw-socket fallback and the permission diagnosis. |
+| `transport_windows.py`  | ICMP through `IcmpSendEcho` / `Icmp6SendEcho2`, plus the executor-backed async variant.                                  |
+| `transport_tcp.py`      | Reachability by full TCP connect. Never selected automatically.                                                          |
+| `interfaces_posix.py`   | `getifaddrs`, handling the Linux/BSD `sockaddr` disagreement.                                                            |
+| `interfaces_windows.py` | `GetAdaptersAddresses`.                                                                                                  |
+| `winapi.py`             | ctypes bindings for `iphlpapi.dll`. Imports safely on every platform.                                                    |
+| `routes_linux.py`       | Netlink `RTM_GETROUTE`, asking the kernel which route it would actually use.                                             |
 
-**By design (do not "fix"):**
-- Python 3.10 baseline: it is the oldest release still receiving security fixes, and it is what `dataclass(slots=True)` and `zip(strict=)` require.
-- `from __future__ import annotations` is kept across modules for consistency and forward
-  compatibility.
-- The domain layer is a placeholder: `emit_greeting`, `raise_intentional_failure`, and
-  `noop_main` exist to prove the wiring, not to provide features.
+### CLI adapter
 
-**When adapting this template:**
-- Replace the placeholder behaviors with the library's real domain logic.
-- Extend the import-linter contract as new layers are added.
-- Keep the metadata constants and `pyproject.toml` in sync via the automation.
-
----
-
-## Security Considerations
-
-- **No untrusted input:** the CLI commands take no external data; `emit_greeting` writes only
-  the constant greeting.
-- **Type boundary isolated:** the single untyped third-party surface is quarantined in
-  `typed_click.py`; the rest is strict-typed.
-- **Dependency hygiene:** `pip-audit` runs in CI; known-unfixable advisories are pinned in
-  `tool.pip-audit.ignore-vulns` with rationale, and `codecov-cli` is commented out (not
-  deleted) to avoid dragging click below the CVE-2026-7246 fix.
-
----
-
-## Documentation & Resources
-
-**Internal References:**
-* README.md - overview and usage
-* INSTALL.md - installation, including the `[dev]` extra
-* DEVELOPMENT.md - developer workflow and make targets
-* CONTRIBUTING.md - contribution guidelines
-* CHANGELOG.md - version history
-
-**External References:**
-* rich-click documentation: https://github.com/ewels/rich-click
-* Click documentation: https://click.palletsprojects.com/
-* import-linter documentation: https://import-linter.readthedocs.io/
-* PEP 561 (py.typed): https://peps.python.org/pep-0561/
+| Module              | Role                                                                       |
+|---------------------|----------------------------------------------------------------------------|
+| `cli.py`            | The rich-click group, nine subcommands, `_emit` and `_fail`, and `main`.   |
+| `serialize.py`      | `to_jsonable` and `dumps` at the output boundary.                          |
+| `typed_click.py`    | Typed facade over rich-click's partially-typed decorators.                 |
+| `__main__.py`       | `python -m ipscout`.                                                       |
+| `__init__conf__.py` | Static package metadata, kept in sync with `pyproject.toml` by automation. |
 
 ---
 
-## Version History
+## Result models
 
-**v1.1.2 (2026-06-14):**
-- Added `typed_click.py` facade wrapping rich-click's `option` / `version_option` decorators
-  behind explicit signatures, keeping the CLI strict-clean under pyright without disabling the
-  rule.
+Every model is frozen with `extra="forbid"`. A probe result records something that already happened,
+and mutating it can only make it disagree with reality.
 
-**v1.1.1 (2026-02-18):**
-- Added `__all__` to `__init__conf__.py`.
+| Model                | Fields                                                                                                                                                                                                                                                          |
+|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ResponseObject`     | `target`, `reached`, `ip`, `number_of_pings`, `rtts_ms`, `packets_sent`, `packets_received`, `family`, `method`, `error`, plus the computed `time_min_ms`, `time_avg_ms`, `time_max_ms`, `jitter_ms`, `n_packets_lost`, `packets_lost_percentage`, `str_result` |
+| `TraceHop`           | `ttl`, `address`, `rtt_ms`, `reached`, `hostname`                                                                                                                                                                                                               |
+| `Interface`          | `name`, `ipv4`, `ipv6`, `mac`, `is_up`, `is_loopback`, `mtu`                                                                                                                                                                                                    |
+| `InterfaceAddress`   | `address`, `prefix_len`                                                                                                                                                                                                                                         |
+| `MacLookup`          | `ip`, `mac`, `scope`, `via_ip`, `interface`                                                                                                                                                                                                                     |
+| `SubnetInfo`         | `interface`, `address`, `prefix_len`, `network`, `family`, `broadcast`, `gateway`, `dns_servers`, `domain`, `dhcp_server`, `lease_obtained`, `lease_expires`, `mtu`                                                                                             |
+| `CapabilityReport`   | `icmp_ipv4`, `icmp_ipv6`, `traceroute`                                                                                                                                                                                                                          |
+| `ReachabilityReport` | `target`, `reachable`                                                                                                                                                                                                                                           |
+| `ResolveReport`      | `target`, `addresses`                                                                                                                                                                                                                                           |
+| `ReverseDnsReport`   | `ip`, `hostname`                                                                                                                                                                                                                                                |
+| `PackageInfo`        | `name`, `version`, `title`, `homepage`, `author`, `shell_command`                                                                                                                                                                                               |
+| `JsonEnvelope`       | `ok`, `command`, `data`, `error`                                                                                                                                                                                                                                |
+| `JsonError`          | `type`, `message`                                                                                                                                                                                                                                               |
 
-**v1.1.0 (2026-02-18):**
-- Added the `WritableStream` Protocol for narrower stream typing in `behaviors.py`.
+`MacLookup` and `SubnetInfo` are exported result types for the local-network inspection layer. No
+public callable returns one in this release.
+
+Two model decisions worth knowing:
+
+**Derived values are `@computed_field`, not plain properties.** The average round trip, the loss
+percentage and the summary line are computed. A plain `@property` is invisible to serialisation, so
+`model_dump()` would silently drop exactly the numbers a caller wants while producing a payload that
+looks complete. Declaring them as computed fields puts them in the dump by construction.
+
+**The enums subclass `str`.** Their members are strings, so the wire bytes are unchanged and no
+conversion happens at the boundary. `StrEnum` is the modern spelling but arrived in 3.11, and this
+package supports 3.10.
 
 ---
 
-## Quick Reference
+## The error contract
+
+| Exception                 | Meaning                                            | Would root help |
+|---------------------------|----------------------------------------------------|-----------------|
+| `IPScoutError`            | Base class. Catch this for the whole family.       | n/a             |
+| `IPScoutPermissionError`  | The process lacks a privilege the operation needs. | yes             |
+| `IPScoutResolutionError`  | The target could not be turned into an address.    | no              |
+| `IPScoutUnsupportedError` | No backend implements this here.                   | no              |
+
+Keeping these apart is the point of `errors.py`: a missing ICMP permission and an unreachable
+host call for different responses from the caller, so collapsing both into `reached=False` would
+throw away the distinction that matters.
+
+Permission messages name the concrete remediation rather than reporting refusal, because the fix
+differs per platform and per operation. `is_reachable` and `ais_reachable` are the deliberate
+exceptions to the whole contract: they never raise and always fall back to TCP, documented on their
+own docstrings so nobody mistakes them for `ping(...).reached`.
+
+---
+
+## Testing approach
+
+Tests drive the real modules through their real seams. A transport is injected as a constructor
+argument, so the probing logic is exercised with an in-process fake rather than with a patched
+module attribute. Nothing inside this package is monkeypatched anywhere in the suite; the single
+`monkeypatch` call sets `sys.argv` for the `python -m` entry-point test, which is a genuine
+external edge.
+
+`packet.py` is a set of total functions over bytes, so the protocol layer is fully testable without
+a network, without privileges and without a particular operating system. `winapi.py` structure
+layouts are pinned by `tests/test_winapi_layout.py`, which runs on any platform because fixed-width
+integer types make the layouts identical everywhere.
+
+Doctests run under `--doctest-modules`, so the examples in the source are tests.
+
+**Coverage gate:** `fail_under = 85` over `src/ipscout`. The four platform backends
+(`transport_posix.py`, `transport_windows.py`, `interfaces_posix.py`, `interfaces_windows.py`) are
+omitted from the percentage, not from testing. Each is exercised by per-OS marked suites in the CI
+matrix, but each can only execute on one platform, so leaving them in makes every backend report as
+dead weight on the two platforms that cannot run it and sinks the gate on every OS at once.
+
+**Markers:** `os_agnostic`, `os_windows`, `os_macos`, `os_posix`, `os_linux`, `local_only`.
+
+---
+
+## Security considerations
+
+- **No subprocess, ever.** Nothing is spawned, so there is no shell quoting, no `PATH` lookup and no
+  locale-dependent output parsing anywhere in the package.
+- **No elevation on the default paths.** The raw-socket fallback exists so a root process keeps
+  working, never as the first choice.
+- **Foreign replies are discarded.** The payload token stops another process's ICMP reply being
+  counted as an answer to a probe this one never sent.
+- **Bounds-checked structure walking.** `interfaces_posix.py` validates every field before reading
+  it, because it walks memory handed over by libc; a malformed entry is skipped rather than trusted.
+- **Fixed-width ctypes.** `c_ulong` is 4 bytes on Windows and 8 on 64-bit Linux, so every Windows
+  structure field is declared with an explicit width. That keeps layouts identical everywhere and
+  lets tests assert the sizes from Linux.
+- **Dependency hygiene.** `pip-audit` and `bandit` run in CI; `codecov-cli` is commented out rather
+  than deleted, because its `click<8.3.0` pin would drag click below the CVE-2026-7246 fix.
+
+---
+
+## Quick reference
 
 ```python
-# Python API
-from ipscout import (
-    CANONICAL_GREETING,
-    WritableStream,
-    emit_greeting,
-    noop_main,
-    print_info,
-    raise_intentional_failure,
-)
+import ipscout
 
-from io import StringIO
-
-buffer = StringIO()
-emit_greeting(stream=buffer)  # writes "Hello World\n"
+ipscout.ping("127.0.0.1", 2, interval=0)  # -> ResponseObject
+ipscout.ping_many(["127.0.0.1", "::1"], times=1)  # -> dict[str, ResponseObject]
+ipscout.is_reachable("127.0.0.1")  # -> bool, never raises
+ipscout.traceroute("1.1.1.1", max_hops=10)  # -> list[TraceHop]
+ipscout.resolve("localhost")  # -> list[str]
+ipscout.reverse_dns("127.0.0.1")  # -> str | None
+ipscout.local_interfaces()  # -> list[Interface]
+ipscout.icmp_available()  # -> bool
 ```
 
 ```bash
-# CLI usage
-ipscout info          # print resolved metadata
-ipscout hello         # emit the canonical greeting
-ipscout fail          # exercise the failure path
-ipscout --no-traceback fail   # one-line error, no traceback
-
-python -m ipscout hello       # module entry point
+ipscout ping 127.0.0.1 -c 2
+ipscout --json ping 127.0.0.1 -c 1
+ipscout --json-bare capabilities
+python -m ipscout --help
 ```

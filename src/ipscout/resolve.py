@@ -12,9 +12,8 @@ Contents:
     family_of: Classify a literal address.
 
 Note:
-    The old library guessed at families by trying IPv4 and falling back to IPv6
-    on a subprocess error. Here the family is resolved once, up front, and
-    carried explicitly on the result.
+    The family is resolved once, up front, and carried explicitly on the
+    result, so no later stage has to guess it or infer it from a failure.
 
 """
 

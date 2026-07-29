@@ -5,98 +5,67 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
-## [1.1.3] 2026-07-24 15:56:45
+## [1.0.0] - 2026-07-29
 
-### Changed
-- Pinned the lint policy explicitly: added the curated `[tool.ruff.lint].select` list (the same
-  family set as `bitranox_template_py_cli`) plus matching `tests/*.py` per-file-ignores, so a future
-  ruff release widening its default rule set no longer reddens CI with hundreds of unrelated
-  findings.
-- Made the root `cli` group callback's `traceback` parameter keyword-only (`PLR0917`); Click still
-  invokes it via `**ctx.params`, so no call site changed.
-
-### Fixed
-- Replaced `print()` with `sys.stdout.write()` in `__init__conf__.print_info()` (`T201`), matching the
-  established fix in `bitranox_template_py_cli`.
-- Sorted `__all__` in `behaviors.py` (`RUF022`) and normalized import ordering across `src` and
-  `tests` (`I001`, `TC002`, `TC003`).
-
-## [1.1.2] 2026-06-14
-
-### Changed
-- Added a `typed_click.py` facade wrapping rich-click's `option` / `version_option` decorators behind explicit, fully-known signatures, keeping the CLI strict-clean under pyright (`reportUnknownMemberType`) without disabling the rule (ignore isolated to the facade).
-
-## [1.1.1] - 2026-02-18
+Initial release. `ipscout` probes hosts and inspects the local network entirely in-process: no
+subprocess is spawned, and no administrator or root rights are needed on the default paths.
 
 ### Added
-- `__all__` export declaration in `__init__conf__.py` for consistent public API surface
 
-### Fixed
-- Pin `rtoml` and `pip-audit` versions for Python 3.9 compatibility
-- Ignore `filelock` transitive dependency vulnerabilities in pip-audit
+- **In-process ICMP, unprivileged.** Echo goes over `SOCK_DGRAM`/`IPPROTO_ICMP` (the kernel ping
+  socket) on Linux and macOS, and through `IcmpSendEcho` in `iphlpapi.dll` via ctypes on Windows.
+  Neither needs elevation; raw sockets, which do, are only a fallback for a host where ping sockets
+  are disabled. Nothing shells out, so there is no per-probe process and no locale-dependent output
+  to parse.
+- **Errors and network conditions are separate channels.** Setup problems raise a typed exception
+  whose message names the fix; network conditions come back as data, so a down host, a timeout and
+  100% loss all return `reached=False`. Collapsing both into one flag would make a missing ICMP
+  permission indistinguishable from a dead host. Pass `raise_on_error=False` to report failures on
+  `.error` instead. `ping_many` and `aping_many` default to `raise_on_error=False`, because one bad
+  name in a sweep of two hundred should not destroy the other 199 results.
 
-## [1.1.0] - 2026-02-18
+- **Async API.** `aping`, `aping_many`, `ais_reachable`, `atraceroute` and `atrace_path`. Genuinely
+  asynchronous on Linux and macOS, where the ICMP socket is registered with the event loop, so a
+  sweep of thousands runs on one thread. On Windows `IcmpSendEcho` is a blocking C call with no
+  asyncio integration, so the async path is executor-backed: identical behaviour, different scaling.
+- **Concurrent sweeps.** `ping_many` and `aping_many`, with bounded concurrency (default 64).
+- **Traceroute.** `traceroute`, `atraceroute`, `trace_path` and `atrace_path`. Supported on Linux
+  (`IP_RECVERR` plus `MSG_ERRQUEUE`) and Windows (`IP_TTL_EXPIRED_TRANSIT`). Not supported on macOS:
+  measured on a macOS runner, neither `MSG_ERRQUEUE` nor a plain receive surfaces ICMP Time Exceeded
+  to an unprivileged process, so it raises `IPScoutUnsupportedError` rather than returning a column
+  of silent hops that would read as a broken network.
+- **Local network inspection.** `local_interfaces` via `getifaddrs` on POSIX and
+  `GetAdaptersAddresses` on Windows.
+- **Name resolution helpers.** `resolve` and `reverse_dns`, with the address family decided once and
+  carried explicitly on the result instead of being guessed per call.
+- **Capability reporting.** `icmp_available(family)` and the `capabilities` CLI command, so a caller
+  can find out what this host can do without provoking an error first.
+- **A TCP fallback that is never silent.** `allow_tcp_fallback=True` probes over a full TCP connect
+  when ICMP is unavailable, and every result carries a `method` field, so a TCP answer can never be
+  mistaken for an ICMP round trip. `is_reachable` is the deliberate exception to the error contract:
+  it never raises and always tries TCP.
+- **A CLI with nine commands.** `ping`, `ping-many`, `reachable`, `traceroute`, `resolve`,
+  `reverse-dns`, `interfaces`, `capabilities`, `info`. Global `--json`/`-j` emits an envelope
+  (`ok`, `command`, `data` or `error`); `--json-bare` emits the payload at top level for `jq`. Exit
+  codes: 0 reached, 1 not reached, 2 error.
+- **Typed errors.** `IPScoutError` plus `IPScoutPermissionError`, `IPScoutResolutionError` and
+  `IPScoutUnsupportedError`. The permission and unsupported cases are separate types because running
+  as root fixes one and does not fix the other.
+- **Frozen Pydantic result models.** `ResponseObject`, `TraceHop`, `Interface`, `InterfaceAddress`,
+  `MacLookup`, `SubnetInfo`, `CapabilityReport`, plus the CLI report types. Derived statistics are
+  computed fields, so a model dump carries them rather than silently dropping them.
+- **Enums for the fixed value sets.** `AddressFamily`, `ProbeMethod`, `MacScope`, `CommandName`.
+- **Token-based reply matching.** An unprivileged datagram ICMP socket does not let the process
+  choose its ICMP identifier; the kernel rewrites it. Measured on Linux, an echo sent with identifier
+  `0xBEEF` came back carrying `0x4C36`. Replies are therefore matched on the sequence number plus a
+  random token embedded in the payload, which is correct on datagram sockets, raw sockets and the
+  Windows backend alike, and which discards another process's replies rather than counting them.
+- **Kernel ABI fallback for `IP_RECVERR` / `IPV6_RECVERR`.** CPython only exposed these constants
+  from 3.14. Without the fallback to the kernel values (11 and 25), traceroute would report itself
+  unsupported on Linux for every Python from 3.10 to 3.13.
 
-### Added
-- `WritableStream` Protocol for narrower stream typing in `behaviors.py`
-- `CliContext` dataclass replacing untyped dict for Click context storage
-- Dynamic CI matrix extracting Python versions from pyproject.toml classifiers
-- Pydantic models for typed TOML parsing in test suite
-- Test covering `SystemExit` branch in `cli.main()` for 100% cli.py coverage
-- `pydantic` added to dev dependencies
+### Requirements
 
-### Changed
-- Replace `TextIO` with `WritableStream` Protocol for honest, minimal typing
-- Rename `ERROR_STYLE` to `_ERROR_STYLE` (private convention)
-- Replace `scripts/` Python build system with bmk-based Makefile targets
-- CI workflows renamed and modernized (`default_cicd_public.yml`, `default_release_public.yml`)
-- Use stdlib `tomllib` instead of `rtoml` in CI setup job
-- Update dev dependency pins (pydantic, ruff, pyright, bandit, etc.)
-
-### Fixed
-- CI `IndexError` in Python version parsing by switching to stdlib `tomllib`
-- Inconsistent spacing in pip-audit ignore-vulns list
-- Undeclared `local_only` pytest marker
-
-### Removed
-- `scripts/` directory (replaced by bmk Makefile targets)
-- `CLAUDE.md` project instructions file (moved to project-level config)
-
-## [1.0.3] - 2025-12-15
-
-### Changed
-- Move deferred imports to module top in `cli.py` for better readability
-- Modernize type hints: `Optional[X]` replaced with `X | None` syntax
-- Use `collections.abc.Sequence` instead of `typing.Sequence`
-- Extract `_exit_code_from()` helper function with comprehensive doctests
-- Extract `_print_error()` helper function for cleaner error handling
-- Add `ERROR_STYLE` module-level constant for error message styling
-- Add typed context documentation comment for Click context dict
-
-### Added
-- Add `__all__` export list to `cli.py` for explicit public API surface
-
-### Fixed
-- Remove unused `strip_ansi` fixture parameter from test functions
-- Remove unused `Callable` import from `test_cli.py`
-
-## [1.0.2] - 2025-12-15
-
-### Changed
-- Update CI/CD workflows to use latest GitHub Actions (cache@v5, upload-artifact@v6)
-- Update dev dependencies: ruff 0.14.9, textual 6.9.0, import-linter 2.9
-- Switch scripts to use rtoml for TOML parsing
-
-### Added
-- Add rtoml to dev dependencies
-
-## [1.0.1] - 2025-12-08
-
-### Changed
-- Update dependencies to latest versions
-- Update CI/CD workflows and configuration
-- Convert docstrings to Google style
-- Set coverage output to JSON to avoid SQL locks
-
-## [1.0.0] - 2025-11-04
-- Bootstrap `ipscout`
+Python 3.10 or newer. Runtime dependencies: `lib_cli_exit_tools>=2.3.4` (earlier releases discarded
+Click's return value, which collapsed the not-reached exit code of 1 into 0), `pydantic`,
+`rich-click`, `rtoml`.

@@ -1,4 +1,4 @@
-"""Result-type stories, with the pre-1.0 compatibility promise pinned down."""
+"""Result-type stories, with the public shape of every record pinned down."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _reply(*rtts: float | None, target: str = "example.test", ip: str = "10.0.0.
 
 
 @pytest.mark.os_agnostic
-def test_the_summary_line_matches_the_pre_1_0_format_exactly() -> None:
+def test_the_summary_line_matches_its_documented_format_exactly() -> None:
     # Callers log this string and some of them parse it, so it is a contract.
     result = _reply(2.5, ip="1.1.1.1")
 
@@ -32,11 +32,11 @@ def test_the_summary_line_matches_the_pre_1_0_format_exactly() -> None:
 
 
 @pytest.mark.os_agnostic
-def test_a_result_with_nothing_received_keeps_the_old_sentinels() -> None:
+def test_a_result_with_nothing_received_reports_the_sentinels() -> None:
     result = ResponseObject(target="10.0.0.9", number_of_pings=1, rtts_ms=(None,), packets_sent=1)
 
     assert result.reached is False
-    assert result.ip == "0.0.0.0"  # noqa: S104 - asserting the compatibility sentinel, not binding
+    assert result.ip == "0.0.0.0"  # noqa: S104 - asserting the sentinel value, not binding
     assert result.time_min_ms == -1.0
     assert result.time_avg_ms == -1.0
     assert result.time_max_ms == -1.0
@@ -72,8 +72,8 @@ def test_lost_packets_are_skipped_by_the_timing_summary_not_counted_as_zero() ->
 
 @pytest.mark.os_agnostic
 def test_loss_counts_packets_rather_than_pattern_matches() -> None:
-    # The pre-1.0 implementation set this to the number of regex matches found
-    # in the system ping output, which was never a packet count.
+    # This counts packets. Counting anything else here (matches in some text,
+    # say) would produce a number that looks like loss but is not.
     result = _reply(1.0, None, None, 4.0)
 
     assert result.packets_sent == 4
@@ -92,7 +92,7 @@ def test_loss_counts_packets_rather_than_pattern_matches() -> None:
         ((1.0, None, None), 67),
     ],
 )
-def test_loss_percentage_rounds_the_way_the_old_output_did(pattern: tuple[float | None, ...], expected: int) -> None:
+def test_loss_percentage_rounds_to_a_whole_number(pattern: tuple[float | None, ...], expected: int) -> None:
     assert _reply(*pattern).packets_lost_percentage == expected
 
 

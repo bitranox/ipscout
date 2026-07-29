@@ -46,8 +46,8 @@ def test_resolution_reports_the_family_alongside_the_address() -> None:
 
 @pytest.mark.os_agnostic
 def test_an_unknown_name_raises_rather_than_reading_as_a_down_host() -> None:
-    # The pre-1.0 library returned reached=False here, which made a typo in a
-    # hostname indistinguishable from an outage.
+    # Reporting reached=False here would make a typo in a hostname
+    # indistinguishable from an outage.
     with pytest.raises(IPScoutResolutionError, match="cannot resolve"):
         resolve(NEVER_RESOLVES)
 

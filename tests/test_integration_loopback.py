@@ -97,7 +97,7 @@ def test_an_unresolvable_name_raises_instead_of_reading_as_down() -> None:
         ipscout.ping(NEVER_RESOLVES)
 
 
-def test_the_old_swallow_everything_behaviour_is_still_available() -> None:
+def test_failures_can_be_reported_on_the_result_instead_of_raised() -> None:
     result = ipscout.ping(NEVER_RESOLVES, raise_on_error=False)
 
     assert result.reached is False

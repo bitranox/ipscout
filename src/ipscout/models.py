@@ -7,7 +7,7 @@ can only make it disagree with reality.
 
 Contents:
     AddressFamily / ProbeMethod / MacScope / CommandName: fixed value sets.
-    ResponseObject: the ping result, backward compatible with the pre-1.0 API.
+    ResponseObject: the ping result.
     TraceHop / Interface / MacLookup / SubnetInfo: the other result records.
     CapabilityReport / ReachabilityReport / ResolveReport / ReverseDnsReport /
     PackageInfo: the CLI's own payloads.
@@ -57,11 +57,12 @@ __all__ = [
     "TraceHop",
 ]
 
-#: Value the pre-1.0 library used for "no timing data available".
+#: Reported for "no timing data available". A distinct sentinel rather than
+#: 0.0, which would average into a summary as a real measurement.
 NO_TIME_MS = -1.0
 
-#: Value the pre-1.0 library used for "no address determined". Reported back as
-#: a value for compatibility; nothing is ever bound to it.
+#: Reported for "no address determined". A placeholder in the result only;
+#: nothing is ever bound to it.
 UNKNOWN_IP = "0.0.0.0"  # noqa: S104  # nosec B104
 
 
@@ -129,12 +130,9 @@ class CommandName(str, enum.Enum):
 class ResponseObject(_Frozen):
     """The result of pinging one target.
 
-    Every attribute the pre-1.0 library exposed is still present with the same
-    name, type and sentinel, so existing attribute access keeps working. Two
-    things changed deliberately: the record is frozen, and ``n_packets_lost``
-    now counts lost packets - the old implementation set it to the number of
-    regex matches found in system ``ping`` output, which was never a count of
-    packets.
+    The record is frozen, and every derived statistic is a computed field
+    rather than a plain property, so a dump carries the numbers a caller
+    actually wants rather than silently omitting them.
 
     Examples:
         >>> result = ResponseObject(target="example.test", reached=True, ip="10.0.0.1",
@@ -145,7 +143,7 @@ class ResponseObject(_Frozen):
         >>> result.n_packets_lost, result.packets_lost_percentage
         (0, 0)
 
-        A result with nothing received keeps the pre-1.0 sentinels:
+        A result with nothing received reports the sentinels:
 
         >>> down = ResponseObject(target="10.0.0.9", number_of_pings=1,
         ...                       rtts_ms=(None,), packets_sent=1)
@@ -225,8 +223,8 @@ class ResponseObject(_Frozen):
     def packets_lost_percentage(self) -> int:
         """Return loss as a rounded integer percentage.
 
-        Sending nothing counts as total loss rather than a division by zero,
-        matching what the pre-1.0 library reported for a failed run.
+        Sending nothing counts as total loss rather than raising a division
+        by zero.
         """
 
         if self.packets_sent <= 0:
@@ -236,9 +234,10 @@ class ResponseObject(_Frozen):
     @computed_field
     @property
     def str_result(self) -> str:
-        """Return the one-line summary in the pre-1.0 format, unchanged.
+        """Return the one-line summary of the result.
 
-        Kept byte-for-byte compatible because callers log it, and some parse it.
+        The exact format is a contract: callers log this string, and some
+        parse it.
 
         Examples:
             >>> ResponseObject(target="t", ip="1.1.1.1", number_of_pings=1,

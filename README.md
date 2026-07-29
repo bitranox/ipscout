@@ -12,98 +12,220 @@
 [![Maintainability](https://qlty.sh/badges/041ba2c1-37d6-40bb-85a0-ec5a8a0aca0c/maintainability.svg)](https://qlty.sh/gh/bitranox/projects/ipscout)
 [![security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
-A scaffold for backward-compatible (Python 3.10+) libraries that ship a registered CLI command,
-with a rich-click entry point, strict typing, and a full test-and-release pipeline already wired.
+Ping, traceroute and local-network inspection in pure Python. No subprocess, no admin rights.
 
-## Why a template
+## A red light that cannot go grey is decoration
 
-Starting a new Python library feels like it should be about the library. It almost never is.
-The first day goes on the scaffolding nobody brags about: which linter, which type checker, how
-the version number stays in step across three files, how a tag becomes a PyPI release, which
-Python versions you have quietly promised to keep working. None of that is the thing you set out
-to build, and all of it has to be right before the thing you set out to build can ship.
+Most reachability code answers every question you ask it. Host down? `reached=False`. No permission
+to send ICMP? `reached=False`. Typo in the hostname? `reached=False`. It never raises, never refuses,
+never once makes anybody feel uncertain. That gets sold as robustness. It is closer to a witness who
+answers every question confidently: pleasant company, useless in court. The valuable thing a witness
+can say is "I do not know", precisely because saying it is expensive.
 
-The tax on that work is invisible, which is exactly why people underprice it. A blank directory
-looks free. It is not. It is a stack of small decisions you will make in a hurry, slightly
-wrong, and then copy by hand into the next project, where you will make them slightly wrong
-again. A blank page is not a fresh start so much as a bill you have agreed to pay later.
+So the interesting bug in that design is never a crash. It is the afternoon somebody spends hunting
+a network fault that does not exist, because a monitoring job reported a rack of machines as
+unreachable when the real story was that the container it ran in had lost `CAP_NET_RAW`. The
+software was working perfectly. It answered instantly, confidently and wrongly, and confidence is
+the part that costs you the afternoon.
 
-A template is the boring answer that settles the bill up front. You inherit a working set of
-defaults, tests green across six Python versions and three operating systems, strict typing, a
-lint/type/test/release pipeline behind a single `make` command, a CLI that already runs, so the
-only decisions left are the ones that are actually about your library. The point is not that
-these are the only good choices. The point is that they are already made and already wired
-together, so you get to disagree with one on purpose rather than rediscover all of them by
-accident.
+Underneath sits a second habit worth naming, because half the ecosystem has it: running `/bin/ping`
+and reading its output with regular expressions. That is treating a human interface as an API. The
+output of `ping` is prose written for a tired admin at 2am, and it changes with locale, with
+distribution, with the phase of the moon. We build alerting on top of a message that was never
+addressed to us, then blame the network when the message changes.
 
-So clone it, delete the parts you do not want, and spend day one on the problem you actually
-care about. That is the whole trick: make the sensible path the lazy one.
+The obvious, efficient answer is the one everybody reaches for: call the system binary, it is
+already installed and battle-tested, why reinvent it. Set that aside for a second and look at what
+it actually buys. One process per host. A parser that fails silently in a Turkish locale. And on
+some platforms, a request for administrator rights, which people read not as a technical
+requirement but as a claim about your character. Asking for root is cheap in engineering and
+expensive in trust.
 
-## Quickstart
+ipscout does less on purpose, and works in more places as a result. It sends ICMP from the process
+you already have, through the unprivileged ping socket on Linux and macOS and through `iphlpapi.dll`
+on Windows. Nothing is spawned. Nothing needs elevation. And when it genuinely cannot do the job, it
+says so with an exception whose message names the fix, instead of handing you a tidy `False` and
+letting you find out at 2am.
 
-### 1. Start a new library from this template
+Go and try the one experiment that matters: take whatever probes your hosts today, revoke its ICMP
+permission, and see whether the dashboard tells you the truth or tells you a story.
 
-The first thing you do is copy the template into a new directory named for your package, rename
-it to that package, and reset the git history to one fresh commit. The **directory name drives
-the rename**, so name it for your library first.
-
-```bash
-# copy the template into a new dir named for your package
-git clone --depth 1 https://github.com/bitranox/ipscout.git lib_wombat
-cd lib_wombat
-git remote remove origin      # detach from the template so nothing ever pushes back to it
-git branch -m master main     # new repos use main, not master
-
-# rename the project to your package (rename-project, run via uvx)
-./rename_dry.sh               # preview: rename-project --dry-run. Confirm every detected
-                              #   name and path reads "lib_wombat" before applying.
-./rename.sh                   # apply: rename-project --yes. Takes NO argument - the new name
-                              #   comes from the directory, so `./rename.sh lib_wombat` is wrong.
-
-# squash the template history into a single fresh commit
-./reset_git_history.sh        # with the remote removed above, this rewrites local history only
-```
-
-Now create your own empty GitHub repo, add it as `origin`, and push `main`. Removing the template
-remote first matters: `reset_git_history.sh` force-pushes to the first remote it finds, and right
-after a clone that would be the template itself.
-
-See [docs/development.md](docs/development.md) for the full develop-test-release flow (bmk).
-
-### 2. Try the CLI and API
-
-To see what you get, install the template's own package from PyPI (uv recommended, plain `pip`
-works too):
+## Install
 
 ```bash
+pip install ipscout
+# or
 uv pip install ipscout
 ```
 
-Run the CLI:
+Python 3.10 or newer. Runtime dependencies: `lib_cli_exit_tools`, `pydantic`, `rich-click`, `rtoml`.
+
+Full instructions, including `uvx` and per-user installs, are in
+[docs/installation.md](docs/installation.md).
+
+## Quickstart, as a library
+
+```python
+import ipscout
+
+result = ipscout.ping("127.0.0.1", 2, interval=0)
+print(result.reached, result.ip, round(result.time_avg_ms, 3))
+print(result.str_result)
+
+# a whole sweep, concurrently, from synchronous code
+results = ipscout.ping_many(["127.0.0.1", "::1"], times=1)
+print({target: r.reached for target, r in results.items()})
+
+# the shortcut that never raises and always falls back to TCP
+print(ipscout.is_reachable("127.0.0.1"))
+print(ipscout.is_reachable("nothing.invalid"))
+```
+
+The error contract is the point of the library, so it is worth stating once:
+
+```python
+import ipscout
+
+# a network condition is an answer, not an error
+down = ipscout.ping("192.0.2.1", 1, timeout=0.5)
+assert down.reached is False
+
+# a setup problem raises
+try:
+    ipscout.ping("nothing.invalid")
+except ipscout.IPScoutResolutionError as exc:
+    print(f"that is a name problem, not a down host: {exc}")
+
+# or ask for the failure on the result instead of as an exception
+muted = ipscout.ping("nothing.invalid", raise_on_error=False)
+assert muted.reached is False and muted.error is not None
+```
+
+Async works the same way, and on Linux and macOS it is genuinely async:
+
+```python
+import asyncio
+import ipscout
+
+
+async def main():
+    result = await ipscout.aping("127.0.0.1", 1)
+    sweep = await ipscout.aping_many(["127.0.0.1", "::1"], times=1)
+    return result.reached, {t: r.reached for t, r in sweep.items()}
+
+
+print(asyncio.run(main()))
+```
+
+## Quickstart, from the shell
 
 ```bash
-ipscout hello     # -> Hello World
-ipscout info      # print resolved package metadata
+ipscout ping 127.0.0.1 -c 2
+ipscout ping-many 127.0.0.1 ::1 -c 1
+ipscout reachable example.com
+ipscout traceroute 1.1.1.1 --max-hops 10
+ipscout resolve localhost
+ipscout interfaces
+ipscout capabilities
 ipscout --help
 ```
 
-Or run it without installing:
+`python -m ipscout` and `uvx ipscout` run the same entry point.
+
+## Output for machines
+
+Every command takes a global `--json` / `-j`, which wraps the result in an envelope, or
+`--json-bare`, which emits the payload at the top level for `jq`.
 
 ```bash
-uvx ipscout hello
-python -m ipscout hello
+ipscout --json ping 127.0.0.1 -c 1
 ```
 
-Use it as a library:
-
-```python
-import ipscout as lib
-
-lib.emit_greeting()  # writes "Hello World" to stdout
-lib.print_info()  # print the package metadata block
+```json
+{
+  "ok": true,
+  "command": "ping",
+  "data": {
+    "target": "127.0.0.1",
+    "reached": true,
+    "ip": "127.0.0.1",
+    "number_of_pings": 1,
+    "packets_sent": 1,
+    "packets_received": 1,
+    "family": "ipv4",
+    "method": "icmp",
+    "error": null,
+    "time_avg_ms": 0.067,
+    "packets_lost_percentage": 0,
+    "str_result": "[127.0.0.1] pinged 1 times, min: 0.07ms, avg: 0.07ms, max: 0.07ms, 0% Packet loss"
+  },
+  "error": null
+}
 ```
 
-See [docs/usage.md](docs/usage.md) for the full command and API reference.
+Failures come back as data in the same envelope, not as a traceback in the stream you are parsing:
+
+```bash
+ipscout --json ping nothing.invalid
+```
+
+```json
+{
+  "ok": false,
+  "command": "ping",
+  "data": null,
+  "error": {
+    "type": "IPScoutResolutionError",
+    "message": "cannot resolve 'nothing.invalid': Name or service not known"
+  }
+}
+```
+
+Exit codes are independent of the output format:
+
+| Code | Meaning                                                                   |
+|------|---------------------------------------------------------------------------|
+| 0    | Reached, or the command otherwise succeeded.                              |
+| 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.   |
+| 2    | Error. A bad name, a missing permission, or a capability this host lacks. |
+
+## Platform matrix
+
+Measured on real CI runners, not assumed.
+
+| Capability              | Linux                              | macOS                                | Windows                                |
+|-------------------------|------------------------------------|--------------------------------------|----------------------------------------|
+| ICMP ping, no admin     | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`   | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`     | yes, `iphlpapi.dll` via ctypes         |
+| Traceroute              | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | no, raises `IPScoutUnsupportedError` | yes, `IP_TTL_EXPIRED_TRANSIT`          |
+| Async on the event loop | yes, one socket per probe          | yes, one socket per probe            | no, `IcmpSendEcho` runs in an executor |
+| Interface listing       | yes, `getifaddrs`                  | yes, `getifaddrs`                    | yes, `GetAdaptersAddresses`            |
+
+Ask the host itself rather than guessing, with `ipscout capabilities` or `ipscout.icmp_available()`.
+
+## Limitations worth knowing before you depend on it
+
+**Traceroute does not work on macOS.** This was measured on a macOS runner: `MSG_ERRQUEUE` is not
+defined there, and a plain receive on the ICMP socket surfaces nothing, so an unprivileged process
+never sees ICMP Time Exceeded. `traceroute` raises `IPScoutUnsupportedError` rather than returning a
+column of silent hops that would look like a broken network instead of a missing feature. Running as
+root does not fix it, which is why it is a separate exception type from the permission one.
+
+**Async on Windows is executor-backed.** `IcmpSendEcho` is a blocking C call with no asyncio
+integration. `aping` behaves identically there, but a sweep of thousands is bounded by a thread pool
+rather than running on one socket on one thread as it does on Linux and macOS.
+
+**On a host with unprivileged ICMP disabled, ipscout raises.** Some CI runners and hardened Linux
+boxes lock `net.ipv4.ping_group_range`. ipscout tries a raw socket second, and if that also fails it
+raises `IPScoutPermissionError` whose message lists the three fixes: set
+`sysctl -w net.ipv4.ping_group_range="0 2147483647"`, grant the process `CAP_NET_RAW`, or pass
+`allow_tcp_fallback=True` to probe over TCP instead.
+
+**The TCP fallback is not ICMP and is never chosen for you.** A TCP round trip includes the
+handshake and a filtered port reads as unreachable on a healthy host, so every result carries a
+`method` field and you have to opt in. `is_reachable` is the single deliberate exception: it never
+raises and always tries TCP, because that is the entire point of a yes-or-no shortcut.
+
+**It is not zero-dependency.** Four runtime dependencies, listed above.
 
 ## Documentation
 

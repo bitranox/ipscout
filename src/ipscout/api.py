@@ -7,8 +7,8 @@ The contract, in one sentence: **setup problems raise, network conditions do
 not.** A host that is down, a packet that times out, a link losing everything -
 all come back as a ``ResponseObject`` with ``reached=False``. Missing ICMP
 permission, an unresolvable name, or a nonsensical argument raise, because no
-amount of retrying fixes them and reporting them as "unreachable" is how the
-pre-1.0 library sent people hunting for network faults that did not exist.
+amount of retrying fixes them and reporting them as "unreachable" sends people
+hunting for network faults that do not exist.
 
 Contents:
     ping / aping: Probe one target.
@@ -105,9 +105,9 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
             default: a TCP result is not an ICMP result, and substituting one
             silently would misreport a filtered port as a dead host.
         tcp_port: Port used only when the TCP fallback is engaged.
-        raise_on_error: Keep the strict contract. Set False to restore the
-            pre-1.0 behaviour where every failure became ``reached=False``
-            with the reason on ``.error``.
+        raise_on_error: Keep the strict contract. Set False to report every
+            failure as ``reached=False`` with the reason on ``.error``
+            instead.
 
     Returns:
         The result. Unreachable targets, timeouts and total loss are all
@@ -133,7 +133,7 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
         ...
         ipscout.errors.IPScoutResolutionError: cannot resolve 'nothing.invalid': ...
 
-        Unless the caller opts back into the old swallow-everything behaviour:
+        Unless the caller asks for failures to be reported rather than raised:
 
         >>> muted = ping("nothing.invalid", raise_on_error=False)
         >>> muted.reached, muted.error is None

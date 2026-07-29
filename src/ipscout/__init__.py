@@ -16,11 +16,6 @@ The error contract:
     Missing permission, an unresolvable name, or an invalid argument raise.
     ``is_reachable`` is the deliberate exception - it never raises.
 
-Compatibility:
-    ``ping(target, times=4)`` and every attribute of ``ResponseObject`` keep the
-    names and semantics of the pre-1.0 ``lib_ping``, so existing calls and
-    attribute access continue to work.
-
 Examples:
     >>> import ipscout
     >>> result = ipscout.ping("127.0.0.1", 2, interval=0)
