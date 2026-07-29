@@ -434,15 +434,20 @@ def cli_neighbours(ctx: click.Context) -> None:
 @cli.command("mac", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("ip")
 @option("--strict", is_flag=True, default=False, help="Answer only for a directly-attached host; refuse anything routed.")
+@option("--active", is_flag=True, default=False, help="Send a real resolution request instead of reading the cache.")
 @click.pass_context
-def cli_mac(ctx: click.Context, ip: str, *, strict: bool) -> None:
+def cli_mac(ctx: click.Context, ip: str, *, strict: bool, active: bool) -> None:
     """Show the hardware address for an address, and whose it is."""
 
-    if strict:
-        address = get_mac_address(ip)
-        payload = MacLookup(ip=ip, mac=address, scope=MacScope.DIRECT if address else MacScope.UNKNOWN)
-    else:
-        payload = lookup_mac(ip)
+    try:
+        if strict:
+            address = get_mac_address(ip, active=active)
+            payload = MacLookup(ip=ip, mac=address, scope=MacScope.DIRECT if address else MacScope.UNKNOWN)
+        else:
+            payload = lookup_mac(ip, active=active)
+    except IPScoutError as exc:
+        _fail(ctx, CommandName.MAC, exc)
+        return
 
     def human() -> None:
         table = Table("ip", "mac", "scope", "via", "interface")

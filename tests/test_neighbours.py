@@ -20,6 +20,7 @@ from ipscout import neighbours_linux as linux
 from ipscout import neighbours_macos as macos
 from ipscout import neighbours_windows as windows
 from ipscout.models import AddressFamily, MacScope, Neighbour, NeighbourState
+from ipscout.neighbours import resolve_active
 
 pytestmark = pytest.mark.os_agnostic
 
@@ -360,3 +361,51 @@ def test_a_neighbour_record_cannot_be_edited_after_the_fact() -> None:
 
     with pytest.raises(ValidationError):
         entry.mac = "11:22:33:44:55:66"
+
+
+# --------------------------------------------------------------------------
+# Active resolution, and what it refuses
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_active_resolution_refuses_where_it_would_need_root() -> None:
+    # The send is implemented on every platform, but Linux and macOS need a
+    # raw socket for it. Unprivileged, that must be a loud, actionable error
+    # rather than a quiet fallback to whatever the cache happens to hold.
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("Windows resolves IPv4 actively through SendARP, which needs no elevation")
+
+    with pytest.raises(ipscout.IPScoutError) as caught:
+        resolve_active("192.0.2.1")
+    # Either there is no route to that address, or the raw socket was denied.
+    # Both are honest refusals; neither is a cache read.
+    assert isinstance(caught.value, (ipscout.IPScoutPermissionError, ipscout.IPScoutUnsupportedError))
+
+
+@pytest.mark.os_agnostic
+def test_active_resolution_never_quietly_becomes_a_cache_read() -> None:
+    # The failure mode worth guarding: a caller asks to resolve actively, the
+    # platform cannot, and it hands back a stale cache entry as though it were
+    # fresh. It must raise instead.
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("Windows has an unprivileged active path")
+
+    entries = ipscout.neighbours()
+    if not entries:
+        pytest.skip("this host's neighbour cache is empty")
+
+    known = entries[0].ip
+    assert ipscout.lookup_mac(known).mac is not None  # passively, it is known
+
+    with pytest.raises(ipscout.IPScoutError):
+        ipscout.lookup_mac(known, active=True)
+
+
+@pytest.mark.os_agnostic
+def test_the_passive_default_still_does_not_raise() -> None:
+    assert ipscout.lookup_mac("203.0.113.199").scope in {MacScope.UNKNOWN, MacScope.NEXT_HOP}

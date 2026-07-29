@@ -508,6 +508,14 @@ def _configure(library: Any) -> None:  # pragma: no cover - Windows only
         ctypes.POINTER(ctypes.POINTER(MIB_IPFORWARD_TABLE2)),  # Table, allocated by the call
     )
 
+    library.SendARP.restype = ctypes.c_uint32
+    library.SendARP.argtypes = (
+        ctypes.c_uint32,  # DestIP
+        ctypes.c_uint32,  # SrcIP, 0 to let the stack choose
+        ctypes.POINTER(ctypes.c_uint8 * 8),  # PhysAddr, written by the call
+        ctypes.POINTER(ctypes.c_uint32),  # PhysAddrLen, in and out
+    )
+
     library.GetIpNetTable2.restype = ctypes.c_uint32
     library.GetIpNetTable2.argtypes = (
         ctypes.c_uint16,  # Family

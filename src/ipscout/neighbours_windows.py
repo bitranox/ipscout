@@ -29,7 +29,7 @@ from .winapi import (
     sockaddr_inet_to_string,
 )
 
-__all__ = ["list_neighbours", "state_of"]
+__all__ = ["format_mac", "list_neighbours", "resolve_active", "state_of"]
 
 #: NO_ERROR, the only success value GetIpNetTable2 returns.
 _NO_ERROR = 0
@@ -166,3 +166,46 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
         return tuple(found)
     finally:
         library.FreeMibTable(table)
+
+
+def resolve_active(ip: str) -> str | None:  # pragma: no cover - Windows only
+    """Actively resolve one address, sending a real ARP request.
+
+    Args:
+        ip: The IPv4 address to resolve.
+
+    Returns:
+        The hardware address, or ``None`` when nothing answered.
+
+    Raises:
+        IPScoutUnsupportedError: The address is IPv6. Windows resolves those
+            through ResolveIpNetEntry2, which does require elevation, so it is
+            not offered here rather than being offered and always failing.
+
+    Note:
+        ``SendARP`` needs no elevation, which makes Windows the one platform
+        where active resolution fits this library's premise. It resolves a host
+        that has never been contacted, without a ping first.
+
+    """
+
+    if ":" in ip:
+        msg = "active IPv6 resolution needs elevation on Windows; sweep with arp_scan() instead"
+        raise IPScoutUnsupportedError(msg)
+
+    try:
+        library: Any = iphlpapi()
+    except IPScoutUnsupportedError:
+        return None
+
+    try:
+        packed = socket.inet_aton(ip)
+    except OSError:
+        return None
+
+    buffer = (ctypes.c_uint8 * 8)()
+    length = ctypes.c_uint32(8)
+    destination = ctypes.c_uint32.from_buffer_copy(packed).value
+    if library.SendARP(destination, 0, ctypes.byref(buffer), ctypes.byref(length)) != _NO_ERROR:
+        return None
+    return format_mac(bytes(buffer), int(length.value))

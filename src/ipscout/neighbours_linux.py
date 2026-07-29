@@ -19,7 +19,17 @@ import contextlib
 import ipaddress
 import socket
 import struct
+import time
 
+from .arp import (
+    ETH_P_ARP,
+    build_arp_request,
+    build_neighbour_solicitation,
+    parse_arp_reply,
+    parse_neighbour_advertisement,
+    solicited_node_multicast,
+)
+from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily, Neighbour, NeighbourState
 from .netlink import (
     NLM_F_DUMP,
@@ -32,7 +42,7 @@ from .netlink import (
     open_socket,
 )
 
-__all__ = ["list_neighbours", "parse_neighbour_dump"]
+__all__ = ["format_mac", "list_neighbours", "parse_neighbour_dump", "resolve_active_ipv4", "resolve_active_ipv6"]
 
 _RTM_NEWNEIGH = 28
 _RTM_GETNEIGH = 30
@@ -214,3 +224,129 @@ def list_neighbours() -> tuple[Neighbour, ...]:
         with contextlib.suppress(OSError):
             sock.close()
     return tuple(found)
+
+
+def _permission_error(exc: OSError, what: str) -> IPScoutPermissionError:
+    """Return the error explaining which privilege the caller is missing."""
+
+    return IPScoutPermissionError(
+        f"active {what} needs a raw socket, so root or CAP_NET_RAW: {exc}. "
+        f"Grant it with 'setcap cap_net_raw+ep $(readlink -f $(which python3))', run as root, "
+        f"or use arp_scan(), which resolves the same addresses unprivileged"
+    )
+
+
+def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, source_mac: str, timeout: float = 2.0) -> str | None:
+    """Send a real ARP request and return what answers.
+
+    Args:
+        target_ip: The address to resolve.
+        interface: The interface to send on.
+        source_ip: This host's address on the target's subnet.
+        source_mac: This host's hardware address on that interface.
+        timeout: Seconds to wait for a reply.
+
+    Returns:
+        The hardware address, or ``None`` when nothing answered in time.
+
+    Raises:
+        IPScoutPermissionError: The process may not open a link-layer socket.
+
+    Note:
+        Uses ``AF_PACKET``, which requires root or ``CAP_NET_RAW``. It never
+        falls back to the cache: a caller who asked to resolve actively gets a
+        fresh answer or an error, not a stale entry dressed up as one.
+
+    """
+
+    af_packet = getattr(socket, "AF_PACKET", None)
+    if not isinstance(af_packet, int):  # pragma: no cover - non-Linux
+        msg = "AF_PACKET is a Linux facility and this process is not on Linux"
+        raise IPScoutUnsupportedError(msg)
+
+    try:
+        sock = socket.socket(af_packet, socket.SOCK_RAW, socket.htons(ETH_P_ARP))
+    except PermissionError as exc:
+        raise _permission_error(exc, "ARP") from exc
+    except OSError as exc:  # pragma: no cover - no interface to bind
+        raise _permission_error(exc, "ARP") from exc
+
+    try:
+        sock.bind((interface, ETH_P_ARP))
+        sock.settimeout(timeout)
+        sock.send(build_arp_request(sender_mac=source_mac, sender_ip=source_ip, target_ip=target_ip))
+
+        # A link-layer socket sees every frame on the segment, so most of what
+        # arrives belongs to somebody else and is discarded.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            sock.settimeout(max(0.01, deadline - time.monotonic()))
+            try:
+                found = parse_arp_reply(sock.recv(2048), target_ip)
+            except TimeoutError:
+                return None
+            if found is not None:
+                return found
+        return None
+    except PermissionError as exc:  # pragma: no cover - bind may also be denied
+        raise _permission_error(exc, "ARP") from exc
+    except OSError:
+        return None
+    finally:
+        with contextlib.suppress(OSError):
+            sock.close()
+
+
+def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, timeout: float = 2.0) -> str | None:
+    """Send an ICMPv6 neighbour solicitation and return what answers.
+
+    Args:
+        target_ip: The address to resolve.
+        interface: The interface to send on, which scopes a link-local target.
+        source_mac: This host's hardware address, carried as an option.
+        timeout: Seconds to wait for a reply.
+
+    Returns:
+        The hardware address, or ``None`` when nothing answered in time.
+
+    Raises:
+        IPScoutPermissionError: The process may not open a raw ICMPv6 socket.
+
+    Note:
+        Neighbour discovery does not broadcast: the solicitation goes to the
+        solicited-node multicast group derived from the target, so only hosts
+        whose address ends the same way have to look at it.
+
+    """
+
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
+    except PermissionError as exc:
+        raise _permission_error(exc, "neighbour discovery") from exc
+    except OSError as exc:  # pragma: no cover - no IPv6 stack
+        raise _permission_error(exc, "neighbour discovery") from exc
+
+    try:
+        index = socket.if_nametoindex(interface)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, index)
+        sock.settimeout(timeout)
+        group = solicited_node_multicast(target_ip)
+        sock.sendto(build_neighbour_solicitation(sender_mac=source_mac, target_ip=target_ip), (group, 0, 0, index))
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            sock.settimeout(max(0.01, deadline - time.monotonic()))
+            try:
+                found = parse_neighbour_advertisement(sock.recv(2048), target_ip)
+            except TimeoutError:
+                return None
+            if found is not None:
+                return found
+        return None
+    except PermissionError as exc:  # pragma: no cover - send may also be denied
+        raise _permission_error(exc, "neighbour discovery") from exc
+    except OSError:
+        return None
+    finally:
+        with contextlib.suppress(OSError):
+            sock.close()
