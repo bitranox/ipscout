@@ -49,10 +49,25 @@ def _require_icmp() -> None:
         pytest.skip("unprivileged ICMP unavailable on this host")
 
 
+def _require_icmp_egress() -> None:
+    """Skip unless ICMP actually reaches the public internet from here.
+
+    Being able to open the socket is not the same as being allowed to use it.
+    Windows CI runners report ICMP available - the iphlpapi path works - while
+    the platform drops outbound echo to the internet, so a capability check
+    alone passes and every probe then times out. That is the environment
+    refusing, not the library failing, so it is a skip.
+    """
+
+    _require_icmp()
+    if not ipscout.ping(PUBLIC_V4, 1, timeout=3.0).reached:
+        pytest.skip("ICMP egress to the public internet is blocked from this host")
+
+
 @pytest.mark.integration
 def test_a_public_host_answers_with_plausible_timings() -> None:
     _require_internet()
-    _require_icmp()
+    _require_icmp_egress()
 
     result = ipscout.ping(PUBLIC_V4, 3, timeout=3.0)
 
@@ -69,7 +84,7 @@ def test_a_documentation_address_stays_silent_without_raising() -> None:
     # The contract that matters most in production: a host that does not answer
     # is data, not an exception.
     _require_internet()
-    _require_icmp()
+    _require_icmp_egress()
 
     result = ipscout.ping(NEVER_ANSWERS, 1, timeout=2.0)
 
@@ -81,7 +96,7 @@ def test_a_documentation_address_stays_silent_without_raising() -> None:
 @pytest.mark.integration
 def test_a_sweep_of_public_hosts_pairs_each_result_with_its_target() -> None:
     _require_internet()
-    _require_icmp()
+    _require_icmp_egress()
 
     results = ipscout.ping_many([PUBLIC_V4, PUBLIC_ALT, NEVER_ANSWERS], times=1, timeout=3.0)
 
@@ -151,7 +166,7 @@ def test_reachability_falls_back_to_tcp_for_a_host_that_ignores_icmp() -> None:
 @pytest.mark.integration
 def test_the_path_to_a_public_host_has_hops() -> None:
     _require_internet()
-    _require_icmp()
+    _require_icmp_egress()
 
     try:
         hops = ipscout.traceroute(PUBLIC_V4, max_hops=8, timeout=2.0)
