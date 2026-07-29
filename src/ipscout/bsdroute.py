@@ -21,6 +21,8 @@ import ctypes.util
 import socket
 import struct
 
+from pydantic import BaseModel, ConfigDict
+
 __all__ = [
     "RTA_BRD",
     "RTA_DST",
@@ -32,6 +34,7 @@ __all__ = [
     "RTF_LLINFO",
     "RTF_UP",
     "RT_MSGHDR",
+    "SockaddrSet",
     "address_of",
     "link_address_of",
     "roundup",
@@ -163,31 +166,64 @@ def link_address_of(chunk: bytes) -> str | None:
     return ":".join(f"{octet:02x}" for octet in raw)
 
 
-def split_sockaddrs(payload: bytes, addrs: int) -> dict[int, bytes]:
-    """Split the sockaddrs trailing a routing message, keyed by their RTA bit.
+class SockaddrSet(BaseModel):
+    """The addresses trailing one routing message, named rather than indexed.
+
+    A record instead of a bitmask-keyed mapping: the caller wants "the
+    gateway", and ``sockaddrs.gateway`` says that where ``sockaddrs[0x02]``
+    needs the reader to know the bit. Absent means the message did not carry
+    that address, which is different from carrying an empty one.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    destination: bytes | None = None
+    gateway: bytes | None = None
+    netmask: bytes | None = None
+    interface: bytes | None = None
+    interface_address: bytes | None = None
+    broadcast: bytes | None = None
+
+
+#: Which field each RTA bit fills, in the order the sockaddrs appear.
+_FIELD_FOR_BIT = (
+    (RTA_DST, "destination"),
+    (RTA_GATEWAY, "gateway"),
+    (RTA_NETMASK, "netmask"),
+    (RTA_GENMASK, None),
+    (RTA_IFP, "interface"),
+    (RTA_IFA, "interface_address"),
+    (RTA_AUTHOR, None),
+    (RTA_BRD, "broadcast"),
+)
+
+
+def split_sockaddrs(payload: bytes, addrs: int) -> SockaddrSet:
+    """Split the sockaddrs trailing a routing message into a named record.
 
     The kernel says which addresses are present as a bitmask and then
     concatenates them in a fixed order, each self-describing its own length.
+    Every slot in that order must be stepped over even when its field is not
+    read, or every later address is taken from the wrong offset.
 
     Examples:
-        >>> split_sockaddrs(b"", RTA_DST)
-        {}
+        >>> split_sockaddrs(b"", RTA_DST).gateway is None
+        True
 
     """
 
-    found: dict[int, bytes] = {}
+    found: dict[str, bytes] = {}
     position = 0
-    for bit in RTA_ORDER:
+    for bit, field in _FIELD_FOR_BIT:
         if not addrs & bit:
             continue
         if position + SOCKADDR_HEADER.size > len(payload):
             break
         length = payload[position]
-        step = roundup(length)
-        if length and position + length <= len(payload):
-            found[bit] = payload[position : position + length]
-        position += step
-    return found
+        if length and position + length <= len(payload) and field is not None:
+            found[field] = payload[position : position + length]
+        position += roundup(length)
+    return SockaddrSet(**found)
 
 
 def sysctl(mib: list[int]) -> bytes | None:  # pragma: no cover - macOS only

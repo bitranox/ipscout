@@ -41,18 +41,23 @@ from .models import (
     AddressFamily,
     CapabilityReport,
     CommandName,
+    FindIpReport,
     JsonEnvelope,
     JsonError,
     MacLookup,
     MacScope,
+    MtuReport,
     Neighbour,
     PackageInfo,
+    PortResult,
+    PortScanReport,
     PortState,
     ReachabilityReport,
     ResolveReport,
     ReverseDnsReport,
     RouteInfo,
     ScanMethod,
+    WakeReport,
 )
 from .mtu import path_mtu
 from .neighbours import get_mac_address, lookup_mac, neighbours
@@ -479,7 +484,8 @@ def cli_find_ip(ctx: click.Context, mac: str, *, scan: bool, network: str | None
         _fail(ctx, CommandName.FIND_IP, exc)
         return
 
-    _emit(ctx, CommandName.FIND_IP, addresses, lambda: console.print("\n".join(addresses) or "(not found)", highlight=False))
+    payload = FindIpReport(mac=mac, addresses=tuple(addresses), scanned=scan)
+    _emit(ctx, CommandName.FIND_IP, payload, lambda: console.print("\n".join(addresses) or "(not found)", highlight=False))
     if not addresses:
         ctx.exit(EXIT_NOT_REACHED)
 
@@ -554,12 +560,16 @@ def cli_scan_ports(  # noqa: PLR0913 - one parameter per CLI option, which is th
         _fail(ctx, CommandName.SCAN_PORTS, exc)
         return
 
-    payload = {str(port): state.value for port, state in sorted(states.items())}
+    payload = PortScanReport(
+        host=host,
+        method=method,
+        ports=tuple(PortResult(port=port, state=state) for port, state in sorted(states.items())),
+    )
 
     def human() -> None:
         table = Table("port", "state")
-        for port, state in sorted(states.items()):
-            table.add_row(str(port), state.value)
+        for entry in payload.ports:
+            table.add_row(str(entry.port), entry.state.value)
         console.print(table)
 
     _emit(ctx, CommandName.SCAN_PORTS, payload, human)
@@ -584,7 +594,7 @@ def cli_mtu(ctx: click.Context, target: str, *, ipv4: bool, ipv6: bool) -> None:
     # Labelled rather than printed bare: a lone number is also valid JSON,
     # which makes the human output indistinguishable from the machine one.
     rendered = f"path MTU to {target}: {value} bytes" if value else f"path MTU to {target}: unavailable"
-    _emit(ctx, CommandName.MTU, {"target": target, "mtu": value}, lambda: console.print(rendered, highlight=False))
+    _emit(ctx, CommandName.MTU, MtuReport(target=target, mtu=value), lambda: console.print(rendered, highlight=False))
     if value is None:
         ctx.exit(EXIT_NOT_REACHED)
 
@@ -605,7 +615,7 @@ def cli_wake(ctx: click.Context, mac: str, *, broadcast: str, port: int) -> None
 
     # Nothing acknowledges a magic packet, so this reports only that it was
     # sent. Whether the host woke is a separate question, for `reachable`.
-    payload = {"mac": mac, "broadcast": broadcast, "port": port, "sent": True}
+    payload = WakeReport(mac=mac, broadcast=broadcast, port=port)
     _emit(ctx, CommandName.WAKE, payload, lambda: console.print(f"magic packet sent to {broadcast}:{port}", highlight=False))
 
 

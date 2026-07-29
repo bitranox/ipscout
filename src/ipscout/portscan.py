@@ -10,8 +10,14 @@ Note:
 
     A **connect** scan completes the handshake. It needs no privileges and
     works everywhere, and it lands in the target's logs as a real connection.
-    It still separates a refused port from a silent one: a refusal is an
-    answer, a timeout is not.
+    It separates a refused port from a silent one on Linux and macOS: a
+    refusal is an answer, a timeout is not.
+
+    Windows does not draw that line. Measured on a runner, a closed loopback
+    port there neither refuses nor resets within the timeout, so a connect
+    scan reports FILTERED where the other two report CLOSED. Read a Windows
+    CLOSED as reliable and a Windows FILTERED as "no answer, for one of two
+    reasons"; a SYN scan distinguishes them, and is unavailable there.
 
     A **SYN** scan never completes the handshake, so it is quieter and faster,
     and it needs a raw socket - root or ``CAP_NET_RAW`` - on Linux and macOS.

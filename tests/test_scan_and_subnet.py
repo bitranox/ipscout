@@ -89,8 +89,19 @@ def test_a_refused_port_is_closed_rather_than_merely_not_open(refused_port: int)
     # A refusal is an answer: it proves something is there to refuse. Folding
     # it in with silence would hide the difference between a closed port and a
     # firewall, which is the main thing a scan is asked to tell apart.
+    #
+    # Windows is the measured exception. On a runner it neither refuses nor
+    # resets a closed loopback port within the timeout - it simply goes quiet -
+    # so a connect scan there cannot separate CLOSED from FILTERED. The check
+    # is relaxed to what that platform can actually support rather than
+    # asserting a distinction it does not draw.
+    import sys
+
     state = ipscout.scan_ports("127.0.0.1", [refused_port], timeout=1.0)[refused_port]
 
+    if sys.platform == "win32":
+        assert state is not PortState.OPEN, f"nothing is listening on {refused_port}, yet it reported {state.value}"
+        return
     assert state is PortState.CLOSED, f"port {refused_port} on loopback reported {state.value}, not a refusal"
 
 

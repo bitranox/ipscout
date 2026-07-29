@@ -41,6 +41,7 @@ __all__ = [
     "AddressFamily",
     "CapabilityReport",
     "CommandName",
+    "FindIpReport",
     "Interface",
     "InterfaceAddress",
     "JsonEnvelope",
@@ -48,9 +49,12 @@ __all__ = [
     "LeaseInfo",
     "MacLookup",
     "MacScope",
+    "MtuReport",
     "Neighbour",
     "NeighbourState",
     "PackageInfo",
+    "PortResult",
+    "PortScanReport",
     "PortState",
     "ProbeMethod",
     "ReachabilityReport",
@@ -61,6 +65,7 @@ __all__ = [
     "ScanMethod",
     "SubnetInfo",
     "TraceHop",
+    "WakeReport",
 ]
 
 #: Reported for "no timing data available". A distinct sentinel rather than
@@ -438,6 +443,53 @@ class SubnetInfo(_Frozen):
     lease_obtained: str | None = None
     lease_expires: str | None = None
     mtu: int | None = None
+
+
+class PortResult(_Frozen):
+    """One port and what the scan found it to be."""
+
+    port: int
+    state: PortState
+
+
+class PortScanReport(_Frozen):
+    """The result of scanning one host.
+
+    Carries the method because the two do not measure the same thing: a
+    connect scan completed a handshake, a SYN scan did not.
+    """
+
+    host: str
+    method: ScanMethod = ScanMethod.CONNECT
+    ports: tuple[PortResult, ...] = ()
+
+
+class MtuReport(_Frozen):
+    """The path MTU to one target, where it could be determined."""
+
+    target: str
+    mtu: int | None = None
+
+
+class WakeReport(_Frozen):
+    """A magic packet that was sent.
+
+    ``sent`` is not ``woken``. Nothing acknowledges a magic packet, so this
+    records only that it left this host.
+    """
+
+    mac: str
+    broadcast: str
+    port: int
+    sent: bool = True
+
+
+class FindIpReport(_Frozen):
+    """The addresses found holding one hardware address."""
+
+    mac: str
+    addresses: tuple[str, ...] = ()
+    scanned: bool = False
 
 
 class CapabilityReport(_Frozen):

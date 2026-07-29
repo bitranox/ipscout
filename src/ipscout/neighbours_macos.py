@@ -35,8 +35,6 @@ from .bsdroute import (
     NET_RT_FLAGS,
     PF_ROUTE,
     RT_MSGHDR,
-    RTA_DST,
-    RTA_GATEWAY,
     RTF_LLINFO,
     address_of,
     link_address_of,
@@ -83,8 +81,8 @@ def parse_neighbour_dump(data: bytes, family: AddressFamily) -> list[Neighbour]:
 
         # The destination is the neighbour's IP; the gateway slot holds the
         # sockaddr_dl carrying its hardware address.
-        ip = address_of(sockaddrs[RTA_DST]) if RTA_DST in sockaddrs else None
-        mac = link_address_of(sockaddrs[RTA_GATEWAY]) if RTA_GATEWAY in sockaddrs else None
+        ip = address_of(sockaddrs.destination) if sockaddrs.destination else None
+        mac = link_address_of(sockaddrs.gateway) if sockaddrs.gateway else None
         position += roundup(message_length)
 
         if ip is None or mac is None:

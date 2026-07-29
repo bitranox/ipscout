@@ -30,8 +30,6 @@ from .bsdroute import (
     PF_ROUTE,
     RT_MSGHDR,
     RTA_DST,
-    RTA_GATEWAY,
-    RTA_IFA,
     RTF_GATEWAY,
     RTF_UP,
     address_of,
@@ -101,8 +99,8 @@ def parse_route_reply(data: bytes, *, pid: int | None = None, seq: int | None = 
     # A gateway sockaddr is present on on-link routes too, where it holds the
     # link address rather than a router, so the flag decides whether there is
     # a next hop to report.
-    gateway = address_of(sockaddrs[RTA_GATEWAY]) if flags & RTF_GATEWAY and RTA_GATEWAY in sockaddrs else None
-    source = address_of(sockaddrs[RTA_IFA]) if RTA_IFA in sockaddrs else None
+    gateway = address_of(sockaddrs.gateway) if flags & RTF_GATEWAY and sockaddrs.gateway else None
+    source = address_of(sockaddrs.interface_address) if sockaddrs.interface_address else None
 
     interface: str | None = None
     if index:
