@@ -21,7 +21,10 @@ Note:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 __all__ = ["AsyncEchoTransport", "EchoResult", "EchoTransport"]
 
@@ -94,7 +97,12 @@ class EchoTransport(Protocol):
 
     def __enter__(self) -> EchoTransport: ...
 
-    def __exit__(self, *exc_info: object) -> None: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None: ...
 
 
 @runtime_checkable
@@ -116,4 +124,9 @@ class AsyncEchoTransport(Protocol):
 
     async def __aenter__(self) -> AsyncEchoTransport: ...
 
-    async def __aexit__(self, *exc_info: object) -> None: ...
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None: ...
