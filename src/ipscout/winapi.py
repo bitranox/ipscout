@@ -1,0 +1,353 @@
+"""ctypes bindings for the Windows IP Helper API (``iphlpapi.dll``).
+
+This is how ipscout works on Windows without administrator rights. Windows has
+no unprivileged ICMP socket - ``SOCK_DGRAM``/``IPPROTO_ICMP`` simply does not
+exist there, and a raw socket needs elevation - but ``IcmpSendEcho`` and
+friends are ordinary user-mode calls that any process may make. That asymmetry
+is the entire reason this module exists rather than reusing the POSIX path.
+
+Contents:
+    Structures mirroring the C layouts in ``ipexport.h`` and ``iphlpapi.h``.
+    iphlpapi: Lazily loaded, cached handle to the DLL.
+    status_message: Human-readable text for an ``IP_STATUS`` code.
+
+Fixed-width integers, deliberately:
+    Every field is declared with an explicit width (``c_uint32`` for ``ULONG``
+    and ``DWORD``, ``c_uint16`` for ``USHORT``) rather than ``c_ulong``.
+
+    ``c_ulong`` is 4 bytes on Windows and 8 bytes on 64-bit Linux, because
+    Windows x64 is LLP64 while Linux x86-64 is LP64. Using it would give these
+    structures a different layout depending on where Python happened to be
+    running - silently producing garbage offsets. Fixed widths make the layout
+    identical everywhere, which additionally means the structure sizes can be
+    asserted by tests running on Linux, where the DLL itself cannot be loaded.
+
+Note:
+    Importing this module is safe on every platform. Nothing is loaded until
+    :func:`iphlpapi` is called, so the structures stay inspectable by tests on
+    Linux and macOS.
+
+"""
+
+from __future__ import annotations
+
+import ctypes
+import socket
+import struct
+import sys
+from typing import Any
+
+from .errors import IPScoutUnsupportedError
+
+__all__ = [
+    "ICMPV6_ECHO_REPLY",
+    "ICMP_ECHO_REPLY",
+    "INVALID_HANDLE_VALUE",
+    "IPV6_ADDRESS_EX",
+    "IP_DEST_HOST_UNREACHABLE",
+    "IP_DEST_NET_UNREACHABLE",
+    "IP_OPTION_INFORMATION",
+    "IP_REQ_TIMED_OUT",
+    "IP_SUCCESS",
+    "IP_TTL_EXPIRED_TRANSIT",
+    "SOCKADDR_IN6",
+    "iphlpapi",
+    "ipv4_to_string",
+    "ipv6_words_to_string",
+    "status_message",
+    "string_to_ipv4",
+]
+
+#: ``IP_STATUS`` values this library actually distinguishes.
+IP_SUCCESS = 0
+IP_BUF_TOO_SMALL = 11001
+IP_DEST_NET_UNREACHABLE = 11002
+IP_DEST_HOST_UNREACHABLE = 11003
+IP_DEST_PROT_UNREACHABLE = 11004
+IP_DEST_PORT_UNREACHABLE = 11005
+IP_NO_RESOURCES = 11006
+IP_REQ_TIMED_OUT = 11010
+#: A router discarded the packet because its hop limit ran out. Traceroute is
+#: built on this: the reply's Address field carries that router.
+IP_TTL_EXPIRED_TRANSIT = 11013
+
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+_STATUS_TEXT = {
+    IP_SUCCESS: "success",
+    IP_BUF_TOO_SMALL: "reply buffer too small",
+    IP_DEST_NET_UNREACHABLE: "destination network unreachable",
+    IP_DEST_HOST_UNREACHABLE: "destination host unreachable",
+    IP_DEST_PROT_UNREACHABLE: "destination protocol unreachable",
+    IP_DEST_PORT_UNREACHABLE: "destination port unreachable",
+    IP_NO_RESOURCES: "insufficient resources",
+    IP_REQ_TIMED_OUT: "request timed out",
+    IP_TTL_EXPIRED_TRANSIT: "TTL expired in transit",
+}
+
+
+def status_message(status: int) -> str:
+    """Return readable text for an ``IP_STATUS`` code.
+
+    Args:
+        status: The numeric status from a reply structure.
+
+    Returns:
+        A short description, or a generic label for codes not listed.
+
+    Examples:
+        >>> status_message(IP_SUCCESS)
+        'success'
+        >>> status_message(IP_TTL_EXPIRED_TRANSIT)
+        'TTL expired in transit'
+        >>> status_message(99999)
+        'IP_STATUS 99999'
+
+    """
+
+    return _STATUS_TEXT.get(status, f"IP_STATUS {status}")
+
+
+#: Force the MSVC structure layout rather than the host compiler's native one.
+#: These types mirror Windows headers, so MSVC rules are the correct ones even
+#: when the layout is being computed on Linux by a test. Accepted and ignored
+#: before Python 3.14; honoured from 3.14 on, where leaving it implicit on a
+#: packed structure is deprecated and becomes an error in 3.19.
+_MS_LAYOUT = "ms"
+
+
+class IP_OPTION_INFORMATION(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``IP_OPTION_INFORMATION`` from ``ipexport.h``.
+
+    Carries the outgoing TTL, which is what makes traceroute possible through
+    this API.
+    """
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("Ttl", ctypes.c_uint8),
+        ("Tos", ctypes.c_uint8),
+        ("Flags", ctypes.c_uint8),
+        ("OptionsSize", ctypes.c_uint8),
+        ("OptionsData", ctypes.c_void_p),
+    )
+
+
+class ICMP_ECHO_REPLY(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``ICMP_ECHO_REPLY`` from ``ipexport.h``.
+
+    Note:
+        ``Address`` is an ``IPAddr``: a 32-bit IPv4 address in network byte
+        order, not a string.
+    """
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("Address", ctypes.c_uint32),
+        ("Status", ctypes.c_uint32),
+        ("RoundTripTime", ctypes.c_uint32),
+        ("DataSize", ctypes.c_uint16),
+        ("Reserved", ctypes.c_uint16),
+        ("Data", ctypes.c_void_p),
+        ("Options", IP_OPTION_INFORMATION),
+    )
+
+
+class IPV6_ADDRESS_EX(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``IPV6_ADDRESS_EX`` from ``ipexport.h``.
+
+    Note:
+        Declared between ``packon.h`` and ``packoff.h`` in the Windows headers,
+        so it is byte-packed with no padding. ``_pack_ = 1`` reproduces that.
+        Without it the compiler-natural alignment would insert two bytes after
+        ``sin6_port`` and every later field would be read from the wrong offset.
+    """
+
+    _pack_ = 1
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("sin6_port", ctypes.c_uint16),
+        ("sin6_flowinfo", ctypes.c_uint32),
+        ("sin6_addr", ctypes.c_uint16 * 8),
+        ("sin6_scope_id", ctypes.c_uint32),
+    )
+
+
+class ICMPV6_ECHO_REPLY(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``ICMPV6_ECHO_REPLY`` from ``ipexport.h``.
+
+    Note:
+        Unlike the address structure it contains, this one is *not* packed, so
+        ``Status`` sits on its natural 4-byte boundary after the 26-byte
+        address.
+    """
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("Address", IPV6_ADDRESS_EX),
+        ("Status", ctypes.c_uint32),
+        ("RoundTripTime", ctypes.c_uint32),
+    )
+
+
+class SOCKADDR_IN6(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
+    """``sockaddr_in6`` as ``Icmp6SendEcho2`` expects it."""
+
+    _layout_ = _MS_LAYOUT
+    _fields_ = (
+        ("sin6_family", ctypes.c_uint16),
+        ("sin6_port", ctypes.c_uint16),
+        ("sin6_flowinfo", ctypes.c_uint32),
+        ("sin6_addr", ctypes.c_uint8 * 16),
+        ("sin6_scope_id", ctypes.c_uint32),
+    )
+
+
+def ipv4_to_string(address: int) -> str:
+    """Return the dotted-quad form of an ``IPAddr``.
+
+    Args:
+        address: A 32-bit IPv4 address in network byte order, as the API
+            returns it.
+
+    Returns:
+        The address as text.
+
+    Examples:
+        >>> ipv4_to_string(0x0100007F)   # 127.0.0.1 little-endian on the wire
+        '127.0.0.1'
+        >>> ipv4_to_string(0)
+        '0.0.0.0'
+
+    """
+
+    return socket.inet_ntoa(struct.pack("<I", address & 0xFFFFFFFF))
+
+
+def string_to_ipv4(address: str) -> int:
+    """Return the ``IPAddr`` form of a dotted-quad string.
+
+    Args:
+        address: An IPv4 address in text form.
+
+    Returns:
+        The 32-bit value in the byte order the API expects.
+
+    Examples:
+        >>> string_to_ipv4("127.0.0.1") == 0x0100007F
+        True
+        >>> ipv4_to_string(string_to_ipv4("192.168.1.1"))
+        '192.168.1.1'
+
+    """
+
+    return int(struct.unpack("<I", socket.inet_aton(address))[0])
+
+
+def ipv6_words_to_string(words: object) -> str:
+    """Return the text form of an ``IPV6_ADDRESS_EX`` address field.
+
+    Args:
+        words: The ``sin6_addr`` array of eight 16-bit words, in network byte
+            order.
+
+    Returns:
+        The address as text.
+
+    Examples:
+        >>> import ctypes
+        >>> loopback = (ctypes.c_uint16 * 8)(0, 0, 0, 0, 0, 0, 0, 0x0100)
+        >>> ipv6_words_to_string(loopback)
+        '::1'
+
+    """
+
+    raw = b"".join(struct.pack("<H", int(word) & 0xFFFF) for word in words)  # type: ignore[union-attr]
+    return socket.inet_ntop(socket.AF_INET6, raw)
+
+
+_library_cache: Any = None
+
+
+def iphlpapi() -> Any:
+    """Return the loaded ``iphlpapi.dll``, loading it on first use.
+
+    Returns:
+        The ctypes library handle.
+
+    Raises:
+        IPScoutUnsupportedError: Not running on Windows, or the DLL could not
+            be loaded.
+
+    Note:
+        Loading is deferred so that merely importing this module stays safe on
+        Linux and macOS, which keeps the structure layouts inspectable by tests
+        that run on any platform.
+
+    """
+
+    global _library_cache  # noqa: PLW0603 - a process-wide DLL handle is genuinely global
+    if _library_cache is not None:
+        return _library_cache
+    if sys.platform != "win32":
+        msg = f"iphlpapi.dll is a Windows library; this process is running on {sys.platform!r}"
+        raise IPScoutUnsupportedError(msg)
+    try:  # pragma: no cover - Windows only
+        _library_cache = ctypes.WinDLL("iphlpapi.dll", use_last_error=True)  # type: ignore[attr-defined]
+    except OSError as exc:  # pragma: no cover - Windows only
+        msg = f"could not load iphlpapi.dll: {exc}"
+        raise IPScoutUnsupportedError(msg) from exc
+    _configure(_library_cache)  # pragma: no cover - Windows only
+    return _library_cache  # pragma: no cover - Windows only
+
+
+def _configure(library: Any) -> None:  # pragma: no cover - Windows only
+    """Declare argument and return types so ctypes marshals correctly.
+
+    Without explicit ``restype`` ctypes assumes ``int``, which truncates the
+    64-bit HANDLE that ``IcmpCreateFile`` returns.
+    """
+
+    library.IcmpCreateFile.restype = ctypes.c_void_p
+    library.IcmpCreateFile.argtypes = ()
+
+    library.Icmp6CreateFile.restype = ctypes.c_void_p
+    library.Icmp6CreateFile.argtypes = ()
+
+    library.IcmpCloseHandle.restype = ctypes.c_bool
+    library.IcmpCloseHandle.argtypes = (ctypes.c_void_p,)
+
+    library.IcmpSendEcho.restype = ctypes.c_uint32
+    library.IcmpSendEcho.argtypes = (
+        ctypes.c_void_p,  # IcmpHandle
+        ctypes.c_uint32,  # DestinationAddress
+        ctypes.c_void_p,  # RequestData
+        ctypes.c_uint16,  # RequestSize
+        ctypes.POINTER(IP_OPTION_INFORMATION),
+        ctypes.c_void_p,  # ReplyBuffer
+        ctypes.c_uint32,  # ReplySize
+        ctypes.c_uint32,  # Timeout, milliseconds
+    )
+
+    library.Icmp6SendEcho2.restype = ctypes.c_uint32
+    library.Icmp6SendEcho2.argtypes = (
+        ctypes.c_void_p,  # IcmpHandle
+        ctypes.c_void_p,  # Event
+        ctypes.c_void_p,  # ApcRoutine
+        ctypes.c_void_p,  # ApcContext
+        ctypes.POINTER(SOCKADDR_IN6),  # SourceAddress
+        ctypes.POINTER(SOCKADDR_IN6),  # DestinationAddress
+        ctypes.c_void_p,  # RequestData
+        ctypes.c_uint16,  # RequestSize
+        ctypes.POINTER(IP_OPTION_INFORMATION),
+        ctypes.c_void_p,  # ReplyBuffer
+        ctypes.c_uint32,  # ReplySize
+        ctypes.c_uint32,  # Timeout, milliseconds
+    )
+
+
+def reset_library_cache() -> None:
+    """Forget the cached DLL handle. Exists for tests."""
+
+    global _library_cache  # noqa: PLW0603 - mirrors the cache it clears
+    _library_cache = None

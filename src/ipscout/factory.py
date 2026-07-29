@@ -17,10 +17,11 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
-from .errors import IPScoutPermissionError, IPScoutUnsupportedError
+from .errors import IPScoutPermissionError
 from .models import AddressFamily
 from .transport_posix import AsyncPosixEchoTransport, PosixEchoTransport, open_socket
 from .transport_tcp import AsyncTcpEchoTransport, TcpEchoTransport
+from .transport_windows import AsyncWindowsEchoTransport, WindowsEchoTransport, windows_icmp_available
 
 if TYPE_CHECKING:
     from .ports import AsyncEchoTransport, EchoTransport
@@ -29,14 +30,6 @@ __all__ = ["icmp_available", "make_async_transport", "make_transport"]
 
 #: True on Windows, where ICMP goes through iphlpapi rather than a socket.
 IS_WINDOWS = sys.platform == "win32"
-
-
-def _windows_unsupported() -> IPScoutUnsupportedError:
-    """Return the error explaining that the Windows ICMP backend is absent."""
-
-    return IPScoutUnsupportedError(
-        "ICMP on Windows requires the iphlpapi backend, which is not available in this build. Use allow_tcp_fallback=True to probe over TCP instead."
-    )
 
 
 def icmp_available(family: AddressFamily = AddressFamily.IPV4) -> bool:
@@ -62,19 +55,12 @@ def icmp_available(family: AddressFamily = AddressFamily.IPV4) -> bool:
     """
 
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
-        return _windows_icmp_available(family)
+        return windows_icmp_available()
     try:
         open_socket(family).close()
     except IPScoutPermissionError:
         return False
     return True
-
-
-def _windows_icmp_available(family: AddressFamily) -> bool:  # pragma: no cover - Windows only
-    """Return whether the Windows ICMP backend can be used."""
-
-    del family
-    return False
 
 
 def make_transport(
@@ -106,7 +92,7 @@ def make_transport(
     if use_tcp:
         return TcpEchoTransport(address, family, port=tcp_port)
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
-        raise _windows_unsupported()
+        return WindowsEchoTransport(address, family, payload_size=payload_size)
     return PosixEchoTransport(address, family, payload_size=payload_size)
 
 
@@ -139,5 +125,5 @@ def make_async_transport(
     if use_tcp:
         return AsyncTcpEchoTransport(address, family, port=tcp_port)
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
-        raise _windows_unsupported()
+        return AsyncWindowsEchoTransport(address, family, payload_size=payload_size)
     return AsyncPosixEchoTransport(address, family, payload_size=payload_size)
