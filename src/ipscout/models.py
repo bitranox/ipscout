@@ -507,7 +507,7 @@ class SweepScope(_Frozen):
     and which cross the output boundary as the same CIDR text.
 
     Examples:
-        >>> scope = SweepScope(networks=("192.168.1.0/24",), skipped=("172.17.0.0/16",))
+        >>> scope = SweepScope(networks=("192.168.1.0/24",), skipped=("172.17.0.0/16",), limit=4096)
         >>> scope.complete
         False
         >>> scope.model_dump(mode="json")["skipped"]
@@ -515,9 +515,14 @@ class SweepScope(_Frozen):
 
     """
 
+    #: The most addresses the sweep may cover, which is what decided the split.
+    #: Recorded rather than assumed, so a message or a reader can state the
+    #: budget a scope was built under instead of naming a default that may not
+    #: be the one that applied.
+    limit: int
     #: The networks the sweep probes.
     networks: tuple[IPNetwork, ...] = ()
-    #: The networks left out for holding more addresses than the sweep bound.
+    #: The networks left out for not fitting in what the sweep bound allows.
     skipped: tuple[IPNetwork, ...] = ()
 
     @classmethod
@@ -526,28 +531,53 @@ class SweepScope(_Frozen):
 
         Args:
             networks: The candidate networks, as CIDR text or network objects.
-            limit: The most addresses one network may hold to be swept.
+            limit: The most addresses the sweep may cover in total, across every
+                network in it.
 
         Returns:
             The candidates split in two, each side keeping the order it came
             in, so a message naming them reads in the order the caller sees
             elsewhere.
 
+        Note:
+            The bound is on the sweep, not on each network in it: a candidate is
+            covered while the budget has room for all of it, and skipped once it
+            does not. Checking each network against the full limit instead would
+            let a host attached to several subnets probe their sum, which is the
+            number that decides how long the sweep takes and whether the cache
+            entries from the start of it are still fresh at the end.
+
+            Candidates are taken in the order given, so the budget goes to the
+            networks the host reports first rather than to whichever happens to
+            be smallest. That keeps the result stable for one host instead of
+            reshuffling when an interface changes size.
+
         Examples:
             >>> scope = SweepScope.from_networks(["192.168.1.0/24", "172.17.0.0/16"], limit=4096)
             >>> scope.networks, scope.skipped
             ((IPv4Network('192.168.1.0/24'),), (IPv4Network('172.17.0.0/16'),))
 
+            A network that would fit on its own is still left out once the
+            budget is spent:
+
+            >>> spent = SweepScope.from_networks(["10.0.0.0/20", "10.1.0.0/24"], limit=4096)
+            >>> spent.networks, spent.skipped
+            ((IPv4Network('10.0.0.0/20'),), (IPv4Network('10.1.0.0/24'),))
+
         """
 
         covered: list[IPNetwork] = []
         skipped: list[IPNetwork] = []
+        room = limit
         for candidate in networks:
             # Text is parsed once here; a network object arrives parsed already.
             network = candidate if isinstance(candidate, (IPv4Network, IPv6Network)) else ip_network(candidate, strict=False)
-            target = skipped if network.num_addresses > limit else covered
-            target.append(network)
-        return cls(networks=tuple(covered), skipped=tuple(skipped))
+            if network.num_addresses <= room:
+                covered.append(network)
+                room -= network.num_addresses
+            else:
+                skipped.append(network)
+        return cls(limit=limit, networks=tuple(covered), skipped=tuple(skipped))
 
     @computed_field
     @property
@@ -557,6 +587,11 @@ class SweepScope(_Frozen):
         A computed field rather than a plain property so it survives into
         ``model_dump()``: a consumer reading only the JSON would otherwise have
         to rediscover the rule that an empty ``skipped`` means full coverage.
+
+        This answers "was anything left out", not "was anything covered": a
+        scope with no candidates at all is trivially complete. Read ``networks``
+        when the difference matters, which it does on a host with no sweepable
+        subnet - there, an empty answer is honest but it rests on nothing.
         """
 
         return not self.skipped

@@ -5,6 +5,11 @@ can execute on the Linux development host, and both are variable-length walks
 that go wrong silently.
 """
 
+# The per-OS decoders are driven with synthetic buffers built from their own
+# kernel constants (_NUD_*, _NDA_*, _RTM_*), and one refusal is asked directly
+# because reaching it through a real sweep needs a host with an oversized
+# network. Eleven line-level ignores would bury that; the rule is off for the
+# file, and nothing here touches a private outside those two purposes.
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from ipscout import bsdroute, scan
 from ipscout import neighbours_linux as linux
 from ipscout import neighbours_macos as macos
 from ipscout import neighbours_windows as windows
-from ipscout.models import AddressFamily, MacScope, Neighbour, NeighbourState, SweepScope
+from ipscout.models import AddressFamily, Interface, InterfaceAddress, MacScope, Neighbour, NeighbourState, SweepScope
 from ipscout.neighbours import resolve_active
 
 pytestmark = pytest.mark.os_agnostic
@@ -163,6 +168,46 @@ def test_a_scope_that_covers_everything_says_so() -> None:
 
 
 @pytest.mark.os_agnostic
+def test_the_bound_is_on_the_whole_sweep_not_on_each_network() -> None:
+    # Checking each network against the full bound separately would let a host
+    # attached to several subnets probe their sum: eight /20s would be 32768
+    # addresses with nothing refusing it, though 4096 is the point at which a
+    # sweep stops finishing before its own cache entries go stale.
+    scope = SweepScope.from_networks(["10.0.0.0/20", "10.1.0.0/24"], limit=4096)
+
+    assert scope.networks == (ipaddress.IPv4Network("10.0.0.0/20"),)
+    assert scope.skipped == (ipaddress.IPv4Network("10.1.0.0/24"),), "the /20 spent the whole budget"
+    assert sum(item.num_addresses for item in scope.networks) <= 4096
+
+
+@pytest.mark.os_agnostic
+def test_several_small_networks_are_all_covered_while_the_budget_lasts() -> None:
+    # The bound must not become a per-sweep single-network rule either: two /24s
+    # are 512 addresses and both belong in the sweep.
+    scope = SweepScope.from_networks(["192.168.1.0/24", "192.168.2.0/24"], limit=4096)
+
+    assert len(scope.networks) == 2
+    assert scope.complete is True
+
+
+@pytest.mark.os_agnostic
+def test_the_budget_goes_to_the_networks_reported_first() -> None:
+    # Order is the host's, not the sizes': picking whichever fits best would
+    # reshuffle the answer when an unrelated interface changes prefix.
+    scope = SweepScope.from_networks(["10.0.0.0/21", "10.1.0.0/21", "10.2.0.0/21"], limit=4096)
+
+    assert scope.networks == (ipaddress.IPv4Network("10.0.0.0/21"), ipaddress.IPv4Network("10.1.0.0/21"))
+    assert scope.skipped == (ipaddress.IPv4Network("10.2.0.0/21"),)
+
+
+@pytest.mark.os_agnostic
+def test_a_network_at_exactly_the_bound_is_still_swept() -> None:
+    # The comparison is "does all of it fit", so the boundary case belongs in
+    # the sweep rather than one address outside it.
+    assert SweepScope.from_networks(["10.0.0.0/20"], limit=4096).complete is True
+
+
+@pytest.mark.os_agnostic
 def test_the_bound_is_the_address_count_not_the_prefix() -> None:
     # A /20 fits in 4096 addresses exactly; a /19 does not. Comparing prefix
     # lengths instead would put the boundary in a different place per family.
@@ -191,6 +236,117 @@ def test_the_default_set_leaves_out_what_holds_nobody_to_find() -> None:
     for network in ipscout.local_networks():
         assert not network.is_loopback, network
         assert network.prefixlen < 31, network
+
+
+def _host_with(*addresses: tuple[str, str, int], loopback: str | None = None) -> list[Interface]:
+    """Return interface records describing a host, for the default-set path.
+
+    A stated argument rather than a patched module: ``local_networks`` takes the
+    interfaces it reads, so the whole default path can be driven with a host
+    this machine is not.
+    """
+
+    interfaces = [Interface(name=name, ipv4=(InterfaceAddress(address=address, prefix_len=prefix),), is_up=True) for name, address, prefix in addresses]
+    if loopback is not None:
+        interfaces.insert(0, Interface(name="lo", ipv4=(InterfaceAddress(address=loopback, prefix_len=8),), is_up=True, is_loopback=True))
+    return interfaces
+
+
+@pytest.mark.os_agnostic
+def test_the_default_set_of_a_host_with_a_container_bridge() -> None:
+    # The exact host from the report: a /24 the target sits on, a container
+    # bridge on a /16, a tunnel /32, and loopback. Everything before the
+    # partition happens here, which no hand-written CIDR list can prove.
+    host = _host_with(("eth0", "192.168.168.17", 24), ("tailscale0", "100.64.11.20", 32), ("docker0", "172.17.0.1", 16), loopback="127.0.0.1")
+
+    assert ipscout.local_networks(host) == (ipaddress.IPv4Network("192.168.168.0/24"), ipaddress.IPv4Network("172.17.0.0/16"))
+
+    scope = ipscout.sweep_scope(interfaces=host)
+
+    assert scope.networks == (ipaddress.IPv4Network("192.168.168.0/24"),)
+    assert scope.skipped == (ipaddress.IPv4Network("172.17.0.0/16"),)
+    assert scope.complete is False
+
+
+@pytest.mark.os_agnostic
+def test_a_second_address_on_one_interface_is_its_own_subnet() -> None:
+    # An interface holding two addresses sits on two subnets, and collapsing
+    # them would lose one from the sweep entirely.
+    host = [
+        Interface(
+            name="eth0",
+            ipv4=(InterfaceAddress(address="192.168.1.5", prefix_len=24), InterfaceAddress(address="10.20.0.5", prefix_len=24)),
+            is_up=True,
+        )
+    ]
+
+    assert ipscout.local_networks(host) == (ipaddress.IPv4Network("192.168.1.0/24"), ipaddress.IPv4Network("10.20.0.0/24"))
+
+
+@pytest.mark.os_agnostic
+def test_the_same_subnet_reported_twice_is_swept_once() -> None:
+    # Two interfaces on one segment is ordinary; probing it twice would double
+    # the traffic and spend the budget on addresses already covered.
+    host = _host_with(("eth0", "192.168.1.5", 24), ("eth1", "192.168.1.6", 24))
+
+    assert ipscout.local_networks(host) == (ipaddress.IPv4Network("192.168.1.0/24"),)
+
+
+@pytest.mark.os_agnostic
+def test_a_partial_default_sweep_that_finds_nothing_refuses_end_to_end() -> None:
+    # The whole chain on a synthetic host: interfaces to default set, to the
+    # partition, to a real sweep, to the refusal. The covered network is two
+    # loopback addresses, so this probes loopback and nothing else.
+    if not ipscout.icmp_available():
+        pytest.skip("unprivileged ICMP unavailable on this host")
+    host = _host_with(("eth0", "127.0.0.1", 30), ("docker0", "172.17.0.1", 16))
+    scope = ipscout.sweep_scope(interfaces=host)
+
+    assert scope.networks == (ipaddress.IPv4Network("127.0.0.0/30"),), "the sweep must stay on loopback"
+
+    with pytest.raises(ipscout.IPScoutSweepIncompleteError, match=r"172\.17\.0\.0/16"):
+        ipscout.find_ip_by_mac("aa:bb:cc:dd:ee:ff", scan=True, scope=scope)
+
+
+@pytest.mark.os_agnostic
+def test_a_network_named_without_a_sweep_is_refused() -> None:
+    # Ignoring the argument answers from the cache alone while the caller
+    # believes that ground was covered. Nothing conflicts and nothing prints,
+    # so the no-op is invisible - which is what makes it worth refusing.
+    with pytest.raises(ValueError, match="only with scan=True"):
+        ipscout.find_ip_by_mac("aa:bb:cc:dd:ee:ff", network="10.0.0.0/8")
+
+
+@pytest.mark.os_agnostic
+def test_a_scope_given_without_a_sweep_is_refused() -> None:
+    with pytest.raises(ValueError, match="only with scan=True"):
+        ipscout.find_ip_by_mac("aa:bb:cc:dd:ee:ff", scope=ipscout.sweep_scope("10.0.0.0/8"))
+
+
+@pytest.mark.os_agnostic
+def test_the_cache_path_still_takes_no_sweep_arguments_at_all() -> None:
+    assert ipscout.find_ip_by_mac("aa:bb:cc:dd:ee:ff") == []
+
+
+@pytest.mark.os_agnostic
+def test_a_scope_and_a_network_together_are_refused() -> None:
+    # Silent precedence would have the caller reading a result about ground
+    # they did not ask about.
+    scope = ipscout.sweep_scope("127.0.0.0/30")
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ipscout.arp_scan("10.0.0.0/24", scope=scope)
+
+
+@pytest.mark.os_agnostic
+def test_a_scope_built_under_another_bound_is_swept_as_built() -> None:
+    # The limit knob is only meaningful if what it produces can be run; the
+    # refusal must also quote the bound that actually applied, not the default.
+    scope = ipscout.sweep_scope("10.0.0.0/24", limit=64)
+
+    assert scope.networks == ()
+    with pytest.raises(ipscout.IPScoutSweepTooWideError, match="more than the 64"):
+        ipscout.arp_scan(scope=scope)
 
 
 @pytest.mark.os_agnostic

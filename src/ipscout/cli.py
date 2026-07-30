@@ -188,7 +188,12 @@ def _note_skipped(skipped: tuple[IPNetwork, ...]) -> None:
     if not skipped:
         return
     left_out = ", ".join(str(item) for item in skipped)
-    error_console.print(f"note: not swept: {left_out} - too wide to cover; name a narrower network inside it to include it", style=_NOTE_STYLE, highlight=False)
+    # One wording for both reasons a network is left out - too wide on its own,
+    # or the sweep's budget already spent on the networks before it - because
+    # naming it with --network is the remedy either way.
+    error_console.print(
+        f"note: not swept: {left_out} - outside what one sweep covers; name it with --network to sweep it on its own", style=_NOTE_STYLE, highlight=False
+    )
 
 
 def _fail(ctx: click.Context, command: CommandName, exc: Exception, *, skipped: tuple[IPNetwork, ...] = ()) -> None:
@@ -531,6 +536,13 @@ def cli_mac(ctx: click.Context, ip: str, *, strict: bool, active: bool) -> None:
 def cli_find_ip(ctx: click.Context, mac: str, *, scan: bool, network: str | None) -> None:
     """Find which addresses currently hold a hardware address."""
 
+    if network is not None and not scan:
+        # Dropping the flag would answer from the cache while the caller
+        # believes that network was swept. The library refuses the same call;
+        # this says it in the vocabulary the user typed.
+        msg = "--network applies only with --scan; without it only the existing neighbour cache is searched"
+        raise click.UsageError(msg)
+
     # Asked before sweeping, so the report can state its own coverage: the
     # address list alone cannot say whether a network went unprobed. Inside the
     # guard because a malformed CIDR is refused here first, and bound before it
@@ -539,7 +551,9 @@ def cli_find_ip(ctx: click.Context, mac: str, *, scan: bool, network: str | None
     try:
         if scan:
             scope = sweep_scope(network)
-        addresses = find_ip_by_mac(mac, scan=scan, network=network)
+        # The scope reported is the scope swept, rather than two independent
+        # computations that could disagree if an interface changed between them.
+        addresses = find_ip_by_mac(mac, scan=scan, scope=scope)
     except (IPScoutError, ValueError) as exc:
         _fail(ctx, CommandName.FIND_IP, exc, skipped=scope.skipped if scope else ())
         return
@@ -566,7 +580,7 @@ def cli_arp_scan(ctx: click.Context, *, network: str | None, concurrency: int) -
     scope: SweepScope | None = None
     try:
         scope = sweep_scope(network)
-        entries = arp_scan(network, concurrency=concurrency)
+        entries = arp_scan(scope=scope, concurrency=concurrency)
     except (IPScoutError, ValueError) as exc:
         _fail(ctx, CommandName.ARP_SCAN, exc, skipped=scope.skipped if scope else ())
         return
@@ -828,7 +842,11 @@ def _exception_handler(*, as_json: bool, bare: bool) -> Callable[[BaseException]
     """
 
     def handle(exc: BaseException) -> int:
-        code = lib_cli_exit_tools.get_system_exit_code(exc)
+        # Click states its own code for a malformed invocation, and it agrees
+        # with this CLI's documented 2-is-an-error. Falling through to the errno
+        # mapping instead returned 1, which a script reads as "host did not
+        # answer" - a wrong fact about the network from a typo in the command.
+        code = exc.exit_code if isinstance(exc, click.ClickException) else lib_cli_exit_tools.get_system_exit_code(exc)
         if as_json:
             error = JsonError(type=type(exc).__name__, message=str(exc))
             click.echo(dumps(error if bare else JsonEnvelope(ok=False, error=error)))

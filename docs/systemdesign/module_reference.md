@@ -299,6 +299,7 @@ package supports 3.10.
 | `IPScoutPermissionError`      | The process lacks a privilege the operation needs.            | yes             |
 | `IPScoutResolutionError`      | The target could not be turned into an address.               | no              |
 | `IPScoutUnsupportedError`     | No backend implements this here.                              | no              |
+| `IPScoutSweepError`           | Base of the two below. Catch this for either sweep refusal.   | no              |
 | `IPScoutSweepTooWideError`    | Nothing was left to sweep once the address bound was applied. | no              |
 | `IPScoutSweepIncompleteError` | A sweep left a network out and matched nothing in the rest.   | no              |
 

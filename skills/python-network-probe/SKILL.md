@@ -41,8 +41,9 @@ Python 3.10+.
 | Scan ports                     | `scan_ports(host, "22,80,8000-8100")`                                |
 | MAC of an address              | `lookup_mac(ip)`, `get_mac_address(ip)`                              |
 | Which host holds a MAC         | `find_ip_by_mac(mac, scan=True)`                                     |
-| Neighbour / ARP cache          | `neighbours()`, `arp_scan(network)`                                  |
-| What a sweep will cover        | `sweep_scope()` -> `SweepScope(networks, skipped, complete)`         |
+| Neighbour / ARP cache          | `neighbours()`, `arp_scan(network)`; `entry.state` is a `NeighbourState` |
+| What a sweep will cover        | `sweep_scope()` -> `SweepScope(limit, networks, skipped, complete)`  |
+| Sweep exactly that plan        | `arp_scan(scope=scope)`, `find_ip_by_mac(mac, scan=True, scope=...)` |
 | Default route, any route       | `default_gateway()`, `query_route(ip)`                               |
 | Interfaces and subnets         | `local_interfaces()`, `subnet_info()`, `local_networks()`            |
 | Wake a sleeping host           | `wake_on_lan(mac)`                                                   |
@@ -105,8 +106,8 @@ them, and `AddressFamily.IPV4` / `IPV6` is what the `family=` argument takes.
   `IPScoutResolutionError`, `IPScoutPermissionError`, `IPScoutUnsupportedError`
   or `ValueError`.
 - A sweep that cannot cover the ground it was asked about raises
-  `IPScoutSweepTooWideError` or `IPScoutSweepIncompleteError`, both also
-  `ValueError`.
+  `IPScoutSweepTooWideError` or `IPScoutSweepIncompleteError`. Catch
+  `IPScoutSweepError` for either; both are also `ValueError`.
 
 That split is the point: a permissions problem and a dead host need different
 responses, so they arrive through different channels.
@@ -133,6 +134,9 @@ There is also no protocol that asks "who has this MAC" - RARP is dead. So
 **list**: one hardware address legitimately holds several addresses, commonly
 an IPv4 and an IPv6 link-local on the same NIC.
 
+`network=` and `scope=` apply only with `scan=True`, and are refused without it
+rather than ignored - without a sweep there is only the cache to search.
+
 ## What needs privilege, and what it does about it
 
 Everything above is unprivileged. These are not, and each raises
@@ -140,7 +144,7 @@ Everything above is unprivileged. These are not, and each raises
 
 | Operation                     | Needs                                                                                                             |
 |-------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `scan_ports(..., method=SYN)` | root / `CAP_NET_RAW`. Unavailable on Windows at any privilege level: raw TCP sends have been blocked since XP SP2 |
+| `scan_ports(..., method=ScanMethod.SYN)` | root / `CAP_NET_RAW`. Unavailable on Windows at any privilege level: raw TCP sends have been blocked since XP SP2 |
 | `lookup_mac(ip, active=True)` | root / `CAP_NET_RAW` on Linux and macOS. Windows IPv4 needs none (`SendARP`); Windows IPv6 needs Administrator    |
 | Traceroute on macOS           | a raw socket, so root. Unprivileged macOS does not surface Time Exceeded at all                                   |
 
@@ -170,8 +174,9 @@ than a traceback. `--json-bare` drops the envelope for `jq`, and reports a
 failure as the bare `{"type": ..., "message": ...}` so the pipeline still gets
 JSON. `skipped` names any network a sweep could not cover, which is how a
 partial answer is told from a complete one; the same note goes to stderr, never
-to the stream you parse. Exit codes are `0` reached, `1` not reached, `2`
-error, independent of output format.
+to the stream you parse. Exit codes are `0` reached, `1` not reached, `2` error
+- a bad name, a missing capability, or a malformed command line - independent of
+output format.
 
 ## What it will not do, and why
 
@@ -218,9 +223,10 @@ ICMP round trip and a filtered port is not a dead host.
 - Reading `time_avg_ms` without checking `reached`. Nothing received gives the
   `-1.0` sentinel, not `0.0`, and averaging that across a sweep is nonsense.
 - Reading an empty `find_ip_by_mac(..., scan=True)` as "that host is gone"
-  without checking coverage. A sweep with no network given covers every subnet
-  this host is attached to that fits inside 4096 addresses and skips the rest,
-  so a container bridge on a `/16` goes uncovered. A search that matched
+  without checking coverage. A sweep with no network given covers the subnets
+  this host is attached to that fit inside one sweep's 4096-address budget
+  (counted across all of them, spent in the order the host reports them) and
+  skips the rest, so a container bridge on a `/16` goes uncovered. A search that matched
   nothing over partial ground raises `IPScoutSweepIncompleteError` rather than
   answering; a search that found something can still be short an address held
   on the skipped network. Ask `sweep_scope()` when it matters, and name a

@@ -9,11 +9,17 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 - **A default sweep no longer fails over one oversized subnet.** `arp_scan()` and
   `find_ip_by_mac(..., scan=True)` with no network given now sweep every subnet this host is
-  attached to that fits inside 4096 addresses, and report the ones that do not fit instead of
+  attached to that fit inside one sweep's budget of 4096 addresses - counted across all of them
+  together, spent in the order the host reports them - and report the ones left out instead of
   refusing the whole call. A container bridge on a `/16` is present on a large share of Linux dev
   and CI hosts, so the documented default path failed on first use for a reason unrelated to the
   caller's target. Naming a network explicitly still raises when it is too wide: that is a request,
   not a default. What the change costs is stated rather than hidden - see the new errors below.
+- **Naming ground to sweep without asking for a sweep is refused.**
+  `find_ip_by_mac(mac, network=...)` and the new `scope=` form used to ignore that argument unless
+  `scan=True` was also given, answering from the cache while the caller believed the named network
+  had been covered. Both now raise `ValueError`. Nothing conflicted and nothing was printed, which
+  is what made the no-op invisible.
 - **`local_networks()` reports the subnets a sweep covers.** Loopback was already left out; a `/31`
   and a `/32` now are too, since they hold this host plus at most one point-to-point peer and a
   sweep of them cannot find anybody new. `subnet_info()` still reports those addresses, and naming
@@ -22,9 +28,16 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 ### Added
 
 - **`sweep_scope()` and `SweepScope`.** Ask what a sweep would cover before running it: which
-  networks it probes, which it leaves out, and whether coverage is complete. `find-ip` carries the
-  same record in its payload, and the JSON envelope grew a `skipped` field for it, so a machine
-  reader can tell a partial answer from a complete one without parsing prose.
+  networks it probes, which it leaves out, the address budget that decided the split, and whether
+  coverage is complete. `networks` and `skipped` hold parsed `IPv4Network` / `IPv6Network` objects
+  rather than CIDR text, so the sweep reads their size and membership directly; the JSON form is the
+  same CIDR strings, and `limit` records the budget the split was made under. The result is a plan
+  `arp_scan(scope=...)` and `find_ip_by_mac(..., scope=...)` run as it stands, so inspecting
+  coverage and sweeping it are one flow rather than two independent computations.
+  `local_networks(interfaces)` and `sweep_scope(interfaces=...)` accept the interface list to read,
+  which is what makes the whole default path testable without patching. `find-ip` carries the same
+  record in its payload, and the JSON envelope grew a `skipped` field for it, so a machine reader
+  can tell a partial answer from a complete one without parsing prose.
 - **`IPScoutSweepError` with `IPScoutSweepTooWideError` and `IPScoutSweepIncompleteError`.** The
   first replaces the bare `ValueError` for a sweep with nothing left to probe. The second is new
   behaviour: a search that skipped a network and matched nothing in the rest refuses to answer,
@@ -33,12 +46,27 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- **`find-ip --network` without `--scan` is refused rather than dropped.** The flag was silently
+  ignored and the command reported `ok: true` with a cache-only answer, so a caller had no way to
+  tell the named network was never swept.
+- **A malformed invocation exits 2, not 1.** Exit 1 is documented as "not reached", so a usage error
+  - mutually exclusive flags, a flag that needs another - told a script the host had gone silent
+  when the real problem was the command line. Click's own exit code is used where it states one.
 - **The CLI no longer prints a Python class name at a human.** A handled failure rendered as
   `Error: ValueError: <message>`; the message alone already names the remedy, and the machine-
   readable `type` field is where a reader can branch on the class.
 - **`--json-bare` reports failures as JSON.** It emitted human text on the error path, breaking the
   one promise the flag makes: that stdout holds the payload and nothing else. It now emits the bare
   `{type, message}` object, and an exception escaping a command is serialised in the same shape.
+
+### Internal
+
+- The `capabilities` rendering iterates its report's own fields instead of building a dict to read
+  them back out, and `_emit` takes a model, a sequence of models or a mapping onto them rather than
+  `Any`, so nothing untyped can reach the output boundary.
+- The ctypes DLL handle and the adapter structures are typed (`iphlpapi() -> ctypes.CDLL`,
+  `_IpAdapterAddresses` on the parameters that already received it), retiring eight `Any`
+  annotations with no suppression added.
 
 ## [1.0.0] - 2026-07-29
 

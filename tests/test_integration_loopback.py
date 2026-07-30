@@ -125,7 +125,11 @@ def test_the_async_path_reaches_loopback_too() -> None:
 def test_a_sweep_returns_one_result_per_target_in_order() -> None:
     _require_icmp()
 
-    results = ipscout.ping_many(["127.0.0.1", NEVER_ANSWERS], times=1, timeout=1.0)
+    # Loopback answers in microseconds, so the bound is not measuring latency
+    # here - it only caps how long a busy process may take to read the reply.
+    # At 1.0 this reddened once inside a full suite run that had 64 probes in
+    # flight elsewhere, which is a fact about the machine, not about the code.
+    results = ipscout.ping_many(["127.0.0.1", NEVER_ANSWERS], times=1, timeout=3.0)
 
     assert list(results) == ["127.0.0.1", NEVER_ANSWERS]
     assert results["127.0.0.1"].reached is True
@@ -137,7 +141,7 @@ def test_a_sweep_survives_one_bad_target_among_good_ones() -> None:
     # one typo cannot destroy 199 other results.
     _require_icmp()
 
-    results = ipscout.ping_many(["127.0.0.1", NEVER_RESOLVES], times=1, timeout=1.0)
+    results = ipscout.ping_many(["127.0.0.1", NEVER_RESOLVES], times=1, timeout=3.0)
 
     assert results["127.0.0.1"].reached is True
     assert results[NEVER_RESOLVES].reached is False

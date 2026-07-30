@@ -162,10 +162,10 @@ ipscout.wake_on_lan(mac, broadcast="192.168.1.255")
 
 A MAC address does not survive a router hop, so `lookup_mac` puts the scope in the answer and
 `get_mac_address` returns `None` for anything routed rather than passing off the gateway's as the
-host's. A sweep with no network given covers every subnet this host is attached to that fits inside
-4096 addresses, and names the ones that do not - a container bridge on a `/16` is left out rather
-than cancelling the sweep, and a search that matched nothing while a network went uncovered says so
-instead of reporting "not found". Full worked examples are in [docs/usage.md](docs/usage.md).
+host's. A sweep with no network given covers the subnets this host is attached to that fit inside
+one sweep's 4096-address budget, and names the ones left out - a container bridge on a `/16` is
+skipped rather than cancelling the sweep, and a search that matched nothing while a network went
+uncovered says so instead of reporting "not found". Full worked examples are in [docs/usage.md](docs/usage.md).
 
 ## Output for machines
 
@@ -224,7 +224,7 @@ Exit codes are independent of the output format:
 |------|---------------------------------------------------------------------------|
 | 0    | Reached, or the command otherwise succeeded.                              |
 | 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.   |
-| 2    | Error. A bad name, a missing permission, or a capability this host lacks. |
+| 2    | Error. A bad name, a missing permission, a capability this host lacks, or a malformed command line. |
 
 ## For LLMs and coding agents
 

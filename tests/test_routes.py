@@ -5,6 +5,10 @@ cannot be exercised on the Linux development host at all, and a routing message
 is exactly the kind of variable-length walk that goes wrong silently.
 """
 
+# _next_hop and the routing-message constants are asked directly throughout:
+# they decode a SOCKADDR_INET and build a synthetic RTM_GET, and the public
+# lookup that wraps them cannot run on this platform, so every case below would
+# otherwise be unreachable.
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations

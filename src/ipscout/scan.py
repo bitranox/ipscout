@@ -22,10 +22,11 @@ Note:
     a /16 - far more addresses than a sweep can reasonably probe. Such a
     network is left out and named in a :class:`~ipscout.models.SweepScope`
     rather than failing the whole call, because a sweep of the /24 the caller
-    actually cares about is the useful thing to do. What that costs is stated
-    instead of hidden: a search that matched nothing over partial ground
-    raises rather than answering "not found", which would be the stronger
-    claim the sweep did not earn.
+    actually cares about is the useful thing to do. The bound is on the sweep
+    as a whole, so a host attached to many subnets cannot quietly probe their
+    sum either. What that costs is stated instead of hidden: a search that
+    matched nothing over partial ground raises rather than answering "not
+    found", which would be the stronger claim the sweep did not earn.
 
 """
 
@@ -41,13 +42,18 @@ from .models import SweepScope
 from .neighbours import neighbours, normalise_mac
 
 if TYPE_CHECKING:
-    from .models import IPNetwork, Neighbour
+    from collections.abc import Sequence
+
+    from .models import Interface, IPNetwork, Neighbour
 
 __all__ = ["arp_scan", "find_ip_by_mac", "local_networks", "sweep_scope"]
 
+#: The most addresses one sweep covers, counted across every network in it.
 #: A sweep wider than this is a scan of somebody else's network, not of a
 #: local subnet, and would take long enough that the cache entries from the
-#: start of it are stale before the end.
+#: start of it are stale before the end. Bounding each network separately
+#: would miss exactly that: a host attached to several subnets would probe
+#: their sum, which is the number that decides both.
 MAX_SWEEP_HOSTS = 4096
 
 #: Enough for a /22 sweep to finish quickly without exhausting file handles.
@@ -62,8 +68,15 @@ DEFAULT_SWEEP_TIMEOUT = 1.0
 POINT_TO_POINT_PREFIX = 31
 
 
-def local_networks() -> tuple[ipaddress.IPv4Network, ...]:
+def local_networks(interfaces: Sequence[Interface] | None = None) -> tuple[ipaddress.IPv4Network, ...]:
     """Return the IPv4 subnets a default sweep covers.
+
+    Args:
+        interfaces: The interfaces to read, for a caller that already has them
+            or is describing a host other than this one. Defaults to this
+            host's own. A real argument rather than something a test patches:
+            the whole default path hangs off this list, so it has to be
+            possible to state it.
 
     Returns:
         One network per IPv4 address this host holds, deduplicated, minus the
@@ -85,7 +98,7 @@ def local_networks() -> tuple[ipaddress.IPv4Network, ...]:
     """
 
     found: list[ipaddress.IPv4Network] = []
-    for interface in local_interfaces():
+    for interface in local_interfaces() if interfaces is None else interfaces:
         if interface.is_loopback:
             continue
         for entry in interface.ipv4:
@@ -100,26 +113,34 @@ def local_networks() -> tuple[ipaddress.IPv4Network, ...]:
     return tuple(found)
 
 
-def _targets(network: str | None) -> list[IPNetwork]:
+def _targets(network: str | None, interfaces: Sequence[Interface] | None) -> list[IPNetwork]:
     """Return the networks to sweep, from an explicit CIDR or the local ones."""
 
     if network is not None:
         return [ipaddress.ip_network(network, strict=False)]
-    return list(local_networks())
+    return list(local_networks(interfaces))
 
 
-def sweep_scope(network: str | None = None, *, limit: int = MAX_SWEEP_HOSTS) -> SweepScope:
+def sweep_scope(network: str | None = None, *, limit: int = MAX_SWEEP_HOSTS, interfaces: Sequence[Interface] | None = None) -> SweepScope:
     """Return what a sweep would cover, and what it would leave out.
 
     Args:
         network: The CIDR that would be swept. Defaults to the subnets this
             host is attached to, as :func:`local_networks` reports them.
-        limit: The most addresses one network may hold to be swept.
+        limit: The most addresses the sweep may cover in total.
+        interfaces: The interfaces the default set comes from. Ignored when
+            ``network`` names one.
 
     Returns:
-        The candidates split into covered and skipped. Asking before sweeping
-        is what lets a caller decide with the same facts the sweep will use,
-        rather than inferring coverage from the result.
+        The candidates split into covered and skipped, the budget going to the
+        ones reported first. Asking before sweeping is what lets a caller
+        decide with the same facts the sweep will use, rather than inferring
+        coverage from the result.
+
+    Note:
+        The result is what :func:`arp_scan` and :func:`find_ip_by_mac` accept as
+        ``scope=``, so a caller can inspect a plan and then run exactly that
+        one - including one built under a different ``limit``.
 
     Examples:
         >>> sweep_scope("192.168.1.0/24").networks
@@ -129,7 +150,39 @@ def sweep_scope(network: str | None = None, *, limit: int = MAX_SWEEP_HOSTS) -> 
 
     """
 
-    return SweepScope.from_networks(_targets(network), limit=limit)
+    return SweepScope.from_networks(_targets(network, interfaces), limit=limit)
+
+
+def _plan(network: str | None, scope: SweepScope | None) -> SweepScope:
+    """Return the scope to sweep, from a ready plan or from the CIDR given.
+
+    Saying both is refused rather than resolved by precedence: whichever won
+    silently, the caller would be reading a result about ground they did not
+    ask for.
+    """
+
+    if scope is None:
+        return sweep_scope(network)
+    if network is not None:
+        msg = "network and scope are mutually exclusive; a scope already names the networks to sweep"
+        raise ValueError(msg)
+    return scope
+
+
+def _refuse_a_sweep_argument_without_a_sweep(*, scan: bool, network: str | None, scope: SweepScope | None) -> None:
+    """Raise when ground to sweep was named but no sweep was asked for.
+
+    Ignoring the argument would answer from the cache alone while the caller
+    believes that ground was covered - the same wrong confidence this module
+    refuses everywhere else, and harder to notice, because nothing conflicts
+    and nothing is printed.
+    """
+
+    if scan or (network is None and scope is None):
+        return
+    named = "network" if scope is None else "scope"
+    msg = f"{named} applies only with scan=True; without it only the existing neighbour cache is searched"
+    raise ValueError(msg)
 
 
 def _refuse_an_empty_scope(scope: SweepScope) -> None:
@@ -144,7 +197,7 @@ def _refuse_an_empty_scope(scope: SweepScope) -> None:
     if scope.networks or not scope.skipped:
         return
     sizes = ", ".join(f"{item} holds {item.num_addresses} addresses" for item in scope.skipped)
-    msg = f"{sizes}, more than the {MAX_SWEEP_HOSTS} this will sweep; pass a narrower network"
+    msg = f"{sizes}, more than the {scope.limit} this will sweep; pass a narrower network"
     raise IPScoutSweepTooWideError(msg)
 
 
@@ -160,10 +213,11 @@ def _refuse_a_partial_miss(mac: str, scope: SweepScope) -> None:
     if not scope.skipped:
         return
     # A scope with nothing covered was already refused as too wide, so there is
-    # always something to name here.
+    # always something to name here. The wording stays neutral about why a
+    # network was left out: too wide on its own, or the budget already spent.
     swept = ", ".join(str(item) for item in scope.networks)
     left_out = ", ".join(str(item) for item in scope.skipped)
-    msg = f"{mac} holds no address in {swept}, and {left_out} was too wide to sweep, so it cannot be reported as not found; pass a narrower network inside it"
+    msg = f"{mac} holds no address in {swept}, and {left_out} fell outside what one sweep covers, so it cannot be reported as not found; name it to sweep it"
     raise IPScoutSweepIncompleteError(msg)
 
 
@@ -202,6 +256,7 @@ def _sweep(scope: SweepScope, *, concurrency: int, timeout: float) -> tuple[Neig
 def arp_scan(
     network: str | None = None,
     *,
+    scope: SweepScope | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     timeout: float = DEFAULT_SWEEP_TIMEOUT,
 ) -> tuple[Neighbour, ...]:
@@ -209,7 +264,10 @@ def arp_scan(
 
     Args:
         network: The CIDR to sweep. Defaults to every subnet this host is
-            directly attached to, minus any that is too wide to sweep.
+            directly attached to that fits the sweep's address budget.
+        scope: A plan from :func:`sweep_scope` to run exactly as it stands,
+            for a caller who wants to inspect coverage before probing or to
+            sweep under a different bound. Mutually exclusive with ``network``.
         concurrency: How many probes are in flight at once.
         timeout: Seconds to wait for each reply.
 
@@ -220,9 +278,11 @@ def arp_scan(
         just reading the cache.
 
     Raises:
-        IPScoutSweepTooWideError: Every candidate network holds more addresses
-            than this will sweep, so there is nothing left to probe. Also a
+        IPScoutSweepTooWideError: No candidate network fits in the addresses
+            this will sweep, so there is nothing left to probe. Also a
             ``ValueError``, as this has always raised.
+        ValueError: Both ``network`` and ``scope`` were given, which would
+            leave a silent precedence rule deciding what got swept.
 
     Note:
         The sweep is what makes this different from :func:`neighbours`, which
@@ -234,12 +294,19 @@ def arp_scan(
 
     """
 
-    scope = sweep_scope(network)
-    _refuse_an_empty_scope(scope)
-    return _sweep(scope, concurrency=concurrency, timeout=timeout)
+    plan = _plan(network, scope)
+    _refuse_an_empty_scope(plan)
+    return _sweep(plan, concurrency=concurrency, timeout=timeout)
 
 
-def find_ip_by_mac(mac: str, *, scan: bool = False, network: str | None = None, concurrency: int = DEFAULT_CONCURRENCY) -> list[str]:
+def find_ip_by_mac(
+    mac: str,
+    *,
+    scan: bool = False,
+    network: str | None = None,
+    scope: SweepScope | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
+) -> list[str]:
     """Return the addresses currently holding a hardware address.
 
     Args:
@@ -247,7 +314,11 @@ def find_ip_by_mac(mac: str, *, scan: bool = False, network: str | None = None, 
         scan: Sweep the subnet first, so hosts that have not been talked to
             recently are found too. Without it only the existing cache is
             searched, which is instant but only knows what it already knew.
+            Naming ``network`` or ``scope`` without this is refused rather than
+            ignored.
         network: The CIDR to sweep, when sweeping. Defaults to the local ones.
+        scope: A plan from :func:`sweep_scope` to sweep exactly as it stands.
+            Mutually exclusive with ``network``.
         concurrency: How many probes are in flight at once.
 
     Returns:
@@ -257,7 +328,9 @@ def find_ip_by_mac(mac: str, *, scan: bool = False, network: str | None = None, 
         short an address that hardware holds on the network left out.
 
     Raises:
-        ValueError: The hardware address is not one.
+        ValueError: The hardware address is not one, both ``network`` and
+            ``scope`` were given, or one of them was given without ``scan``,
+            where it would have been ignored.
         IPScoutSweepTooWideError: Nothing was left to sweep at all.
         IPScoutSweepIncompleteError: The sweep skipped a network and matched
             nothing in what it did cover, so no answer can be given: "not
@@ -275,12 +348,13 @@ def find_ip_by_mac(mac: str, *, scan: bool = False, network: str | None = None, 
         msg = f"not a hardware address: {mac!r}"
         raise ValueError(msg)
 
+    _refuse_a_sweep_argument_without_a_sweep(scan=scan, network=network, scope=scope)
     if not scan:
         return _matching(neighbours(), wanted)
 
-    scope = sweep_scope(network)
-    _refuse_an_empty_scope(scope)
-    found = _matching(_sweep(scope, concurrency=concurrency, timeout=DEFAULT_SWEEP_TIMEOUT), wanted)
+    plan = _plan(network, scope)
+    _refuse_an_empty_scope(plan)
+    found = _matching(_sweep(plan, concurrency=concurrency, timeout=DEFAULT_SWEEP_TIMEOUT), wanted)
     if not found:
-        _refuse_a_partial_miss(mac, scope)
+        _refuse_a_partial_miss(mac, plan)
     return found

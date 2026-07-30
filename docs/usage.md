@@ -255,25 +255,52 @@ ipscout.find_ip_by_mac("dc:b2:2f:44:34:59", scan=True)
 ```
 
 Any written form compares equal - `aa:bb:cc:dd:ee:ff`, `AA-BB-CC-DD-EE-FF` and `aabb.ccdd.eeff` are
-the same address.
+the same address. `network=` and `scope=` apply only when `scan=True`; giving one without it is
+refused rather than ignored, since without a sweep there is only the cache to search.
 
-`arp_scan()` with no argument sweeps every subnet this host is attached to that fits inside 4096
-addresses. A container bridge on a `/16` holds far more than that, so it is left out of the sweep
-rather than cancelling it - and it is named, because a result assembled from part of the ground is
-not the same answer:
+`arp_scan()` with no argument sweeps the subnets this host is attached to that fit inside one
+sweep's budget of 4096 addresses, counted across all of them together. A container bridge on a
+`/16` holds far more than that on its own, so it is left out rather than cancelling the sweep - and
+it is named, because a result assembled from part of the ground is not the same answer:
 
 ```python
 ipscout.sweep_scope()
-# SweepScope(networks=(IPv4Network('192.168.168.0/24'),), skipped=(IPv4Network('172.17.0.0/16'),), complete=False)
+# SweepScope(limit=4096, networks=(IPv4Network('192.168.168.0/24'),), skipped=(IPv4Network('172.17.0.0/16'),), complete=False)
 ```
 
 The fields hold parsed networks, so you can ask one for its size or test membership without
 re-parsing text. They still cross the JSON boundary as the same CIDR strings, and a value that is
-not a network is refused when the record is built.
+not a network is refused when the record is built. `limit` is the budget that decided the split,
+recorded on the record so a reader never has to assume which one applied.
+
+A scope is a plan you can run, so "ask, then decide, then sweep" is one flow rather than two
+guesses:
+
+```python
+scope = ipscout.sweep_scope(limit=1024)  # a tighter budget than the default
+if scope.complete:
+    entries = ipscout.arp_scan(scope=scope)  # sweep exactly what was inspected
+```
+
+`arp_scan` and `find_ip_by_mac` take either `network=` or `scope=`, never both - a silent
+precedence rule would leave you reading a result about ground you did not ask about.
+
+`local_networks(interfaces)` and `sweep_scope(interfaces=...)` also accept the interface list to
+read, for describing a host other than this one:
+
+```python
+from ipscout import Interface, InterfaceAddress
+
+elsewhere = [Interface(name="eth0", ipv4=(InterfaceAddress(address="10.0.0.5", prefix_len=24),), is_up=True)]
+ipscout.local_networks(elsewhere)  # (IPv4Network('10.0.0.0/24'),)
+```
 
 Ask that before sweeping and you know what the answer will and will not cover. Two consequences
 worth knowing:
 
+- The budget is spent in the order the host reports its interfaces, so a subnet that would fit on
+  its own is still skipped once the networks before it have used the 4096 up. Naming it with
+  `--network` sweeps it on its own.
 - `arp_scan("172.17.0.0/16")` still raises `IPScoutSweepTooWideError`: naming a network explicitly
   is a request, and one that cannot be honoured is refused rather than quietly ignored. Name a
   narrower CIDR inside it instead.
@@ -410,7 +437,7 @@ Exit codes are independent of the output format:
 |------|---------------------------------------------------------------------------|
 | 0    | Reached, or the command otherwise succeeded.                              |
 | 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.   |
-| 2    | Error. A bad name, a missing permission, or a capability this host lacks. |
+| 2    | Error. A bad name, a missing permission, a capability this host lacks, or a malformed command line. |
 
 `ping-many` exits 1 only when no target at all was reached.
 

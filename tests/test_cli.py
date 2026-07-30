@@ -4,8 +4,6 @@ The JSON surface is asserted as a contract rather than by matching strings, so
 these keep their meaning when any message is reworded.
 """
 
-# pyright: reportPrivateUsage=false
-
 from __future__ import annotations
 
 import ipaddress
@@ -160,11 +158,43 @@ def test_an_escaping_failure_keeps_the_shape_that_was_asked_for(*, bare: bool, e
     # Anything getting past a command's own guard is reported by main()'s
     # handler, which reads the shape from argv because there may be no Click
     # context left to ask. Bare mode used to fall through to the envelope here.
-    cli_module._exception_handler(as_json=True, bare=bare)(RuntimeError("boom"))
+    cli_module._exception_handler(as_json=True, bare=bare)(RuntimeError("boom"))  # pyright: ignore[reportPrivateUsage] - the handler under test has no public caller taking an exception
     payload = json.loads(capsys.readouterr().out)
 
     assert ("ok" in payload) is envelope
     assert "boom" in json.dumps(payload)
+
+
+def test_a_network_without_a_scan_is_refused_rather_than_dropped() -> None:
+    # Dropping the flag answered from the cache while the caller believed that
+    # network had been swept, and reported ok: true for it. Driven through
+    # main(), because a usage error is serialised by the handler main() installs
+    # and never reaches the envelope under CliRunner's non-standalone mode.
+    import contextlib
+    import io
+
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        code = main(["--json", "find-ip", "--network", "10.0.0.0/8", "aa:bb:cc:dd:ee:ff"])
+    payload = json.loads(stream.getvalue())
+
+    assert code == EXIT_ERROR
+    assert payload["ok"] is False
+    assert "--scan" in payload["error"]["message"]
+
+
+def test_a_malformed_invocation_exits_with_the_error_code() -> None:
+    # Exit 1 is documented as "not reached", so returning it for a usage error
+    # tells a script the host went silent when the real problem was the command.
+    import contextlib
+    import io
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        both_families = main(["resolve", "localhost", "-4", "-6"])
+        both_shapes = main(["--json", "--json-bare", "info"])
+        network_without_scan = main(["find-ip", "--network", "10.0.0.0/8", "aa:bb:cc:dd:ee:ff"])
+
+    assert (both_families, both_shapes, network_without_scan) == (EXIT_ERROR, EXIT_ERROR, EXIT_ERROR)
 
 
 def test_a_human_failure_does_not_name_a_python_class(runner: CliRunner) -> None:
@@ -201,7 +231,7 @@ def test_a_covered_sweep_reports_nothing_skipped(runner: CliRunner) -> None:
 def test_a_skipped_network_is_noted_on_stderr_never_in_the_parsed_stream(capsys: pytest.CaptureFixture[str]) -> None:
     # stdout is what a caller parses, so a note about coverage cannot go there
     # even in human mode, where it would still precede a table.
-    cli_module._note_skipped((ipaddress.IPv4Network("172.17.0.0/16"),))
+    cli_module._note_skipped((ipaddress.IPv4Network("172.17.0.0/16"),))  # pyright: ignore[reportPrivateUsage] - the stderr channel is only reachable through _emit, which also writes stdout
     captured = capsys.readouterr()
 
     assert "172.17.0.0/16" in captured.err
