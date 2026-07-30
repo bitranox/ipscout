@@ -1,7 +1,7 @@
 {
   "name": "ipscout",
   "description": "Ping hosts, sweep a subnet, measure round-trip time and packet loss, run a traceroute, scan ports, look up MAC addresses and the neighbour cache, query routes and the default gateway, list interfaces and subnets, send wake-on-LAN and find the path MTU - from Python or the shell, as an ordinary user with no root or Administrator rights and without shelling out. Ships the python-network-probe skill: the library API, the CLI with its JSON envelope, the raise-on-setup-problems error contract, and the measured platform limits.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": {
     "name": "bitranox"
   },
