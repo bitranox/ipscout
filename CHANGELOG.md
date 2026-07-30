@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-30
+
 ### Changed
 
 - **A default sweep no longer fails over one oversized subnet.** `arp_scan()` and
