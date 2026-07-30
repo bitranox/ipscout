@@ -26,7 +26,7 @@ name = "ipscout"
 #: Human-readable summary shown in CLI help output.
 title = "Ping, traceroute and local-network inspection in pure Python - no subprocess, no admin rights"
 #: Current release version pulled from ``pyproject.toml`` by automation.
-version = "1.1.0"
+version = "1.2.1"
 #: Repository homepage presented to users.
 homepage = "https://github.com/bitranox/ipscout"
 #: Author attribution surfaced in CLI output.
