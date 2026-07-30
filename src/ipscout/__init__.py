@@ -41,6 +41,9 @@ from .errors import (
     IPScoutError,
     IPScoutPermissionError,
     IPScoutResolutionError,
+    IPScoutSweepError,
+    IPScoutSweepIncompleteError,
+    IPScoutSweepTooWideError,
     IPScoutUnsupportedError,
 )
 from .factory import icmp_available
@@ -66,6 +69,7 @@ from .models import (
     RouteInfo,
     ScanMethod,
     SubnetInfo,
+    SweepScope,
     TraceHop,
 )
 from .mtu import path_mtu
@@ -73,7 +77,7 @@ from .neighbours import get_mac_address, lookup_mac, neighbours, normalise_mac
 from .portscan import ascan_ports, parse_ports, scan_ports
 from .resolve import resolve, reverse_dns
 from .routes import default_gateway, query_route
-from .scan import arp_scan, find_ip_by_mac, local_networks
+from .scan import arp_scan, find_ip_by_mac, local_networks, sweep_scope
 from .subnet import subnet_info
 from .traceroute import atrace_path, atraceroute, trace_path, traceroute
 from .wol import wake_on_lan
@@ -85,6 +89,9 @@ __all__ = [
     "IPScoutError",
     "IPScoutPermissionError",
     "IPScoutResolutionError",
+    "IPScoutSweepError",
+    "IPScoutSweepIncompleteError",
+    "IPScoutSweepTooWideError",
     "IPScoutUnsupportedError",
     "Interface",
     "InterfaceAddress",
@@ -103,6 +110,7 @@ __all__ = [
     "RouteInfo",
     "ScanMethod",
     "SubnetInfo",
+    "SweepScope",
     "TraceHop",
     "ais_reachable",
     "aping",
@@ -131,6 +139,7 @@ __all__ = [
     "reverse_dns",
     "scan_ports",
     "subnet_info",
+    "sweep_scope",
     "trace_path",
     "traceroute",
     "wake_on_lan",

@@ -16,7 +16,6 @@ import contextlib
 import ctypes
 import ipaddress
 import socket
-from typing import Any
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily, Neighbour, NeighbourState
@@ -124,7 +123,7 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
     """
 
     try:
-        library: Any = iphlpapi()
+        library = iphlpapi()
     except IPScoutUnsupportedError:
         return ()
 
@@ -172,7 +171,7 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
         library.FreeMibTable(table)
 
 
-def _resolve_ipv6(library: Any, ip: str) -> str | None:  # pragma: no cover - Windows only
+def _resolve_ipv6(library: ctypes.CDLL, ip: str) -> str | None:  # pragma: no cover - Windows only
     """Resolve an IPv6 neighbour through ResolveIpNetEntry2.
 
     Unlike SendARP this needs elevation, so a refusal here is reported as a
@@ -223,7 +222,7 @@ def resolve_active(ip: str) -> str | None:  # pragma: no cover - Windows only
     """
 
     try:
-        library: Any = iphlpapi()
+        library = iphlpapi()
     except IPScoutUnsupportedError:
         return None
 

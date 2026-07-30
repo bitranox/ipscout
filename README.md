@@ -152,6 +152,7 @@ import ipscout
 ipscout.lookup_mac("8.8.8.8")  # the router's address, labelled NEXT_HOP
 ipscout.find_ip_by_mac(mac, scan=True)  # sweep, then search the refreshed cache
 ipscout.arp_scan("192.168.1.0/24")  # every hardware address on a subnet
+ipscout.sweep_scope()  # what a default sweep covers, and what is too wide for it
 ipscout.default_gateway()  # and query_route() for any destination
 ipscout.subnet_info()  # addressing, gateway, stored DHCP facts
 ipscout.scan_ports(host, "22,80,8000-8100")
@@ -161,7 +162,10 @@ ipscout.wake_on_lan(mac, broadcast="192.168.1.255")
 
 A MAC address does not survive a router hop, so `lookup_mac` puts the scope in the answer and
 `get_mac_address` returns `None` for anything routed rather than passing off the gateway's as the
-host's. Full worked examples are in [docs/usage.md](docs/usage.md).
+host's. A sweep with no network given covers every subnet this host is attached to that fits inside
+4096 addresses, and names the ones that do not - a container bridge on a `/16` is left out rather
+than cancelling the sweep, and a search that matched nothing while a network went uncovered says so
+instead of reporting "not found". Full worked examples are in [docs/usage.md](docs/usage.md).
 
 ## Output for machines
 
@@ -190,7 +194,8 @@ ipscout --json ping 127.0.0.1 -c 1
     "packets_lost_percentage": 0,
     "str_result": "[127.0.0.1] pinged 1 times, min: 0.07ms, avg: 0.07ms, max: 0.07ms, 0% Packet loss"
   },
-  "error": null
+  "error": null,
+  "skipped": []
 }
 ```
 
@@ -208,7 +213,8 @@ ipscout --json ping nothing.invalid
   "error": {
     "type": "IPScoutResolutionError",
     "message": "cannot resolve 'nothing.invalid': Name or service not known"
-  }
+  },
+  "skipped": []
 }
 ```
 

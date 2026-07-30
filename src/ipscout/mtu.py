@@ -22,7 +22,6 @@ from __future__ import annotations
 import contextlib
 import socket
 import sys
-from typing import Any
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily
@@ -103,7 +102,7 @@ def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
     )
 
     try:
-        library: Any = iphlpapi()
+        library = iphlpapi()
     except IPScoutUnsupportedError:
         return None
 

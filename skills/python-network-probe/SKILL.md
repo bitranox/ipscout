@@ -32,27 +32,28 @@ Python 3.10+.
 
 ## Quick reference
 
-| Task                        | Call                                                                 |
-|-----------------------------|----------------------------------------------------------------------|
-| Ping one host               | `ping("1.1.1.1", 4)`                                                 |
-| Sweep many, concurrently    | `ping_many(hosts, concurrency=64)`                                   |
-| Is it up, by any means      | `is_reachable(host)`                                                 |
-| Path to a host              | `traceroute(host)`                                                   |
-| Scan ports                  | `scan_ports(host, "22,80,8000-8100")`                                |
-| MAC of an address           | `lookup_mac(ip)`, `get_mac_address(ip)`                              |
-| Which host holds a MAC      | `find_ip_by_mac(mac, scan=True)`                                     |
-| Neighbour / ARP cache       | `neighbours()`, `arp_scan(network)`                                  |
-| Default route, any route    | `default_gateway()`, `query_route(ip)`                               |
-| Interfaces and subnets      | `local_interfaces()`, `subnet_info()`, `local_networks()`            |
-| Wake a sleeping host        | `wake_on_lan(mac)`                                                   |
-| Largest unfragmented packet | `path_mtu(host)`                                                     |
-| What can this host do       | `icmp_available()`                                                   |
-| Package metadata            | `print_info()`                                                       |
-| Name to address, and back   | `resolve(name)`, `reverse_dns(ip)`                                   |
-| Compare two hardware addresses | `normalise_mac(written)`                                           |
-| Parse a port specification  | `parse_ports("22,80,8000-8100")`                                     |
-| Trace over your own transport | `trace_path(transport, ...)`, `atrace_path(...)`                   |
-| async equivalents           | `aping`, `aping_many`, `ais_reachable`, `atraceroute`, `ascan_ports` |
+| Task                           | Call                                                                 |
+|--------------------------------|----------------------------------------------------------------------|
+| Ping one host                  | `ping("1.1.1.1", 4)`                                                 |
+| Sweep many, concurrently       | `ping_many(hosts, concurrency=64)`                                   |
+| Is it up, by any means         | `is_reachable(host)`                                                 |
+| Path to a host                 | `traceroute(host)`                                                   |
+| Scan ports                     | `scan_ports(host, "22,80,8000-8100")`                                |
+| MAC of an address              | `lookup_mac(ip)`, `get_mac_address(ip)`                              |
+| Which host holds a MAC         | `find_ip_by_mac(mac, scan=True)`                                     |
+| Neighbour / ARP cache          | `neighbours()`, `arp_scan(network)`                                  |
+| What a sweep will cover        | `sweep_scope()` -> `SweepScope(networks, skipped, complete)`         |
+| Default route, any route       | `default_gateway()`, `query_route(ip)`                               |
+| Interfaces and subnets         | `local_interfaces()`, `subnet_info()`, `local_networks()`            |
+| Wake a sleeping host           | `wake_on_lan(mac)`                                                   |
+| Largest unfragmented packet    | `path_mtu(host)`                                                     |
+| What can this host do          | `icmp_available()`                                                   |
+| Package metadata               | `print_info()`                                                       |
+| Name to address, and back      | `resolve(name)`, `reverse_dns(ip)`                                   |
+| Compare two hardware addresses | `normalise_mac(written)`                                             |
+| Parse a port specification     | `parse_ports("22,80,8000-8100")`                                     |
+| Trace over your own transport  | `trace_path(transport, ...)`, `atrace_path(...)`                     |
+| async equivalents              | `aping`, `aping_many`, `ais_reachable`, `atraceroute`, `ascan_ports` |
 
 ```python
 import ipscout
@@ -103,6 +104,9 @@ them, and `AddressFamily.IPV4` / `IPV6` is what the `family=` argument takes.
 - An unresolvable name, missing permission, or nonsensical argument raises
   `IPScoutResolutionError`, `IPScoutPermissionError`, `IPScoutUnsupportedError`
   or `ValueError`.
+- A sweep that cannot cover the ground it was asked about raises
+  `IPScoutSweepTooWideError` or `IPScoutSweepIncompleteError`, both also
+  `ValueError`.
 
 That split is the point: a permissions problem and a dead host need different
 responses, so they arrive through different channels.
@@ -160,10 +164,14 @@ Two rules these follow, worth relying on:
 
 ## For machine consumers
 
-`--json` emits `{"ok": ..., "command": ..., "data": ...}`; a failure is
-`{"ok": false, ..., "error": {"type": ..., "message": ...}}` rather than a
-traceback. `--json-bare` drops the envelope for `jq`. Exit codes are `0`
-reached, `1` not reached, `2` error, independent of output format.
+`--json` emits `{"ok": ..., "command": ..., "data": ..., "skipped": [...]}`; a
+failure is `{"ok": false, ..., "error": {"type": ..., "message": ...}}` rather
+than a traceback. `--json-bare` drops the envelope for `jq`, and reports a
+failure as the bare `{"type": ..., "message": ...}` so the pipeline still gets
+JSON. `skipped` names any network a sweep could not cover, which is how a
+partial answer is told from a complete one; the same note goes to stderr, never
+to the stream you parse. Exit codes are `0` reached, `1` not reached, `2`
+error, independent of output format.
 
 ## What it will not do, and why
 
@@ -209,6 +217,11 @@ ICMP round trip and a filtered port is not a dead host.
   raise rather than deadlocking - `await aping_many(...)` there.
 - Reading `time_avg_ms` without checking `reached`. Nothing received gives the
   `-1.0` sentinel, not `0.0`, and averaging that across a sweep is nonsense.
-- Expecting `arp_scan()` with no argument to work anywhere. It refuses a sweep
-  wider than 4096 addresses and names the network at fault - a container bridge
-  on a `/16` is enough to trip it. Pass a narrower network.
+- Reading an empty `find_ip_by_mac(..., scan=True)` as "that host is gone"
+  without checking coverage. A sweep with no network given covers every subnet
+  this host is attached to that fits inside 4096 addresses and skips the rest,
+  so a container bridge on a `/16` goes uncovered. A search that matched
+  nothing over partial ground raises `IPScoutSweepIncompleteError` rather than
+  answering; a search that found something can still be short an address held
+  on the skipped network. Ask `sweep_scope()` when it matters, and name a
+  narrower CIDR to cover a bridge.

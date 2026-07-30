@@ -21,7 +21,6 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import socket
-from typing import Any
 
 from .errors import IPScoutUnsupportedError
 from .models import RouteInfo
@@ -95,7 +94,7 @@ def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | N
         return None
 
     try:
-        library: Any = iphlpapi()
+        library = iphlpapi()
     except IPScoutUnsupportedError:
         return None
 
@@ -137,7 +136,7 @@ def default_gateway(family: int = socket.AF_INET) -> RouteInfo | None:  # pragma
     """
 
     try:
-        library: Any = iphlpapi()
+        library = iphlpapi()
     except IPScoutUnsupportedError:
         return None
 

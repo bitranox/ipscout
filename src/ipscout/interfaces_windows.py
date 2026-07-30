@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import ctypes
 import socket
-from typing import Any
 
 from .models import Interface, InterfaceAddress
 from .winapi import iphlpapi
@@ -135,7 +134,7 @@ def _sockaddr_text(address: _SocketAddress) -> tuple[int, str] | None:
     return None
 
 
-def _mac_text(adapter: Any) -> str | None:
+def _mac_text(adapter: _IpAdapterAddresses) -> str | None:
     """Return the adapter's hardware address, or None when it has none."""
 
     length = int(adapter.PhysicalAddressLength)
@@ -197,7 +196,7 @@ def list_interfaces() -> list[Interface]:  # pragma: no cover - Windows only
     return interfaces
 
 
-def _to_interface(adapter: Any) -> Interface:  # pragma: no cover - Windows only
+def _to_interface(adapter: _IpAdapterAddresses) -> Interface:  # pragma: no cover - Windows only
     """Build the public record for one adapter."""
 
     ipv4: list[InterfaceAddress] = []

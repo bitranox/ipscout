@@ -4,8 +4,11 @@ The JSON surface is asserted as a contract rather than by matching strings, so
 these keep their meaning when any message is reworded.
 """
 
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
+import ipaddress
 import json
 from typing import Any
 
@@ -13,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 import ipscout
+from ipscout import cli as cli_module
 from ipscout.cli import EXIT_ERROR, EXIT_NOT_REACHED, EXIT_OK, cli, main
 
 pytestmark = pytest.mark.os_agnostic
@@ -131,6 +135,98 @@ def test_a_failure_is_serialised_as_data_not_a_traceback(runner: CliRunner) -> N
     assert payload["error"]["type"] == "IPScoutResolutionError"
     assert NEVER_RESOLVES in payload["error"]["message"]
     assert "Traceback" not in result.output
+
+
+def test_a_failure_in_bare_mode_is_still_json() -> None:
+    # Bare mode promised the payload at top level, and a caller piping it into
+    # jq gets that on every success. A line of prose on the one path that
+    # matters most breaks the pipeline exactly when it is reporting a problem.
+    import contextlib
+    import io
+
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        code = main(["--json-bare", "ping", NEVER_RESOLVES])
+    payload = json.loads(stream.getvalue())
+
+    assert code == EXIT_ERROR
+    assert payload["type"] == "IPScoutResolutionError"
+    assert NEVER_RESOLVES in payload["message"]
+    assert "ok" not in payload, "bare mode drops the envelope on failure too"
+
+
+@pytest.mark.parametrize(("bare", "envelope"), [(True, False), (False, True)])
+def test_an_escaping_failure_keeps_the_shape_that_was_asked_for(*, bare: bool, envelope: bool, capsys: pytest.CaptureFixture[str]) -> None:
+    # Anything getting past a command's own guard is reported by main()'s
+    # handler, which reads the shape from argv because there may be no Click
+    # context left to ask. Bare mode used to fall through to the envelope here.
+    cli_module._exception_handler(as_json=True, bare=bare)(RuntimeError("boom"))
+    payload = json.loads(capsys.readouterr().out)
+
+    assert ("ok" in payload) is envelope
+    assert "boom" in json.dumps(payload)
+
+
+def test_a_human_failure_does_not_name_a_python_class(runner: CliRunner) -> None:
+    # The message already names the remedy. Prefixing it with the exception
+    # type puts an implementation detail in a sentence written for a person.
+    output = _invoke(runner, ["find-ip", "nonsense"]).output
+
+    assert "not a hardware address" in output
+    assert "ValueError" not in output
+    assert "IPScout" not in output
+
+
+def test_a_refused_sweep_reports_the_uncovered_network_as_data(runner: CliRunner) -> None:
+    # A reader must be able to tell full coverage from partial without parsing
+    # the message. Nothing is swept here, so no probe leaves the host.
+    payload = json.loads(_invoke(runner, ["--json", "arp-scan", "--network", "172.17.0.0/16"]).output)
+
+    assert payload["ok"] is False
+    assert payload["command"] == "arp-scan"
+    assert payload["error"]["type"] == "IPScoutSweepTooWideError"
+    assert payload["skipped"] == ["172.17.0.0/16"]
+
+
+def test_a_covered_sweep_reports_nothing_skipped(runner: CliRunner) -> None:
+    if not ipscout.icmp_available():
+        pytest.skip("unprivileged ICMP unavailable on this host")
+
+    payload = json.loads(_invoke(runner, ["--json", "arp-scan", "--network", "127.0.0.0/30"]).output)
+
+    assert payload["ok"] is True
+    assert payload["skipped"] == []
+
+
+def test_a_skipped_network_is_noted_on_stderr_never_in_the_parsed_stream(capsys: pytest.CaptureFixture[str]) -> None:
+    # stdout is what a caller parses, so a note about coverage cannot go there
+    # even in human mode, where it would still precede a table.
+    cli_module._note_skipped((ipaddress.IPv4Network("172.17.0.0/16"),))
+    captured = capsys.readouterr()
+
+    assert "172.17.0.0/16" in captured.err
+    assert captured.out == ""
+
+
+def test_a_find_that_swept_reports_its_own_coverage(runner: CliRunner) -> None:
+    # The address list cannot say whether a network went unprobed, so the
+    # report carries the scope: this is what survives --json-bare, where there
+    # is no envelope to hold it.
+    if not ipscout.icmp_available():
+        pytest.skip("unprivileged ICMP unavailable on this host")
+
+    payload = json.loads(_invoke(runner, ["--json-bare", "find-ip", "--scan", "--network", "127.0.0.0/30", "aa:bb:cc:dd:ee:ff"]).output)
+
+    assert payload["scope"]["networks"] == ["127.0.0.0/30"]
+    assert payload["scope"]["complete"] is True
+
+
+def test_a_find_that_only_read_the_cache_claims_no_coverage(runner: CliRunner) -> None:
+    # No sweep means nothing to report about coverage, which is different from
+    # reporting complete coverage.
+    payload = json.loads(_invoke(runner, ["--json-bare", "find-ip", "aa:bb:cc:dd:ee:ff"]).output)
+
+    assert payload["scope"] is None
 
 
 def test_enums_are_serialised_as_their_values(runner: CliRunner) -> None:

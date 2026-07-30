@@ -34,14 +34,20 @@ from __future__ import annotations
 
 import enum
 import statistics
+from ipaddress import IPv4Network, IPv6Network, ip_network
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, computed_field
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 __all__ = [
     "AddressFamily",
     "CapabilityReport",
     "CommandName",
     "FindIpReport",
+    "IPNetwork",
     "Interface",
     "InterfaceAddress",
     "JsonEnvelope",
@@ -64,9 +70,16 @@ __all__ = [
     "RouteInfo",
     "ScanMethod",
     "SubnetInfo",
+    "SweepScope",
     "TraceHop",
     "WakeReport",
 ]
+
+#: An IPv4 or IPv6 network, as the standard library models it. Carried as the
+#: parsed type rather than as CIDR text: a sweep asks these objects for their
+#: size and membership, and Pydantic still writes them to the wire as the same
+#: CIDR string while rejecting one that is not a network at all.
+IPNetwork = IPv4Network | IPv6Network
 
 #: Reported for "no timing data available". A distinct sentinel rather than
 #: 0.0, which would average into a summary as a real measurement.
@@ -484,12 +497,86 @@ class WakeReport(_Frozen):
     sent: bool = True
 
 
+class SweepScope(_Frozen):
+    """Which networks a sweep covers, and which it had to leave out.
+
+    Coverage is data rather than a comment, because a sweep that skipped a
+    network answers a smaller question than the caller asked: "nothing found"
+    over part of the ground is not "nothing there". Both fields hold parsed
+    networks, which is what a sweep needs to ask for their size and membership,
+    and which cross the output boundary as the same CIDR text.
+
+    Examples:
+        >>> scope = SweepScope(networks=("192.168.1.0/24",), skipped=("172.17.0.0/16",))
+        >>> scope.complete
+        False
+        >>> scope.model_dump(mode="json")["skipped"]
+        ['172.17.0.0/16']
+
+    """
+
+    #: The networks the sweep probes.
+    networks: tuple[IPNetwork, ...] = ()
+    #: The networks left out for holding more addresses than the sweep bound.
+    skipped: tuple[IPNetwork, ...] = ()
+
+    @classmethod
+    def from_networks(cls, networks: Iterable[str | IPNetwork], *, limit: int) -> SweepScope:
+        """Return the scope a sweep of ``networks`` bounded by ``limit`` covers.
+
+        Args:
+            networks: The candidate networks, as CIDR text or network objects.
+            limit: The most addresses one network may hold to be swept.
+
+        Returns:
+            The candidates split in two, each side keeping the order it came
+            in, so a message naming them reads in the order the caller sees
+            elsewhere.
+
+        Examples:
+            >>> scope = SweepScope.from_networks(["192.168.1.0/24", "172.17.0.0/16"], limit=4096)
+            >>> scope.networks, scope.skipped
+            ((IPv4Network('192.168.1.0/24'),), (IPv4Network('172.17.0.0/16'),))
+
+        """
+
+        covered: list[IPNetwork] = []
+        skipped: list[IPNetwork] = []
+        for candidate in networks:
+            # Text is parsed once here; a network object arrives parsed already.
+            network = candidate if isinstance(candidate, (IPv4Network, IPv6Network)) else ip_network(candidate, strict=False)
+            target = skipped if network.num_addresses > limit else covered
+            target.append(network)
+        return cls(networks=tuple(covered), skipped=tuple(skipped))
+
+    @computed_field
+    @property
+    def complete(self) -> bool:
+        """Return whether every candidate network was covered.
+
+        A computed field rather than a plain property so it survives into
+        ``model_dump()``: a consumer reading only the JSON would otherwise have
+        to rediscover the rule that an empty ``skipped`` means full coverage.
+        """
+
+        return not self.skipped
+
+
 class FindIpReport(_Frozen):
-    """The addresses found holding one hardware address."""
+    """The addresses found holding one hardware address.
+
+    Attributes:
+        scope: What the sweep covered, or ``None`` when no sweep was asked for
+            and only the existing cache was read. With a non-empty
+            ``scope.skipped`` the address list can be short one address, since
+            the same hardware address may hold one on a network left out.
+
+    """
 
     mac: str
     addresses: tuple[str, ...] = ()
     scanned: bool = False
+    scope: SweepScope | None = None
 
 
 class CapabilityReport(_Frozen):
@@ -550,6 +637,13 @@ class JsonEnvelope(_Frozen):
     failure from an exit code they may not have captured, and the command name
     so a transcript of several calls stays unambiguous.
 
+    Attributes:
+        skipped: Networks a sweeping command could not cover. It sits on the
+            envelope rather than only inside ``data`` because a command whose
+            payload is a bare list - ``arp-scan`` - has nowhere to carry it,
+            and a reader must be able to tell full coverage from partial in
+            every command that can have either.
+
     Examples:
         >>> JsonEnvelope(ok=True, command=CommandName.INFO, data={"a": 1}).ok
         True
@@ -562,3 +656,4 @@ class JsonEnvelope(_Frozen):
     command: CommandName | None = None
     data: object | None = None
     error: JsonError | None = None
+    skipped: tuple[IPNetwork, ...] = ()

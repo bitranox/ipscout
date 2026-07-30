@@ -15,6 +15,8 @@ Contents:
     IPScoutPermissionError: The process lacks a required privilege.
     IPScoutResolutionError: A target name or family could not be resolved.
     IPScoutUnsupportedError: No backend exists for this platform or feature.
+    IPScoutSweepError: A sweep cannot be run as asked, in two flavours -
+        IPScoutSweepTooWideError and IPScoutSweepIncompleteError.
 
 Note:
     Names carry the ``IPScout`` prefix rather than reading ``PermissionError``
@@ -29,6 +31,9 @@ __all__ = [
     "IPScoutError",
     "IPScoutPermissionError",
     "IPScoutResolutionError",
+    "IPScoutSweepError",
+    "IPScoutSweepIncompleteError",
+    "IPScoutSweepTooWideError",
     "IPScoutUnsupportedError",
 ]
 
@@ -74,6 +79,52 @@ class IPScoutResolutionError(IPScoutError):
 
     Examples:
         >>> issubclass(IPScoutResolutionError, IPScoutError)
+        True
+
+    """
+
+
+class IPScoutSweepError(IPScoutError, ValueError):
+    """A sweep cannot be run as the caller asked for it.
+
+    Also a ``ValueError`` deliberately: the sweeping callables have documented
+    ``Raises: ValueError`` since their first release, so a caller written
+    against that contract keeps working while a caller who prefers the library
+    hierarchy can catch :class:`IPScoutError` instead.
+
+    Examples:
+        >>> issubclass(IPScoutSweepError, (IPScoutError, ValueError))
+        True
+
+    """
+
+
+class IPScoutSweepTooWideError(IPScoutSweepError):
+    """Nothing was left to sweep once the address bound was applied.
+
+    Either the network the caller named is wider than the bound, or every
+    network this host is attached to is. The message names each one and its
+    address count, because the remedy is to pass a narrower network and the
+    caller cannot choose one without knowing which was refused.
+
+    Examples:
+        >>> issubclass(IPScoutSweepTooWideError, IPScoutSweepError)
+        True
+
+    """
+
+
+class IPScoutSweepIncompleteError(IPScoutSweepError):
+    """The sweep covered part of the ground and found nothing there.
+
+    Raised instead of reporting "not found": with a network left unswept, an
+    empty answer says only that nothing was found where the sweep reached,
+    which is not the same statement and would read as the stronger one. A
+    sweep that *did* find something reports the gap as data rather than
+    raising, since the answer stands on its own.
+
+    Examples:
+        >>> issubclass(IPScoutSweepIncompleteError, IPScoutSweepError)
         True
 
     """

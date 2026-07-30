@@ -9,17 +9,18 @@ that go wrong silently.
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 import struct
 
 import pytest
 
 import ipscout
-from ipscout import bsdroute
+from ipscout import bsdroute, scan
 from ipscout import neighbours_linux as linux
 from ipscout import neighbours_macos as macos
 from ipscout import neighbours_windows as windows
-from ipscout.models import AddressFamily, MacScope, Neighbour, NeighbourState
+from ipscout.models import AddressFamily, MacScope, Neighbour, NeighbourState, SweepScope
 from ipscout.neighbours import resolve_active
 
 pytestmark = pytest.mark.os_agnostic
@@ -120,11 +121,109 @@ def test_a_known_address_is_found_however_it_is_written() -> None:
 
 @pytest.mark.os_agnostic
 def test_a_sweep_too_wide_to_be_reasonable_names_the_network_at_fault() -> None:
-    # The default set comes from this host's own interfaces, so a container
-    # bridge on a /16 is enough to trip it. An error that does not say which
-    # network is at fault leaves the caller with nothing to act on.
+    # Nothing is left to sweep here, which is a refusal rather than a partial
+    # answer. An error that does not say which network is at fault leaves the
+    # caller with nothing to act on.
+    with pytest.raises(ipscout.IPScoutSweepTooWideError, match=r"holds \d+ addresses"):
+        ipscout.arp_scan("10.0.0.0/8")
+
+
+@pytest.mark.os_agnostic
+def test_the_sweep_refusal_is_still_a_value_error() -> None:
+    # It has raised ValueError since the first release and the docstring says
+    # so, so narrowing it to the library hierarchy alone would break a caller
+    # who catches what was documented.
     with pytest.raises(ValueError, match=r"holds \d+ addresses"):
         ipscout.arp_scan("10.0.0.0/8")
+
+
+# --------------------------------------------------------------------------
+# What a sweep covers, and what it admits it does not
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_one_oversized_network_does_not_cancel_the_ones_that_fit() -> None:
+    # The report this fixes: a host with a container bridge on a /16 could not
+    # run the default sweep at all, though the target sat on the /24 next to
+    # it. The oversized network is left out and named, not silently dropped.
+    scope = SweepScope.from_networks(["192.168.1.0/24", "172.17.0.0/16"], limit=4096)
+
+    assert scope.networks == (ipaddress.IPv4Network("192.168.1.0/24"),)
+    assert scope.skipped == (ipaddress.IPv4Network("172.17.0.0/16"),)
+    assert scope.complete is False
+
+
+@pytest.mark.os_agnostic
+def test_a_scope_that_covers_everything_says_so() -> None:
+    scope = SweepScope.from_networks(["192.168.1.0/24", "10.1.2.0/25"], limit=4096)
+
+    assert scope.skipped == ()
+    assert scope.complete is True
+
+
+@pytest.mark.os_agnostic
+def test_the_bound_is_the_address_count_not_the_prefix() -> None:
+    # A /20 fits in 4096 addresses exactly; a /19 does not. Comparing prefix
+    # lengths instead would put the boundary in a different place per family.
+    assert SweepScope.from_networks(["10.0.0.0/20"], limit=4096).complete is True
+    assert SweepScope.from_networks(["10.0.0.0/19"], limit=4096).skipped == (ipaddress.IPv4Network("10.0.0.0/19"),)
+
+
+@pytest.mark.os_agnostic
+def test_an_explicit_network_is_reported_as_the_whole_scope() -> None:
+    assert ipscout.sweep_scope("192.168.1.0/24").networks == (ipaddress.IPv4Network("192.168.1.0/24"),)
+    assert ipscout.sweep_scope("172.17.0.0/16").skipped == (ipaddress.IPv4Network("172.17.0.0/16"),)
+
+
+@pytest.mark.os_agnostic
+def test_the_default_scope_never_offers_a_network_it_cannot_sweep() -> None:
+    scope = ipscout.sweep_scope()
+
+    assert all(item.num_addresses <= 4096 for item in scope.networks), scope
+
+
+@pytest.mark.os_agnostic
+def test_the_default_set_leaves_out_what_holds_nobody_to_find() -> None:
+    # Loopback finds only this host; a /32 holds only this host's own address
+    # and a /31 adds one point-to-point peer. Probing them is work with no
+    # possible answer, and a /32 tunnel address is on most modern hosts.
+    for network in ipscout.local_networks():
+        assert not network.is_loopback, network
+        assert network.prefixlen < 31, network
+
+
+@pytest.mark.os_agnostic
+def test_a_search_that_swept_partially_and_found_nothing_refuses_to_answer() -> None:
+    # "Not found" would claim ground the sweep never reached. The distinction
+    # matters most here, because this is the function used to resolve a MAC to
+    # an address, and a wrong empty answer reads as "that host is gone". The
+    # refusal is asked directly rather than through a real sweep: the only way
+    # to reach it end to end is a host that happens to have an oversized
+    # network, and sweeping whatever a CI runner is attached to is not a test.
+    partial = SweepScope.from_networks(["192.168.1.0/24", "172.17.0.0/16"], limit=4096)
+
+    with pytest.raises(ipscout.IPScoutSweepIncompleteError, match=r"172\.17\.0\.0/16"):
+        scan._refuse_a_partial_miss("aa:bb:cc:dd:ee:ff", partial)
+
+
+@pytest.mark.os_agnostic
+def test_a_search_that_swept_everything_and_found_nothing_answers_nothing() -> None:
+    # The other half of the rule: with full coverage an empty answer is a real
+    # answer and must not be turned into an error.
+    complete = SweepScope.from_networks(["192.168.1.0/24"], limit=4096)
+
+    assert scan._refuse_a_partial_miss("aa:bb:cc:dd:ee:ff", complete) is None
+
+
+@pytest.mark.os_agnostic
+def test_a_complete_sweep_that_finds_nothing_reports_an_empty_list() -> None:
+    # End to end over loopback, which is two addresses and covered whole, so
+    # the answer is trustworthy and comes back as data rather than a refusal.
+    if not ipscout.icmp_available():
+        pytest.skip("unprivileged ICMP unavailable on this host")
+
+    assert ipscout.find_ip_by_mac("aa:bb:cc:dd:ee:ff", scan=True, network="127.0.0.0/30") == []
 
 
 # --------------------------------------------------------------------------

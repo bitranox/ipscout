@@ -257,20 +257,46 @@ ipscout.find_ip_by_mac("dc:b2:2f:44:34:59", scan=True)
 Any written form compares equal - `aa:bb:cc:dd:ee:ff`, `AA-BB-CC-DD-EE-FF` and `aabb.ccdd.eeff` are
 the same address.
 
-`arp_scan()` with no argument sweeps every subnet this host is attached to, and refuses a sweep
-wider than 4096 addresses, naming the network at fault. A container bridge on a `/16` is enough to
-trip it, so pass a narrower network on such a host.
+`arp_scan()` with no argument sweeps every subnet this host is attached to that fits inside 4096
+addresses. A container bridge on a `/16` holds far more than that, so it is left out of the sweep
+rather than cancelling it - and it is named, because a result assembled from part of the ground is
+not the same answer:
+
+```python
+ipscout.sweep_scope()
+# SweepScope(networks=(IPv4Network('192.168.168.0/24'),), skipped=(IPv4Network('172.17.0.0/16'),), complete=False)
+```
+
+The fields hold parsed networks, so you can ask one for its size or test membership without
+re-parsing text. They still cross the JSON boundary as the same CIDR strings, and a value that is
+not a network is refused when the record is built.
+
+Ask that before sweeping and you know what the answer will and will not cover. Two consequences
+worth knowing:
+
+- `arp_scan("172.17.0.0/16")` still raises `IPScoutSweepTooWideError`: naming a network explicitly
+  is a request, and one that cannot be honoured is refused rather than quietly ignored. Name a
+  narrower CIDR inside it instead.
+- `find_ip_by_mac(mac, scan=True)` raises `IPScoutSweepIncompleteError` when it matched nothing and
+  a network was skipped. "Not found" would claim ground the sweep never reached. A search that does
+  find something returns it, though the list can be short an address that hardware holds on the
+  network left out.
 
 ## Routes and subnets
 
 ```python
 ipscout.default_gateway()  # RouteInfo(gateway='192.168.1.1', interface='eth0', ...)
 ipscout.query_route("8.8.8.8")  # how this host would reach one address
-ipscout.local_networks()  # the IPv4 subnets it is attached to
+ipscout.local_networks()  # the IPv4 subnets a default sweep covers
 
 for subnet in ipscout.subnet_info():
     subnet.interface, subnet.address, subnet.network, subnet.broadcast, subnet.gateway, subnet.mtu
 ```
+
+`local_networks()` is the sweep view rather than the full picture: it leaves out loopback, where a
+sweep would find only this host, and any `/31` or `/32`, which hold this host plus at most one
+point-to-point peer. `subnet_info()` still reports those addresses, and naming such a network
+explicitly still sweeps it.
 
 `subnet_info()` sends no DHCP traffic. The addressing comes from the same system calls the interface
 listing makes, and the DHCP fields are read from the lease store the OS's own client wrote - so they
@@ -331,7 +357,7 @@ Global options, which live on the group so they compose with every subcommand:
 
 | Option                       | Effect                                                                    |
 |------------------------------|---------------------------------------------------------------------------|
-| `--json`, `-j`               | Emit a JSON envelope: `{ok, command, data`\|`error}`.                     |
+| `--json`, `-j`               | Emit a JSON envelope: `{ok, command, data`\|`error, skipped}`.            |
 | `--json-bare`                | Emit the JSON payload at top level, without the envelope.                 |
 | `--traceback/--no-traceback` | Show a full Python traceback on unexpected errors. Default `--traceback`. |
 | `--version`                  | Print the version and exit.                                               |
@@ -405,9 +431,15 @@ ipscout --json reachable 127.0.0.1
     "target": "127.0.0.1",
     "reachable": true
   },
-  "error": null
+  "error": null,
+  "skipped": []
 }
 ```
+
+`skipped` names any network a sweeping command could not cover. It sits on the envelope because
+`arp-scan` returns a bare list with nowhere inside it to say so, and a reader has to be able to tell
+a complete answer from a partial one. The same note goes to stderr in every output mode, so a
+`--json-bare` pipeline still sees it without anything extra landing on stdout.
 
 `--json-bare` drops the envelope, which is what you want in a `jq` pipeline:
 
@@ -445,7 +477,22 @@ ipscout --json ping nothing.invalid   # exit code 2
   "error": {
     "type": "IPScoutResolutionError",
     "message": "cannot resolve 'nothing.invalid': Name or service not known"
-  }
+  },
+  "skipped": []
+}
+```
+
+`--json-bare` reports a failure as the error object alone, keeping its promise that stdout holds the
+payload and nothing else:
+
+```bash
+ipscout --json-bare ping nothing.invalid   # exit code 2
+```
+
+```json
+{
+  "type": "IPScoutResolutionError",
+  "message": "cannot resolve 'nothing.invalid': Name or service not known"
 }
 ```
 
@@ -456,15 +503,18 @@ a packet that times out, a link losing everything all come back as a `ResponseOb
 `reached=False`. Missing ICMP permission, an unresolvable name, or a nonsensical argument raise,
 because no amount of retrying fixes them.
 
-| Exception                 | Raised when                                                            | What to do about it                                     |
-|---------------------------|------------------------------------------------------------------------|---------------------------------------------------------|
-| `IPScoutResolutionError`  | The target does not resolve, or has no address in the demanded family. | Fix the name, or drop the `-4`/`-6` restriction.        |
-| `IPScoutPermissionError`  | Neither an unprivileged nor a raw ICMP socket could be opened.         | Apply one of the fixes in the message. Root would help. |
-| `IPScoutUnsupportedError` | No backend implements this here, such as traceroute on macOS.          | Use another capability. Root would not help.            |
-| `ValueError`              | `times`, `timeout`, `interval` or `max_hops` is out of range.          | Fix the argument.                                       |
+| Exception                     | Raised when                                                                                   | What to do about it                                     |
+|-------------------------------|-----------------------------------------------------------------------------------------------|---------------------------------------------------------|
+| `IPScoutResolutionError`      | The target does not resolve, or has no address in the demanded family.                        | Fix the name, or drop the `-4`/`-6` restriction.        |
+| `IPScoutPermissionError`      | Neither an unprivileged nor a raw ICMP socket could be opened.                                | Apply one of the fixes in the message. Root would help. |
+| `IPScoutUnsupportedError`     | No backend implements this here, such as traceroute on macOS.                                 | Use another capability. Root would not help.            |
+| `IPScoutSweepTooWideError`    | Every network a sweep was given holds more addresses than it probes.                          | Name a narrower network.                                |
+| `IPScoutSweepIncompleteError` | A sweep skipped a network and matched nothing in the rest, so "not found" would overstate it. | Name a narrower network inside the skipped one.         |
+| `ValueError`                  | `times`, `timeout`, `interval` or `max_hops` is out of range.                                 | Fix the argument.                                       |
 
-All three ipscout errors derive from `IPScoutError`, so one `except` catches the family without also
-catching unrelated `OSError` noise.
+Every ipscout error derives from `IPScoutError`, so one `except` catches the family without also
+catching unrelated `OSError` noise. The two sweep errors additionally derive from `ValueError`,
+which is what those callables have always raised, so a caller written against that keeps working.
 
 ```python
 import ipscout
@@ -537,7 +587,7 @@ Everything below is exported from the package root. This table is generated from
 | `icmp_available`   | function  | Whether an ICMP probe could be made right now, per family.        |
 | `is_reachable`     | function  | Total yes-or-no shortcut. Never raises, always falls back to TCP. |
 | `local_interfaces` | function  | Every local network interface.                                    |
-| `local_networks`   | function  | The IPv4 subnets this host is directly attached to.               |
+| `local_networks`   | function  | The IPv4 subnets a default sweep covers.                          |
 | `lookup_mac`       | function  | A hardware address answered with its scope attached.              |
 | `neighbours`       | function  | Every entry in this host's neighbour cache.                       |
 | `normalise_mac`    | function  | One canonical form, so any written form compares equal.           |
@@ -551,6 +601,7 @@ Everything below is exported from the package root. This table is generated from
 | `reverse_dns`      | function  | Turn an address back into a name, or None.                        |
 | `scan_ports`       | function  | What state each of a set of ports is in.                          |
 | `subnet_info`      | function  | Addressing, gateway and stored DHCP facts per subnet.             |
+| `sweep_scope`      | function  | Which networks a sweep would cover, and which it would not.       |
 | `trace_path`       | function  | Walk the hop limit over a transport the caller owns.              |
 | `traceroute`       | function  | Report the path packets take to a target.                         |
 | `wake_on_lan`      | function  | Send a wake-on-LAN magic packet.                                  |
@@ -572,6 +623,7 @@ Result models, all frozen Pydantic models with `extra="forbid"`:
 | `ReverseDnsReport`   | the reverse-dns CLI command                      |
 | `RouteInfo`          | query_route, default_gateway                     |
 | `SubnetInfo`         | subnet_info                                      |
+| `SweepScope`         | sweep_scope                                      |
 | `TraceHop`           | traceroute, atraceroute, trace_path, atrace_path |
 
 Enums, all `str` subclasses so their members are already strings on the wire:
@@ -586,7 +638,9 @@ Enums, all `str` subclasses so their members are already strings on the wire:
 | `ProbeMethod`    | ICMP, TCP                                              |
 | `ScanMethod`     | CONNECT, SYN                                           |
 
-Exceptions: `IPScoutError`, `IPScoutPermissionError`, `IPScoutResolutionError`, `IPScoutUnsupportedError`. Every public callable
-reports failure through this hierarchy, so `except IPScoutError` catches all of them.
+Exceptions: `IPScoutError`, `IPScoutPermissionError`, `IPScoutResolutionError`,
+`IPScoutUnsupportedError`, `IPScoutSweepError` and its two subclasses `IPScoutSweepTooWideError` and
+`IPScoutSweepIncompleteError`. Every public callable reports failure through this hierarchy, so
+`except IPScoutError` catches all of them.
 
 For a module-by-module breakdown, see [systemdesign/module_reference.md](systemdesign/module_reference.md).

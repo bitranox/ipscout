@@ -23,7 +23,7 @@ Note:
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import lib_cli_exit_tools
 import rich_click as click
@@ -42,6 +42,7 @@ from .models import (
     CapabilityReport,
     CommandName,
     FindIpReport,
+    IPNetwork,
     JsonEnvelope,
     JsonError,
     MacLookup,
@@ -57,6 +58,7 @@ from .models import (
     ReverseDnsReport,
     RouteInfo,
     ScanMethod,
+    SweepScope,
     WakeReport,
 )
 from .mtu import path_mtu
@@ -65,7 +67,7 @@ from .portscan import scan_ports
 from .resolve import resolve as resolve_target
 from .resolve import reverse_dns
 from .routes import default_gateway, query_route
-from .scan import arp_scan, find_ip_by_mac
+from .scan import arp_scan, find_ip_by_mac, sweep_scope
 from .serialize import dumps, to_jsonable
 from .subnet import subnet_info
 from .traceroute import traceroute
@@ -73,13 +75,20 @@ from .typed_click import argument, option, version_option
 from .wol import wake_on_lan
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
+
+    #: Everything a command may hand to :func:`_emit`: one result record, a
+    #: sequence of them, or a mapping onto them. Named rather than left as
+    #: ``Any`` so a raw dict or a bare string cannot reach the output boundary
+    #: through the one helper every command routes through.
+    EmitPayload = BaseModel | Sequence[BaseModel] | Mapping[str, BaseModel]
 
 __all__ = [
     "CLICK_CONTEXT_SETTINGS",
     "CliContext",
     "cli",
     "console",
+    "error_console",
     "main",
 ]
 
@@ -89,8 +98,15 @@ CLICK_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 #: Console for rich output.
 console = Console()
 
+#: Console for anything that must not land in the parsed stream: coverage
+#: notes go here in every output mode.
+error_console = Console(stderr=True)
+
 #: Style for error messages when traceback is suppressed.
 _ERROR_STYLE = Style(color="red", bold=True)
+
+#: Style for a coverage note, which qualifies a result rather than replacing it.
+_NOTE_STYLE = Style(color="yellow")
 
 #: Exit codes. Independent of output format.
 EXIT_OK = 0
@@ -129,7 +145,7 @@ def _context(ctx: click.Context) -> CliContext:
     return ctx.obj
 
 
-def _emit(ctx: click.Context, command: CommandName, payload: Any, human: Callable[[], None]) -> None:
+def _emit(ctx: click.Context, command: CommandName, payload: EmitPayload, human: Callable[[], None], *, skipped: tuple[IPNetwork, ...] = ()) -> None:
     """Render one command's result in whichever format was asked for.
 
     Args:
@@ -138,34 +154,71 @@ def _emit(ctx: click.Context, command: CommandName, payload: Any, human: Callabl
             of several calls stays unambiguous.
         payload: The data to serialise when a JSON mode is active.
         human: Callable that prints the human-readable rendering.
+        skipped: Networks the command could not cover, reported on the
+            envelope and as a note on stderr. Passing them here rather than
+            printing them per command is what keeps a partial result from
+            reading as a complete one in whichever mode was forgotten.
 
     Note:
         Every command routes through here. That is deliberate: a per-command
         ``if json:`` branch is exactly the kind of thing that gets added on the
         success path and forgotten everywhere else.
 
+        The note goes to stderr in every mode, including the human one, because
+        stdout is the stream a caller parses and a JSON document with a line of
+        prose in front of it is not one.
+
     """
 
     state = _context(ctx)
+    _note_skipped(skipped)
     if state.json_bare:
         click.echo(dumps(payload))
         return
     if state.json_output:
-        envelope = JsonEnvelope(ok=True, command=command, data=to_jsonable(payload))
+        envelope = JsonEnvelope(ok=True, command=command, data=to_jsonable(payload), skipped=skipped)
         click.echo(dumps(envelope))
         return
     human()
 
 
-def _fail(ctx: click.Context, command: CommandName, exc: Exception) -> None:
-    """Report a failure in the active output format, then exit non-zero."""
+def _note_skipped(skipped: tuple[IPNetwork, ...]) -> None:
+    """Say on stderr which networks were left out, when any were."""
+
+    if not skipped:
+        return
+    left_out = ", ".join(str(item) for item in skipped)
+    error_console.print(f"note: not swept: {left_out} - too wide to cover; name a narrower network inside it to include it", style=_NOTE_STYLE, highlight=False)
+
+
+def _fail(ctx: click.Context, command: CommandName, exc: Exception, *, skipped: tuple[IPNetwork, ...] = ()) -> None:
+    """Report a failure in the active output format, then exit non-zero.
+
+    Args:
+        ctx: The Click context carrying the output flags.
+        command: The subcommand the failure belongs to.
+        exc: The anticipated failure to report.
+        skipped: Networks left uncovered, when the command got far enough to
+            know. A refusal caused by missing coverage should say so as data
+            too, not only inside the message.
+
+    Note:
+        The human line carries the message alone. Everything reaching here is
+        an anticipated failure whose message already names the remedy, so the
+        exception's class name would add a Python detail to a sentence written
+        for a person. The machine-readable ``type`` field keeps it, where a
+        reader can branch on it.
+
+    """
 
     state = _context(ctx)
-    if state.json_output:
-        envelope = JsonEnvelope(ok=False, command=command, error=JsonError(type=type(exc).__name__, message=str(exc)))
-        click.echo(dumps(envelope))
+    error = JsonError(type=type(exc).__name__, message=str(exc))
+    if state.json_bare:
+        click.echo(dumps(error))
+    elif state.json_output:
+        click.echo(dumps(JsonEnvelope(ok=False, command=command, error=error, skipped=skipped)))
     else:
-        console.print(f"Error: {type(exc).__name__}: {exc}", style=_ERROR_STYLE, highlight=False)
+        console.print(f"Error: {exc}", style=_ERROR_STYLE, highlight=False)
     ctx.exit(EXIT_ERROR)
 
 
@@ -478,14 +531,27 @@ def cli_mac(ctx: click.Context, ip: str, *, strict: bool, active: bool) -> None:
 def cli_find_ip(ctx: click.Context, mac: str, *, scan: bool, network: str | None) -> None:
     """Find which addresses currently hold a hardware address."""
 
+    # Asked before sweeping, so the report can state its own coverage: the
+    # address list alone cannot say whether a network went unprobed. Inside the
+    # guard because a malformed CIDR is refused here first, and bound before it
+    # so a refusal can still report what it would have covered.
+    scope: SweepScope | None = None
     try:
+        if scan:
+            scope = sweep_scope(network)
         addresses = find_ip_by_mac(mac, scan=scan, network=network)
     except (IPScoutError, ValueError) as exc:
-        _fail(ctx, CommandName.FIND_IP, exc)
+        _fail(ctx, CommandName.FIND_IP, exc, skipped=scope.skipped if scope else ())
         return
 
-    payload = FindIpReport(mac=mac, addresses=tuple(addresses), scanned=scan)
-    _emit(ctx, CommandName.FIND_IP, payload, lambda: console.print("\n".join(addresses) or "(not found)", highlight=False))
+    payload = FindIpReport(mac=mac, addresses=tuple(addresses), scanned=scan, scope=scope)
+    _emit(
+        ctx,
+        CommandName.FIND_IP,
+        payload,
+        lambda: console.print("\n".join(addresses) or "(not found)", highlight=False),
+        skipped=scope.skipped if scope else (),
+    )
     if not addresses:
         ctx.exit(EXIT_NOT_REACHED)
 
@@ -497,13 +563,15 @@ def cli_find_ip(ctx: click.Context, mac: str, *, scan: bool, network: str | None
 def cli_arp_scan(ctx: click.Context, *, network: str | None, concurrency: int) -> None:
     """Sweep a network, then report every hardware address it learned."""
 
+    scope: SweepScope | None = None
     try:
+        scope = sweep_scope(network)
         entries = arp_scan(network, concurrency=concurrency)
     except (IPScoutError, ValueError) as exc:
-        _fail(ctx, CommandName.ARP_SCAN, exc)
+        _fail(ctx, CommandName.ARP_SCAN, exc, skipped=scope.skipped if scope else ())
         return
 
-    _emit(ctx, CommandName.ARP_SCAN, entries, lambda: console.print(_neighbour_table(entries)))
+    _emit(ctx, CommandName.ARP_SCAN, entries, lambda: console.print(_neighbour_table(entries)), skipped=scope.skipped if scope else ())
     if not entries:
         ctx.exit(EXIT_NOT_REACHED)
 
@@ -631,8 +699,12 @@ def cli_capabilities(ctx: click.Context) -> None:
     capabilities = _probe_capabilities()
 
     def human() -> None:
+        # Iterating the model yields its (field, value) pairs directly. Going
+        # through model_dump() would build a dict only to read fields back out
+        # of it, and listing the fields here by hand would leave a capability
+        # added to the report missing from this table.
         table = Table("capability", "available")
-        for name, available in capabilities.model_dump().items():
+        for name, available in capabilities:
             table.add_row(name, "yes" if available else "no")
         console.print(table)
 
@@ -729,10 +801,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
 
     argv_list = list(argv) if argv is not None else sys.argv[1:]
-    # Read the output flag from argv rather than the Click context: an error
+    # Read the output flags from argv rather than the Click context: an error
     # can escape before the context exists, and a traceback would then land in
-    # a stream the caller is parsing as JSON.
-    as_json = "--json" in argv_list or "-j" in argv_list
+    # a stream the caller is parsing as JSON. Both shapes count, or bare mode
+    # would be the one shape whose failures are not machine-readable.
+    bare = "--json-bare" in argv_list
+    as_json = bare or "--json" in argv_list or "-j" in argv_list
     show_traceback = "--no-traceback" not in argv_list
 
     lib_cli_exit_tools.config.traceback = show_traceback and not as_json
@@ -741,23 +815,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         cli,
         argv_list,
         prog_name=__init__conf__.shell_command,
-        exception_handler=_exception_handler(as_json=as_json),
+        exception_handler=_exception_handler(as_json=as_json, bare=bare),
     )
 
 
-def _exception_handler(*, as_json: bool) -> Callable[[BaseException], int]:
+def _exception_handler(*, as_json: bool, bare: bool) -> Callable[[BaseException], int]:
     """Return the handler run_cli should use for an escaping exception.
 
     Keeps ``lib_cli_exit_tools``'s exit-code mapping - signals, broken pipe,
-    errno - while making sure that in JSON mode the report is data rather than
-    a traceback.
+    errno - while making sure that in either JSON mode the report is data
+    rather than a traceback, in the shape that mode promised.
     """
 
     def handle(exc: BaseException) -> int:
         code = lib_cli_exit_tools.get_system_exit_code(exc)
         if as_json:
-            envelope = JsonEnvelope(ok=False, error=JsonError(type=type(exc).__name__, message=str(exc)))
-            click.echo(dumps(envelope))
+            error = JsonError(type=type(exc).__name__, message=str(exc))
+            click.echo(dumps(error if bare else JsonEnvelope(ok=False, error=error)))
             return code
         lib_cli_exit_tools.print_exception_message()
         return code

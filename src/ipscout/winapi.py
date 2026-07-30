@@ -35,7 +35,6 @@ import ctypes
 import socket
 import struct
 import sys
-from typing import Any
 
 from .errors import IPScoutUnsupportedError
 
@@ -450,10 +449,10 @@ def ipv6_words_to_string(words: object) -> str:
     return socket.inet_ntop(socket.AF_INET6, raw)
 
 
-_library_cache: Any = None
+_library_cache: ctypes.CDLL | None = None
 
 
-def iphlpapi() -> Any:
+def iphlpapi() -> ctypes.CDLL:
     """Return the loaded ``iphlpapi.dll``, loading it on first use.
 
     Returns:
@@ -485,7 +484,7 @@ def iphlpapi() -> Any:
     return _library_cache  # pragma: no cover - Windows only
 
 
-def _configure(library: Any) -> None:  # pragma: no cover - Windows only
+def _configure(library: ctypes.CDLL) -> None:  # pragma: no cover - Windows only
     """Declare argument and return types so ctypes marshals correctly.
 
     Without explicit ``restype`` ctypes assumes ``int``, which truncates the

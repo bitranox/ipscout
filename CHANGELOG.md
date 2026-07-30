@@ -5,6 +5,41 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Changed
+
+- **A default sweep no longer fails over one oversized subnet.** `arp_scan()` and
+  `find_ip_by_mac(..., scan=True)` with no network given now sweep every subnet this host is
+  attached to that fits inside 4096 addresses, and report the ones that do not fit instead of
+  refusing the whole call. A container bridge on a `/16` is present on a large share of Linux dev
+  and CI hosts, so the documented default path failed on first use for a reason unrelated to the
+  caller's target. Naming a network explicitly still raises when it is too wide: that is a request,
+  not a default. What the change costs is stated rather than hidden - see the new errors below.
+- **`local_networks()` reports the subnets a sweep covers.** Loopback was already left out; a `/31`
+  and a `/32` now are too, since they hold this host plus at most one point-to-point peer and a
+  sweep of them cannot find anybody new. `subnet_info()` still reports those addresses, and naming
+  such a network explicitly still sweeps it.
+
+### Added
+
+- **`sweep_scope()` and `SweepScope`.** Ask what a sweep would cover before running it: which
+  networks it probes, which it leaves out, and whether coverage is complete. `find-ip` carries the
+  same record in its payload, and the JSON envelope grew a `skipped` field for it, so a machine
+  reader can tell a partial answer from a complete one without parsing prose.
+- **`IPScoutSweepError` with `IPScoutSweepTooWideError` and `IPScoutSweepIncompleteError`.** The
+  first replaces the bare `ValueError` for a sweep with nothing left to probe. The second is new
+  behaviour: a search that skipped a network and matched nothing in the rest refuses to answer,
+  because "not found" would claim ground the sweep never reached. Both also derive from
+  `ValueError`, which these callables have always raised, so an existing `except` keeps working.
+
+### Fixed
+
+- **The CLI no longer prints a Python class name at a human.** A handled failure rendered as
+  `Error: ValueError: <message>`; the message alone already names the remedy, and the machine-
+  readable `type` field is where a reader can branch on the class.
+- **`--json-bare` reports failures as JSON.** It emitted human text on the error path, breaking the
+  one promise the flag makes: that stdout holds the payload and nothing else. It now emits the bare
+  `{type, message}` object, and an exception escaping a command is serialised in the same shape.
+
 ## [1.0.0] - 2026-07-29
 
 Initial release. `ipscout` probes hosts and inspects the local network entirely in-process: no
