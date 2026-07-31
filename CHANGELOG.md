@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.5.0] 2026-07-31 23:04:58
+
 ### Fixed
 
 - **One hardware address on two interfaces no longer lists its address twice.** A single MAC can
@@ -19,7 +21,6 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   different machine on each link, and a multi-homed host can hold the same address on two of them,
   so the first entry could report an unrelated machine's hardware address with nothing marking it
   as wrong. With no interface known, or no entry on it, the previous behaviour stands.
-
 - **An IPv6 link-local address can be reached at all.** Every probe to one reported the target as
   unreachable, whatever the host: the zone that says which link an address belongs to was dropped
   during resolution (`getaddrinfo` moves it into the sockaddr's scope id, and only the address was
@@ -46,7 +47,6 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   `query_route` fed it to `inet_pton`, whose refusal was caught and returned as "no route". Both
   now take the zone off first, and `lookup_mac` uses it as the interface to answer from - which is
   what a caller is saying by writing it.
-
 - **What a search returns is what a probe accepts.** `find_ip_by_mac` handed back a bare
   link-local address, which every probe then refused, while the interface it needed sat in the very
   cache entry the answer came from: the library returned something its own calls reject, having

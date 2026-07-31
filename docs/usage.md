@@ -265,10 +265,15 @@ does not appear. `arp_scan()` sweeps first and then reads, which is why it finds
 
 ```python
 for entry in ipscout.neighbours():
-    entry.ip, entry.mac, entry.interface, entry.state
+    entry.ip, entry.mac, entry.interface, entry.state, entry.scoped
 
 found = ipscout.arp_scan("192.168.1.0/24")
 ```
+
+`scoped` is the entry's address in the form a probe accepts: for a link-local entry it carries the
+interface the entry was learned on, and for every other address it is `ip` unchanged. Use it rather
+than joining the two yourself, which gets the IPv4 case - where a zone is meaningless - wrong.
+`find_ip_by_mac` already returns that form, so its answers go straight back into `ping`.
 
 There is no protocol that asks "who has this MAC" - RARP is dead - so the reverse search sweeps and
 searches the refreshed cache. It returns a list because one hardware address legitimately holds
