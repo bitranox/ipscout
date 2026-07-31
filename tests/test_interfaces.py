@@ -9,6 +9,7 @@ import pytest
 import ipscout
 from ipscout.interfaces import local_interfaces
 from ipscout.interfaces_posix import network_of
+from ipscout.resolve import zone_index
 
 pytestmark = pytest.mark.os_agnostic
 
@@ -18,6 +19,16 @@ def test_every_host_reports_at_least_a_loopback() -> None:
 
     assert interfaces
     assert any(item.is_loopback for item in interfaces)
+
+
+def test_every_interface_reports_an_index_that_names_it_as_a_zone() -> None:
+    # The index is the only spelling of an interface that works as a zone on
+    # every platform: Windows reports a FriendlyName here ("Ethernet 4") that
+    # neither getaddrinfo nor if_nametoindex knows, both of which speak a
+    # different namespace ("ethernet_32775"). Measured on a real Windows host.
+    for interface in local_interfaces():
+        assert interface.index is not None, f"{interface.name} reports no index"
+        assert zone_index(str(interface.index)) == interface.index
 
 
 def test_interface_names_are_unique() -> None:

@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import enum
 import statistics
-from ipaddress import IPv4Network, IPv6Network, ip_network
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, computed_field
@@ -89,6 +89,10 @@ NO_TIME_MS = -1.0
 #: Reported for "no address determined". A placeholder in the result only;
 #: nothing is ever bound to it.
 UNKNOWN_IP = "0.0.0.0"  # noqa: S104  # nosec B104
+
+
+#: Compared against ``ip_address().version``, which speaks numbers.
+_IPV6_VERSION = 6
 
 
 class _Frozen(BaseModel):
@@ -360,9 +364,19 @@ class InterfaceAddress(_Frozen):
 
 
 class Interface(_Frozen):
-    """One local network interface."""
+    """One local network interface.
+
+    Attributes:
+        index: The interface index the kernel knows it by, which is the one
+            spelling usable as an IPv6 zone on every platform: Windows reports
+            a friendly ``name`` here that neither ``getaddrinfo`` nor
+            ``if_nametoindex`` recognises. ``None`` only where the OS declined
+            to report one.
+
+    """
 
     name: str
+    index: int | None = None
     ipv4: tuple[InterfaceAddress, ...] = ()
     ipv6: tuple[InterfaceAddress, ...] = ()
     mac: str | None = None
@@ -400,6 +414,36 @@ class Neighbour(_Frozen):
     interface: str | None = None
     state: NeighbourState = NeighbourState.OTHER
     family: AddressFamily = AddressFamily.IPV4
+
+    @computed_field
+    @property
+    def scoped(self) -> str:
+        """Return ``ip`` in the form a probe accepts.
+
+        A link-local address is only unique on the link it was learned on, so
+        it is not a usable target without one and every probe refuses it
+        written bare. The interface is already in this record, so the joined
+        RFC 4007 form is offered here rather than left for each caller to
+        rebuild - and to get wrong for the addresses where a zone is
+        meaningless, which is all of them but IPv6 link-local.
+
+        Examples:
+            >>> Neighbour(ip="fe80::1", interface="eth0").scoped
+            'fe80::1%eth0'
+            >>> Neighbour(ip="192.168.1.1", interface="eth0").scoped
+            '192.168.1.1'
+
+        """
+
+        if self.interface is None:
+            return self.ip
+        try:
+            parsed = ip_address(self.ip)
+        except ValueError:  # pragma: no cover - the backends only report literals
+            return self.ip
+        if parsed.version != _IPV6_VERSION or not parsed.is_link_local:
+            return self.ip
+        return f"{self.ip}%{self.interface}"
 
 
 class RouteInfo(_Frozen):

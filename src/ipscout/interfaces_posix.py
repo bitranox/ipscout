@@ -206,6 +206,20 @@ _IFREQ_SIZE = 32
 _IFNAME_MAX = 15
 
 
+def _index_of(name: str) -> int | None:
+    """Return an interface's kernel index, or None when it has gone away.
+
+    An interface can be removed between the listing and this lookup, which is
+    an ordinary race rather than an error: the record is still worth reporting
+    without an index.
+    """
+
+    try:
+        return socket.if_nametoindex(name)
+    except OSError:  # pragma: no cover - the interface vanished mid-enumeration
+        return None
+
+
 def _mtu_of(name: str) -> int | None:
     """Return an interface's MTU, or None when it cannot be read.
 
@@ -268,6 +282,7 @@ class _Accumulator:
 
         return Interface(
             name=name,
+            index=_index_of(name),
             ipv4=tuple(self.ipv4),
             ipv6=tuple(self.ipv6),
             mac=self.mac,

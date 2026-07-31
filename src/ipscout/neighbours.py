@@ -33,6 +33,7 @@ import sys
 from .errors import IPScoutUnsupportedError
 from .interfaces import local_interfaces
 from .models import AddressFamily, MacLookup, MacScope, Neighbour
+from .resolve import split_zone
 from .routes import query_route
 
 __all__ = ["get_mac_address", "lookup_mac", "neighbours", "normalise_mac", "resolve_active"]
@@ -195,13 +196,30 @@ def resolve_active(ip: str, *, timeout: float = 2.0) -> str | None:
     return resolve_active_ipv4(ip, interface=interface, source_ip=source_ip, source_mac=source_mac, timeout=timeout)
 
 
-def _entry_for(ip: str, entries: tuple[Neighbour, ...]) -> Neighbour | None:
-    """Return the cache entry for one address, if it is known."""
+def _entry_for(ip: str, entries: tuple[Neighbour, ...], *, interface: str | None = None) -> Neighbour | None:
+    """Return the cache entry for one address, if it is known.
 
-    for entry in entries:
-        if entry.ip == ip:
-            return entry
-    return None
+    Args:
+        ip: The address to look up.
+        entries: The cache to search.
+        interface: The interface the frame would leave by, when one is known.
+            An address is only unique per interface - a link-local address
+            names a different machine on each link, and one host can hold the
+            same address on two of them - so the entry learned on the
+            interface that actually carries the frame is the truthful one.
+            Without a match there, or with no interface named, the first
+            entry for the address is returned, which is all that can be said.
+
+    """
+
+    matches = [entry for entry in entries if entry.ip == ip]
+    if not matches:
+        return None
+    if interface is not None:
+        on_link = next((entry for entry in matches if entry.interface == interface), None)
+        if on_link is not None:
+            return on_link
+    return matches[0]
 
 
 def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
@@ -238,8 +256,14 @@ def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
 
     """
 
-    family = AddressFamily.IPV6 if ":" in ip else AddressFamily.IPV4
-    route = query_route(ip, family)
+    # A zone is the caller naming the link they mean, so it steers the lookup
+    # rather than travelling with the address: the cache, the routing table and
+    # every packed sockaddr hold bare addresses, and comparing scoped text
+    # against them matches nothing and reports a known neighbour as unknown.
+    bare, zone = split_zone(ip)
+    family = AddressFamily.IPV6 if ":" in bare else AddressFamily.IPV4
+    route = query_route(bare, family)
+    on_interface = zone if zone is not None else (route.interface if route else None)
 
     if active:
         # Resolve whichever address actually carries the frame: the host
@@ -249,9 +273,9 @@ def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
         if route is not None and route.gateway:
             found = resolve_active(ip=route.gateway)
             return MacLookup(ip=ip, mac=found, scope=MacScope.NEXT_HOP, via_ip=route.gateway, interface=route.interface)
-        found = resolve_active(ip=ip)
+        found = resolve_active(ip=bare)
         scope = MacScope.DIRECT if found else MacScope.UNKNOWN
-        return MacLookup(ip=ip, mac=found, scope=scope, interface=route.interface if route else None)
+        return MacLookup(ip=ip, mac=found, scope=scope, interface=on_interface)
 
     entries = neighbours()
 
@@ -259,7 +283,7 @@ def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
         # Routed: the only hardware address on the wire toward this
         # destination belongs to the router, so that is what is reported, and
         # it is labelled as such.
-        hop = _entry_for(route.gateway, entries)
+        hop = _entry_for(route.gateway, entries, interface=route.interface)
         return MacLookup(
             ip=ip,
             mac=hop.mac if hop else None,
@@ -268,13 +292,13 @@ def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
             interface=(hop.interface if hop else route.interface),
         )
 
-    entry = _entry_for(ip, entries)
+    entry = _entry_for(bare, entries, interface=on_interface)
     if entry is not None:
         return MacLookup(ip=ip, mac=entry.mac, scope=MacScope.DIRECT, interface=entry.interface)
 
     # On-link but not in the cache, or no route at all. Both mean the same
     # thing to a caller: nothing is known about this address yet.
-    return MacLookup(ip=ip, scope=MacScope.UNKNOWN, interface=route.interface if route else None)
+    return MacLookup(ip=ip, scope=MacScope.UNKNOWN, interface=on_interface)
 
 
 def get_mac_address(ip: str, *, active: bool = False) -> str | None:

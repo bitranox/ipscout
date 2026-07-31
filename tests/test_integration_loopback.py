@@ -56,6 +56,40 @@ def test_loopback_answers_in_both_families(address: str, family: AddressFamily) 
     assert all(rtt is not None for rtt in result.rtts_ms)
 
 
+def test_this_host_reaches_one_of_its_own_link_local_addresses() -> None:
+    # An address of this host's own is the one target where reached=False can
+    # only mean the probe went out on the wrong link, or on none - which is
+    # what dropping the zone did to every link-local target.
+    #
+    # Every one of them, not the first: a tunnel adapter need not answer its
+    # own link-local, measured on Windows where Tailscale's stays silent to
+    # the system ping too, while the Ethernet adapter replies in 0.7 ms.
+    #
+    # Zoned by INDEX rather than by name: Windows reports a friendly name in
+    # `Interface.name` that neither getaddrinfo nor if_nametoindex knows, so
+    # the index is the only portable spelling of an interface.
+    _require_icmp(AddressFamily.IPV6)
+    own = [
+        f"{address.address}%{interface.index}"
+        for interface in ipscout.local_interfaces()
+        for address in interface.ipv6
+        if address.address.startswith("fe80") and interface.index
+    ]
+    if not own:
+        pytest.skip("this host holds no IPv6 link-local address")
+
+    reached = {target: ipscout.ping(target, 1, timeout=2.0).reached for target in own}
+
+    assert any(reached.values()), f"no link-local address of this host answered itself: {reached}"
+
+
+def test_a_link_local_target_without_a_zone_is_refused_rather_than_read_as_down() -> None:
+    # The other half of the same story: no interface means no link to send on,
+    # so this is a question that cannot be asked, not a host that is down.
+    with pytest.raises(IPScoutResolutionError, match="interface"):
+        ipscout.ping("fe80::1", 1, timeout=0.5)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows reaches ICMP through iphlpapi, not a socket")
 def test_the_kernel_rewrites_our_identifier_and_matching_still_works() -> None:
     # The design constraint this whole library is built around. If the kernel

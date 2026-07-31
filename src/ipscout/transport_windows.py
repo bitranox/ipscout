@@ -43,6 +43,7 @@ from . import packet, winapi
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily
 from .ports import EchoResult
+from .resolve import split_zone, zone_index
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -219,8 +220,13 @@ class WindowsEchoTransport:
 
         source_address = winapi.SOCKADDR_IN6(sin6_family=socket.AF_INET6)
         destination = winapi.SOCKADDR_IN6(sin6_family=socket.AF_INET6)
-        packed = socket.inet_pton(socket.AF_INET6, self._address)
+        # A zone names the link, and only the scope-id field can carry it:
+        # inet_pton parses an address alone and rejects the scoped text.
+        bare, zone = split_zone(self._address)
+        packed = socket.inet_pton(socket.AF_INET6, bare)
         ctypes.memmove(destination.sin6_addr, packed, len(packed))
+        if zone is not None:
+            destination.sin6_scope_id = zone_index(zone)
 
         started = time.perf_counter()
         replies = self._library.Icmp6SendEcho2(

@@ -228,9 +228,22 @@ def _hosts_of(scope: SweepScope) -> list[str]:
 
 
 def _matching(entries: tuple[Neighbour, ...], wanted: str) -> list[str]:
-    """Return the addresses among ``entries`` held by one hardware address."""
+    """Return the addresses among ``entries`` held by one hardware address.
 
-    return [entry.ip for entry in entries if entry.mac and normalise_mac(entry.mac) == wanted]
+    Each address appears once, in the order first seen. One hardware address
+    can sit on several interfaces - a synthetic NIC and its VF present the
+    same one - so the cache holds an entry per interface, and listing an
+    address once per entry would make the length of this list a count of
+    interfaces rather than of addresses.
+
+    Addresses come out in the form a probe accepts, which for a link-local
+    entry means carrying the interface it was learned on: handing back the
+    bare address would return something this library's own probes refuse,
+    having thrown away the missing piece on the way out.
+    """
+
+    found = (entry.scoped for entry in entries if entry.mac and normalise_mac(entry.mac) == wanted)
+    return list(dict.fromkeys(found))
 
 
 def _sweep(scope: SweepScope, *, concurrency: int, timeout: float) -> tuple[Neighbour, ...]:
@@ -323,9 +336,10 @@ def find_ip_by_mac(
 
     Returns:
         Every address holding that hardware address, which can legitimately be
-        more than one. Empty when it is not known here. When the sweep skipped
-        a network - see :func:`sweep_scope` - a non-empty list can still be
-        short an address that hardware holds on the network left out.
+        more than one, each listed once. Empty when it is not known here. When
+        the sweep skipped a network - see :func:`sweep_scope` - a non-empty
+        list can still be short an address that hardware holds on the network
+        left out.
 
     Raises:
         ValueError: The hardware address is not one, both ``network`` and

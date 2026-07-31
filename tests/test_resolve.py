@@ -45,6 +45,74 @@ def test_resolution_reports_the_family_alongside_the_address() -> None:
 
 
 @pytest.mark.os_agnostic
+def test_a_zone_survives_resolution() -> None:
+    # A link-local address names a different machine on each interface, so the
+    # zone is part of the address, not decoration. Dropping it here is what
+    # left every link-local probe unable to say which link it meant.
+    assert resolve("fe80::1%1") == ["fe80::1%1"]
+    assert resolve_one("fe80::1%1") == ("fe80::1%1", AddressFamily.IPV6)
+
+
+@pytest.mark.os_agnostic
+def test_a_zone_the_resolver_will_not_parse_still_survives() -> None:
+    # Measured on Windows: getaddrinfo there refuses an interface NAME as a
+    # zone and accepts only an index, so the two platforms would disagree
+    # about which addresses exist. Resolution keeps the zone as written and
+    # leaves checking the interface to the send, which is what needs it.
+    assert resolve("fe80::1%Ethernet 4") == ["fe80::1%Ethernet 4"]
+
+
+@pytest.mark.os_agnostic
+def test_a_zone_on_an_ipv4_address_says_that_is_what_is_wrong() -> None:
+    # A zone belongs to an IPv6 link-local address and to nothing else, so this
+    # is a misunderstanding worth naming. It used to arrive as "resolver
+    # returned an unparseable address", which describes the resolver's
+    # behaviour rather than the caller's mistake.
+    with pytest.raises(IPScoutResolutionError, match="IPv4 address"):
+        resolve("127.0.0.1%eth0")
+
+
+@pytest.mark.os_agnostic
+def test_an_address_ending_in_a_bare_separator_says_the_interface_is_missing() -> None:
+    with pytest.raises(IPScoutResolutionError, match="names no interface"):
+        resolve("fe80::1%")
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("zone", ["../etc", "a/b"])
+def test_a_zone_that_cannot_name_an_interface_is_refused_as_such(zone: str) -> None:
+    with pytest.raises(IPScoutResolutionError, match="not a usable interface"):
+        resolve(f"fe80::1%{zone}")
+
+
+@pytest.mark.os_agnostic
+def test_an_address_carrying_two_zones_is_refused_as_the_malformed_thing_it_is() -> None:
+    # What adding a zone to an address that already has one produces. It has
+    # to be named, because the reflex on seeing an unreachable link-local is
+    # to append an interface, and doing that to an answer from
+    # find_ip_by_mac - which already carries one - lands here.
+    with pytest.raises(IPScoutResolutionError, match="one interface"):
+        resolve("fe80::1%eth0%2")
+
+
+@pytest.mark.os_agnostic
+def test_a_link_local_address_without_a_zone_is_refused_by_name() -> None:
+    # It cannot be sent anywhere: with no interface there is no link to send
+    # on. Probing it anyway returns reached=False, which reads as "the host is
+    # down" and hides a question that was never asked.
+    with pytest.raises(IPScoutResolutionError, match="interface"):
+        resolve_one("fe80::1")
+
+
+@pytest.mark.os_agnostic
+def test_an_ordinary_address_needs_no_zone() -> None:
+    # Only a link-local address is ambiguous without one; the refusal must not
+    # spread to the addresses that are complete on their own.
+    assert resolve_one("::1") == ("::1", AddressFamily.IPV6)
+    assert resolve_one("169.254.1.1") == ("169.254.1.1", AddressFamily.IPV4)
+
+
+@pytest.mark.os_agnostic
 def test_an_unknown_name_raises_rather_than_reading_as_a_down_host() -> None:
     # Reporting reached=False here would make a typo in a hostname
     # indistinguishable from an outage.

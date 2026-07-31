@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from ipscout.models import AddressFamily, MacLookup, MacScope, ProbeMethod, ResponseObject
+from ipscout.models import AddressFamily, MacLookup, MacScope, Neighbour, ProbeMethod, ResponseObject
 
 
 def _reply(*rtts: float | None, target: str = "example.test", ip: str = "10.0.0.1") -> ResponseObject:
@@ -178,3 +178,31 @@ def test_every_computed_statistic_is_a_real_field_not_a_bare_property() -> None:
 
     for computed in ("time_min_ms", "time_avg_ms", "time_max_ms", "jitter_ms", "n_packets_lost", "packets_lost_percentage", "str_result"):
         assert computed in payload, f"{computed} missing from the dump"
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("ip", "interface", "expected"),
+    [
+        ("fe80::1", "eth0", "fe80::1%eth0"),
+        ("fe80::1", None, "fe80::1"),
+        ("192.168.1.1", "eth0", "192.168.1.1"),
+        ("169.254.1.1", "eth0", "169.254.1.1"),
+        ("2001:db8::1", "eth0", "2001:db8::1"),
+        ("not-an-address", "eth0", "not-an-address"),
+    ],
+)
+def test_a_cache_entry_offers_the_form_a_probe_can_use(ip: str, interface: str | None, expected: str) -> None:
+    # A link-local address is not a usable target without the link it was
+    # learned on, and every probe refuses one written without it. The interface
+    # is right there in the record, so the record can offer the joined form
+    # rather than making every caller rebuild it - and get the IPv4 case, where
+    # a zone is meaningless, wrong.
+    assert Neighbour(ip=ip, interface=interface).scoped == expected
+
+
+@pytest.mark.os_agnostic
+def test_the_usable_form_is_serialised_rather_than_dropped() -> None:
+    payload = Neighbour(ip="fe80::1", interface="eth0").model_dump(mode="json")
+
+    assert payload["scoped"] == "fe80::1%eth0"

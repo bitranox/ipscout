@@ -213,6 +213,10 @@ def _to_interface(adapter: _IpAdapterAddresses) -> Interface:  # pragma: no cove
 
     return Interface(
         name=str(adapter.FriendlyName or adapter.AdapterName or ""),
+        # The friendly name above is what a person recognises, and it is in a
+        # different namespace from the one if_nametoindex and getaddrinfo
+        # speak, so the index is the only part of this record usable as a zone.
+        index=int(adapter.IfIndex) or None,
         ipv4=tuple(ipv4),
         ipv6=tuple(ipv6),
         mac=_mac_text(adapter),

@@ -186,7 +186,7 @@ Use `ping` when that distinction matters.
 import ipscout
 
 for item in ipscout.local_interfaces():
-    print(item.name, item.is_up, item.is_loopback, item.mac, item.mtu)
+    print(item.name, item.index, item.is_up, item.is_loopback, item.mac, item.mtu)
     for address in item.ipv4:
         print("  v4", address.address, address.prefix_len)
     for address in item.ipv6:
@@ -196,6 +196,31 @@ for item in ipscout.local_interfaces():
 Interfaces that are down are included, since a down interface is a fact worth reporting rather than
 an omission. The POSIX backend uses `getifaddrs`, the Windows backend uses `GetAdaptersAddresses`,
 and both return the same frozen `Interface` record.
+
+`index` is the interface index the kernel knows, and it is what to write as the zone of an IPv6
+link-local address - `ping(f"fe80::1%{item.index}")`. Prefer it over `name`: on Windows the name
+is the adapter's friendly name (`Ethernet 4`), which neither `getaddrinfo` nor `if_nametoindex`
+recognises, so it is not usable as a zone there.
+
+## Reaching an IPv6 link-local address
+
+A `fe80::` address is only unique on one link, so it has to say which one. Every call that takes an
+address takes the zone with it, and one written without a zone is refused by name rather than
+reported as an unreachable host:
+
+```python
+import ipscout
+
+eth0 = next(item for item in ipscout.local_interfaces() if item.name == "eth0")
+ipscout.ping(f"fe80::200:5eff:fe00:5310%{eth0.index}")
+ipscout.lookup_mac(f"fe80::200:5eff:fe00:53af%{eth0.index}")
+
+ipscout.ping("fe80::1")  # IPScoutResolutionError: needs the interface to send on
+```
+
+An interface **name** works as a zone on Linux and macOS, and `neighbours()` and `query_route()`
+report names from a namespace that works on Windows too, but only the index is portable across all
+three.
 
 ## Resolve and reverse-resolve
 
@@ -513,10 +538,10 @@ ipscout info
 
 Exit codes are independent of the output format:
 
-| Code | Meaning                                                                   |
-|------|---------------------------------------------------------------------------|
-| 0    | Reached, or the command otherwise succeeded.                              |
-| 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.   |
+| Code | Meaning                                                                                             |
+|------|-----------------------------------------------------------------------------------------------------|
+| 0    | Reached, or the command otherwise succeeded.                                                        |
+| 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.                             |
 | 2    | Error. A bad name, a missing permission, a capability this host lacks, or a malformed command line. |
 
 `ping-many` exits 1 only when no target at all was reached.
@@ -679,44 +704,44 @@ Everything below is exported from the package root. This table is generated from
 
 `ipscout.__all__`, so a name here is a name that exists.
 
-| Name               | Kind      | Purpose                                                           |
-|--------------------|-----------|-------------------------------------------------------------------|
-| `ais_reachable`    | coroutine | The same contract, on the event loop.                             |
-| `aping`            | coroutine | The same, without blocking the event loop.                        |
-| `aping_many`       | coroutine | Probe many targets concurrently.                                  |
-| `arp_scan`         | function  | Sweep a network, then report what the kernel learned.             |
-| `ascan_ports`      | coroutine | The same, on the event loop.                                      |
-| `atrace_path`      | coroutine | The same, over an async transport.                                |
-| `atraceroute`      | coroutine | The same, on the event loop.                                      |
-| `default_gateway`  | function  | The route used when nothing more specific matches.                |
-| `find_ip_by_mac`   | function  | Which addresses currently hold a hardware address.                |
-| `get_mac_address`  | function  | The direct layer-2 address, or None for anything routed.          |
-| `icmp_available`   | function  | Whether an ICMP probe could be made right now, per family.        |
-| `is_reachable`     | function  | Total yes-or-no shortcut. Never raises, always falls back to TCP. |
-| `local_interfaces` | function  | Every local network interface.                                    |
-| `local_networks`   | function  | The IPv4 subnets a default sweep covers.                          |
-| `lookup_mac`       | function  | A hardware address answered with its scope attached.              |
-| `neighbours`       | function  | Every entry in this host's neighbour cache.                       |
-| `normalise_mac`    | function  | One canonical form, so any written form compares equal.           |
-| `parse_ports`      | function  | Turn a 22,80,8000-8100 specification into port numbers.           |
-| `path_mtu`         | function  | The largest packet that reaches a target unfragmented.            |
-| `ping`             | function  | Probe one target and report what came back.                       |
-| `ping_many`        | function  | Probe many targets concurrently from synchronous code.            |
-| `print_info`       | function  | Print the package metadata block.                                 |
-| `query_route`      | function  | How this host would reach one destination.                        |
-| `resolve`          | function  | Turn a name or literal into a list of addresses.                  |
-| `reverse_dns`      | function  | Turn an address back into a name, or None.                        |
-| `scan_ports`       | function  | What state each of a set of ports is in.                          |
-| `subnet_info`      | function  | Addressing, gateway and stored DHCP facts per subnet.             |
-| `sweep_scope`      | function  | Which networks a sweep would cover, and which it would not.       |
-| `trace_path`       | function  | Walk the hop limit over a transport the caller owns.              |
-| `traceroute`       | function  | Report the path packets take to a target.                         |
-| `observe_dhcp`     | function  | Every address a DHCP server offers a machine, in order seen.      |
-| `observe_dhcp_first_reachable` | function | The first offered address that answers, or None.      |
-| `observe_dhcp_session` | function | The same, startable before the machine is started.            |
-| `dhcp_capture_available` | function | Whether this host may capture at all.                       |
-| `DhcpSession`      | class     | The running capture: result(), offers(), stop().                  |
-| `wake_on_lan`      | function  | Send a wake-on-LAN magic packet.                                  |
+| Name                           | Kind      | Purpose                                                           |
+|--------------------------------|-----------|-------------------------------------------------------------------|
+| `ais_reachable`                | coroutine | The same contract, on the event loop.                             |
+| `aping`                        | coroutine | The same, without blocking the event loop.                        |
+| `aping_many`                   | coroutine | Probe many targets concurrently.                                  |
+| `arp_scan`                     | function  | Sweep a network, then report what the kernel learned.             |
+| `ascan_ports`                  | coroutine | The same, on the event loop.                                      |
+| `atrace_path`                  | coroutine | The same, over an async transport.                                |
+| `atraceroute`                  | coroutine | The same, on the event loop.                                      |
+| `default_gateway`              | function  | The route used when nothing more specific matches.                |
+| `find_ip_by_mac`               | function  | Which addresses currently hold a hardware address.                |
+| `get_mac_address`              | function  | The direct layer-2 address, or None for anything routed.          |
+| `icmp_available`               | function  | Whether an ICMP probe could be made right now, per family.        |
+| `is_reachable`                 | function  | Total yes-or-no shortcut. Never raises, always falls back to TCP. |
+| `local_interfaces`             | function  | Every local network interface.                                    |
+| `local_networks`               | function  | The IPv4 subnets a default sweep covers.                          |
+| `lookup_mac`                   | function  | A hardware address answered with its scope attached.              |
+| `neighbours`                   | function  | Every entry in this host's neighbour cache.                       |
+| `normalise_mac`                | function  | One canonical form, so any written form compares equal.           |
+| `parse_ports`                  | function  | Turn a 22,80,8000-8100 specification into port numbers.           |
+| `path_mtu`                     | function  | The largest packet that reaches a target unfragmented.            |
+| `ping`                         | function  | Probe one target and report what came back.                       |
+| `ping_many`                    | function  | Probe many targets concurrently from synchronous code.            |
+| `print_info`                   | function  | Print the package metadata block.                                 |
+| `query_route`                  | function  | How this host would reach one destination.                        |
+| `resolve`                      | function  | Turn a name or literal into a list of addresses.                  |
+| `reverse_dns`                  | function  | Turn an address back into a name, or None.                        |
+| `scan_ports`                   | function  | What state each of a set of ports is in.                          |
+| `subnet_info`                  | function  | Addressing, gateway and stored DHCP facts per subnet.             |
+| `sweep_scope`                  | function  | Which networks a sweep would cover, and which it would not.       |
+| `trace_path`                   | function  | Walk the hop limit over a transport the caller owns.              |
+| `traceroute`                   | function  | Report the path packets take to a target.                         |
+| `observe_dhcp`                 | function  | Every address a DHCP server offers a machine, in order seen.      |
+| `observe_dhcp_first_reachable` | function  | The first offered address that answers, or None.                  |
+| `observe_dhcp_session`         | function  | The same, startable before the machine is started.                |
+| `dhcp_capture_available`       | function  | Whether this host may capture at all.                             |
+| `DhcpSession`                  | class     | The running capture: result(), offers(), stop().                  |
+| `wake_on_lan`                  | function  | Send a wake-on-LAN magic packet.                                  |
 
 Result models, all frozen Pydantic models with `extra="forbid"`:
 

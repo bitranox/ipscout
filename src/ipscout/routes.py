@@ -22,6 +22,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from .models import AddressFamily
+from .resolve import split_zone
 
 if TYPE_CHECKING:
     from .models import RouteInfo
@@ -58,6 +59,11 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
 
     """
 
+    # The routing table is asked about an address, not about an address on an
+    # interface, and every backend packs the destination with inet_pton, which
+    # refuses scoped text. Left in, the refusal is indistinguishable from an
+    # honest "no route to there".
+    bare, _ = split_zone(destination)
     af = _socket_family(family)
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
         from .routes_windows import query_route as _query  # noqa: PLC0415 - Windows-only import
@@ -65,7 +71,7 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
         from .routes_macos import query_route as _query  # noqa: PLC0415 - macOS-only import
     else:
         from .routes_linux import query_route as _query  # noqa: PLC0415 - Linux-only import
-    return _query(destination, af)
+    return _query(bare, af)
 
 
 def default_gateway(family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | None:

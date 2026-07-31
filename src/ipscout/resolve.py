@@ -29,12 +29,25 @@ from .models import AddressFamily
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-__all__ = ["family_of", "resolve", "resolve_one", "reverse_dns"]
+__all__ = ["family_of", "resolve", "resolve_one", "reverse_dns", "split_zone", "zone_index"]
 
 _SOCKET_FAMILY = {
     AddressFamily.IPV4: socket.AF_INET,
     AddressFamily.IPV6: socket.AF_INET6,
 }
+
+#: What ``getaddrinfo`` puts in a sockaddr: ``(address, port)`` for IPv4, and
+#: ``(address, port, flowinfo, scope_id)`` for IPv6. The link-layer form,
+#: ``(protocol, address)``, is in the signature for families this never asks
+#: for, and is carried here so the union matches rather than being cast away.
+_SockAddr = tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes]
+
+#: An ``AF_INET6`` sockaddr is four fields to an ``AF_INET`` one's two, so its
+#: length is also what tells the two families apart.
+_IPV6_SOCKADDR_FIELDS = 4
+
+#: Compared against ``ip_address().version``, which speaks numbers.
+_IPV6_VERSION = 6
 
 
 def family_of(address: str) -> AddressFamily | None:
@@ -62,6 +75,139 @@ def family_of(address: str) -> AddressFamily | None:
     except ValueError:
         return None
     return AddressFamily.IPV6 if parsed.version == 6 else AddressFamily.IPV4  # noqa: PLR2004
+
+
+def split_zone(address: str) -> tuple[str, str | None]:
+    """Return an address split from its IPv6 zone, if it carries one.
+
+    RFC 4007 writes the interface an address belongs to after a ``%``:
+    ``fe80::1%eth0``. Everything that packs an address into bytes - a raw
+    packet, a sockaddr - needs the address alone, while everything that sends
+    needs the zone as well, so the two are separated here once rather than by
+    each caller guessing.
+
+    Examples:
+        >>> split_zone("fe80::1%eth0")
+        ('fe80::1', 'eth0')
+        >>> split_zone("192.168.1.1")
+        ('192.168.1.1', None)
+
+    """
+
+    bare, separator, zone = address.partition("%")
+    return (bare, zone) if separator and zone else (address, None)
+
+
+def zone_index(zone: str) -> int:
+    """Return the interface index a zone names, by name or by number.
+
+    Args:
+        zone: The text after the ``%`` in a scoped address, which RFC 4007
+            allows to be either an interface name or its index.
+
+    Returns:
+        The index, which is what a sockaddr carries.
+
+    Raises:
+        IPScoutResolutionError: No interface goes by that name here. That is a
+            setup problem - a typo, or a interface that has gone away - so it
+            raises rather than being reported as an unreachable host.
+
+    """
+
+    if zone.isdigit():
+        return int(zone)
+    try:
+        return socket.if_nametoindex(zone)
+    except OSError as exc:
+        msg = f"no interface named {zone!r} to send on: name one this host has, or use its index"
+        raise IPScoutResolutionError(msg) from exc
+
+
+def _with_zone(sockaddr: _SockAddr, written_zone: str | None) -> str:
+    """Return one ``getaddrinfo`` sockaddr as text, zone included.
+
+    The zone the caller wrote wins, so an address hands back the text it was
+    given rather than a spelling derived from an index. A resolver that
+    reports a scope of its own - a name whose record carries one - is honoured
+    too, because taking the address alone would silently discard which link it
+    belongs to.
+    """
+
+    address = sockaddr[0]
+    if not isinstance(address, str):  # pragma: no cover - a link-layer family, which is never requested here
+        return str(address)
+    if written_zone:
+        return f"{address}%{written_zone}"
+    if len(sockaddr) != _IPV6_SOCKADDR_FIELDS:
+        return address
+    scope = sockaddr[3]
+    if not scope:
+        return address
+    try:
+        return f"{address}%{socket.if_indextoname(scope)}"
+    except OSError:  # pragma: no cover - an index the OS no longer knows
+        return f"{address}%{scope}"
+
+
+def _refuse_a_link_local_address_with_no_zone(target: str, address: str) -> None:
+    """Raise when an address cannot be sent anywhere for want of an interface.
+
+    A link-local address is only unique on one link, so without a zone the
+    kernel has no interface to send on and every probe reports the target as
+    unreachable. That reads exactly like a host that is down, which is the one
+    thing this library refuses to let a setup problem look like.
+    """
+
+    bare, zone = split_zone(address)
+    if zone is not None:
+        return
+    try:
+        parsed = ipaddress.ip_address(bare)
+    except ValueError:  # pragma: no cover - the address came from getaddrinfo
+        return
+    if parsed.version != _IPV6_VERSION or not parsed.is_link_local:
+        return
+    msg = f"{target!r} is a link-local address, which needs the interface to send on: write it as {bare}%<interface>"
+    raise IPScoutResolutionError(msg)
+
+
+def _refuse_a_malformed_zone(target: str) -> None:
+    """Raise on a written zone that cannot name an interface, saying which way.
+
+    Each of these is a different mistake with a different fix, and all four
+    used to arrive as one message - "resolver returned an unparseable address"
+    - which reports what the resolver did rather than what the caller got
+    wrong, or as a bare "cannot resolve", which reads as a name that does not
+    exist. A zone is checked here, at the boundary, because every one of these
+    is a malformed target rather than a fact about the network.
+    """
+
+    bare, separator, zone = target.partition("%")
+    if not separator:
+        return
+    if not zone:
+        msg = f"{target!r} ends with % but names no interface: write one after it, or drop the %"
+        raise IPScoutResolutionError(msg)
+    if "%" in zone:
+        # The reflex on seeing an unreachable link-local is to add an
+        # interface, and doing that to an answer that already names one - as
+        # everything this library returns now does - lands exactly here.
+        msg = f"{target!r} names more than one interface: an address carries one zone, written once after a single %"
+        raise IPScoutResolutionError(msg)
+
+    literal = family_of(bare)
+    if literal is AddressFamily.IPV4:
+        msg = f"{target!r} is an IPv4 address with a zone: an interface belongs to an IPv6 link-local address and to nothing else"
+        raise IPScoutResolutionError(msg)
+    if literal is None:
+        msg = f"{target!r} puts a zone on {bare!r}, which is not an address literal: an interface can only be written after one"
+        raise IPScoutResolutionError(msg)
+    try:
+        ipaddress.ip_address(target)
+    except ValueError as exc:
+        msg = f"{zone!r} is not a usable interface name in {target!r}: {exc}"
+        raise IPScoutResolutionError(msg) from exc
 
 
 def _dedupe(items: Iterable[str]) -> list[str]:
@@ -124,9 +270,17 @@ def resolve(target: str, *, family: AddressFamily | None = None) -> list[str]:
         msg = f"{target!r} has no {family.value} address"
         raise IPScoutResolutionError(msg)
 
+    # The zone comes off before the resolver sees it, because the resolvers
+    # disagree about it as well: Windows getaddrinfo refuses an interface NAME
+    # and accepts only an index (measured), so passing scoped text through
+    # would make an address that exists on Linux fail to resolve there. It is
+    # re-attached to every result below, and the interface it names is checked
+    # where it is actually needed, at the send.
+    _refuse_a_malformed_zone(target)
+    lookup, written_zone = split_zone(target)
     requested = _SOCKET_FAMILY.get(family) if family is not None else socket.AF_UNSPEC
     try:
-        infos = socket.getaddrinfo(target, None, requested or socket.AF_UNSPEC, socket.SOCK_DGRAM)
+        infos = socket.getaddrinfo(lookup, None, requested or socket.AF_UNSPEC, socket.SOCK_DGRAM)
     except socket.gaierror as exc:
         # Distinguish "no such name" from "name exists, wrong family", because
         # the caller's next move differs: fix the name, or drop the -4/-6 flag.
@@ -139,7 +293,7 @@ def resolve(target: str, *, family: AddressFamily | None = None) -> list[str]:
         msg = f"cannot resolve {target!r}: {exc.strerror or exc}"
         raise IPScoutResolutionError(msg) from exc
 
-    addresses = _dedupe(str(info[4][0]) for info in infos)
+    addresses = _dedupe(_with_zone(info[4], written_zone) for info in infos)
     if not addresses:
         msg = f"{target!r} resolved to no usable address"
         raise IPScoutResolutionError(msg)
@@ -169,9 +323,17 @@ def resolve_one(target: str, *, family: AddressFamily | None = None) -> tuple[st
     """
 
     address = resolve(target, family=family)[0]
+    _refuse_a_link_local_address_with_no_zone(target, address)
     resolved = family_of(address)
-    if resolved is None:  # pragma: no cover - getaddrinfo always returns literals
-        msg = f"resolver returned an unparseable address for {target!r}: {address!r}"
+    if resolved is None:  # pragma: no cover - every way of getting here is refused by name in resolve()
+        # A backstop, not a diagnosis. Every known way to produce an address
+        # this cannot classify is a malformed zone, and each of those is
+        # refused in resolve() with a message naming the specific mistake; the
+        # comment here used to claim the case was impossible, which was how
+        # four real inputs came to share one useless message. If this ever
+        # fires, the input that reached it belongs in _refuse_a_malformed_zone
+        # with a message of its own.
+        msg = f"{target!r} resolved to {address!r}, which is not an address this host can use, and no more specific reason was recognised - please report it"
         raise IPScoutResolutionError(msg)
     return address, resolved
 

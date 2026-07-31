@@ -26,7 +26,8 @@ from ipscout import neighbours_linux as linux
 from ipscout import neighbours_macos as macos
 from ipscout import neighbours_windows as windows
 from ipscout.models import AddressFamily, Interface, InterfaceAddress, MacScope, Neighbour, NeighbourState, SweepScope
-from ipscout.neighbours import resolve_active
+from ipscout.neighbours import _entry_for, resolve_active
+from ipscout.resolve import resolve_one
 
 pytestmark = pytest.mark.os_agnostic
 
@@ -99,6 +100,50 @@ def test_every_cache_entry_names_a_learned_address() -> None:
 
 
 @pytest.mark.os_agnostic
+def test_an_address_known_on_two_interfaces_is_read_from_the_one_that_carries_the_frame() -> None:
+    # A link-local address is scoped to its link, so the SAME text names a
+    # different machine on each interface. Answering from whichever entry the
+    # kernel happened to list first reports another host's hardware address
+    # with no sign anything went wrong.
+    entries = (
+        Neighbour(ip="fe80::1", mac="aa:bb:cc:dd:ee:ff", interface="eth0"),
+        Neighbour(ip="fe80::1", mac="11:22:33:44:55:66", interface="eth1"),
+    )
+
+    entry = _entry_for("fe80::1", entries, interface="eth1")
+
+    assert entry is not None
+    assert entry.mac == "11:22:33:44:55:66"
+
+
+@pytest.mark.os_agnostic
+def test_a_zoned_address_is_looked_up_on_the_interface_it_names() -> None:
+    # Writing the interface into the address is how a caller says which link
+    # they mean, so it must narrow the lookup rather than defeat it: the cache
+    # holds bare addresses, and comparing the zoned text against them matches
+    # nothing and reports a known neighbour as unknown.
+    scoped = [entry for entry in ipscout.neighbours() if entry.ip.startswith("fe80") and entry.interface and entry.mac]
+    if not scoped:
+        pytest.skip("this host's cache holds no link-local neighbour to ask about")
+    entry = scoped[0]
+
+    answer = ipscout.lookup_mac(f"{entry.ip}%{entry.interface}")
+
+    assert answer.mac == entry.mac
+    assert answer.interface == entry.interface
+
+
+@pytest.mark.os_agnostic
+def test_an_address_is_still_answered_when_no_interface_narrows_the_search() -> None:
+    # No route, or a route with no interface name, must stay answerable: the
+    # interface narrows the search, it is not a precondition for it.
+    entries = (Neighbour(ip="192.0.2.10", mac="aa:bb:cc:dd:ee:ff", interface="eth0"),)
+
+    assert _entry_for("192.0.2.10", entries, interface=None) is not None
+    assert _entry_for("192.0.2.10", entries, interface="eth9") is not None
+
+
+@pytest.mark.os_agnostic
 def test_searching_for_an_unknown_hardware_address_finds_nothing() -> None:
     assert ipscout.find_ip_by_mac("aa:bb:cc:dd:ee:ff") == []
 
@@ -120,8 +165,42 @@ def test_a_known_address_is_found_however_it_is_written() -> None:
     found = ipscout.find_ip_by_mac(mac)
     also_found = ipscout.find_ip_by_mac(mac.upper().replace(":", "-"))
 
-    assert entries[0].ip in found
+    assert entries[0].scoped in found
     assert found == also_found
+
+
+@pytest.mark.os_agnostic
+def test_what_a_search_returns_is_what_a_probe_accepts() -> None:
+    # The round trip that was broken: the search handed back a bare link-local
+    # address, which every probe then refused, while the interface it needed
+    # sat in the very cache entry the answer came from.
+    link_local = [entry for entry in ipscout.neighbours() if entry.ip.startswith("fe80") and entry.interface and entry.mac]
+    if not link_local:
+        pytest.skip("this host's cache holds no link-local neighbour to search for")
+    entry = link_local[0]
+    assert entry.mac is not None
+
+    found = ipscout.find_ip_by_mac(entry.mac)
+
+    assert entry.scoped in found
+    for address in found:
+        resolve_one(address)  # raises if a probe would refuse it
+
+
+@pytest.mark.os_agnostic
+def test_one_hardware_address_on_two_interfaces_reports_its_address_once() -> None:
+    # One hardware address can legitimately sit on several interfaces - a
+    # synthetic NIC and its VF present the same one - so the cache holds the
+    # same IP twice under it. Listing that address once per interface would
+    # make the length of this list a count of interfaces, not of addresses,
+    # while the distinct addresses it also holds must all survive.
+    entries = (
+        Neighbour(ip="192.0.2.10", mac="aa:bb:cc:dd:ee:ff", interface="lan2"),
+        Neighbour(ip="192.0.2.10", mac="AA-BB-CC-DD-EE-FF", interface="manavf2"),
+        Neighbour(ip="192.0.2.11", mac="aa:bb:cc:dd:ee:ff", interface="lan2"),
+    )
+
+    assert scan._matching(entries, "aa:bb:cc:dd:ee:ff") == ["192.0.2.10", "192.0.2.11"]
 
 
 @pytest.mark.os_agnostic

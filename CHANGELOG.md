@@ -5,6 +5,76 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One hardware address on two interfaces no longer lists its address twice.** A single MAC can
+  legitimately sit on several interfaces - a synthetic NIC and its VF present the same one - so the
+  neighbour cache holds an entry per interface and `find_ip_by_mac` returned the address once per
+  entry. The length of that list read as a count of addresses while being a count of interfaces.
+  Each address is now listed once, in the order first seen; the distinct addresses one MAC holds
+  are all still returned, which is the case the function exists for.
+- **`lookup_mac` reads the entry learned on the interface that carries the frame.** It picked the
+  first cache entry matching the address and ignored the interface, though it had already resolved
+  the route that names one. An address is only unique per interface: a link-local address names a
+  different machine on each link, and a multi-homed host can hold the same address on two of them,
+  so the first entry could report an unrelated machine's hardware address with nothing marking it
+  as wrong. With no interface known, or no entry on it, the previous behaviour stands.
+
+- **An IPv6 link-local address can be reached at all.** Every probe to one reported the target as
+  unreachable, whatever the host: the zone that says which link an address belongs to was dropped
+  during resolution (`getaddrinfo` moves it into the sockaddr's scope id, and only the address was
+  kept), and the transports then sent to a 2-tuple, which is scope id zero, meaning no link. So a
+  reachable host read as down - the one thing the error contract exists to prevent. Measured
+  against a real neighbour: the system ping answered in 1.01 ms while `ping()` returned
+  `reached=False`. The zone now survives resolution and travels in the sockaddr, verified on Linux
+  and on real Windows, where the reply came back in 0.8 ms through `Icmp6SendEcho2`.
+- **A link-local address written without a zone is refused by name.** It cannot be sent anywhere,
+  so it is a question that cannot be asked rather than a host that is down, and the message says
+  how to write it.
+- **Every way of writing a zone wrongly now says which way.** Four distinct mistakes - a zone on an
+  IPv4 address, a trailing `%` naming no interface, two zones on one address, and a zone holding
+  characters an address cannot carry - all arrived as `resolver returned an unparseable address`,
+  which reports what the resolver did rather than what the caller got wrong, or as a bare
+  `cannot resolve`, which reads as a name that does not exist. Each is now refused at the boundary
+  with its own message. The two-zone case is the one to expect: appending an interface to an
+  answer that already carries one is the natural reflex, and every address this library hands back
+  now carries one. The generic message survives only as a backstop, and says it is one; the
+  comment claiming the case could not happen is gone, since it was what let four real inputs share
+  one useless message.
+- **A zoned address no longer defeats the passive lookups.** `lookup_mac` compared the scoped text
+  against a cache that holds bare addresses and so reported a known neighbour as unknown, and
+  `query_route` fed it to `inet_pton`, whose refusal was caught and returned as "no route". Both
+  now take the zone off first, and `lookup_mac` uses it as the interface to answer from - which is
+  what a caller is saying by writing it.
+
+- **What a search returns is what a probe accepts.** `find_ip_by_mac` handed back a bare
+  link-local address, which every probe then refused, while the interface it needed sat in the very
+  cache entry the answer came from: the library returned something its own calls reject, having
+  discarded the missing piece on the way out. Link-local results now carry the interface they were
+  learned on, so they can be passed straight back in. Every other address is byte-identical to
+  before, since a zone is meaningless for them.
+
+### Added
+
+- **`Neighbour.scoped`, the entry's address in the form a probe accepts.** The joined RFC 4007
+  form for a link-local entry, and plainly the address for every other, so a caller never rebuilds
+  it - or gets the IPv4 case, where a zone is meaningless, wrong. A computed field, so it is in
+  `model_dump()` rather than being dropped from a payload that looks complete.
+- **`Interface.index`, the interface index the kernel knows.** It is the only spelling of an
+  interface usable as a zone on every platform: Windows reports a friendly `name` here
+  (`Ethernet 4`) that neither `getaddrinfo` nor `if_nametoindex` recognises, both of which speak a
+  different namespace (`ethernet_32775`) - measured on a real Windows host, where an interface name
+  as a zone fails resolution outright.
+
+### Changed
+
+- **The skill states that both directions of the MAC-to-interface mapping are many-to-one.** A new
+  section in `python-network-probe`: one hardware address can sit on several interfaces, so
+  `local_interfaces()` is keyed by name and each record carries its own `mac` rather than a
+  MAC-to-one-interface map; and one address can name several machines, so `lookup_mac` answers from
+  the interface the frame would leave by and reports which one that was. Mirrored into
+  `bitranox-skills`.
+
 ## [1.4.0] 2026-07-31 16:30:04
 
 

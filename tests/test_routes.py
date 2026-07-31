@@ -76,6 +76,18 @@ def test_an_unparseable_destination_is_not_a_route() -> None:
 
 
 @pytest.mark.os_agnostic
+def test_a_zone_does_not_turn_a_route_into_a_silent_absence() -> None:
+    # The zone names an interface, which the routing table does not carry in
+    # the destination it is asked about. Passing it through reached inet_pton,
+    # which refuses it, and the refusal reads as "no route to that address" -
+    # a real answer, and the wrong one.
+    bare = ipscout.query_route("::1", AddressFamily.IPV6)
+    scoped = ipscout.query_route("::1%1", AddressFamily.IPV6)
+
+    assert scoped == bare
+
+
+@pytest.mark.os_agnostic
 def test_a_route_record_cannot_be_edited_after_the_fact() -> None:
     route = RouteInfo(gateway="192.0.2.1")
 

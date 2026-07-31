@@ -42,6 +42,7 @@ from . import packet
 from .errors import IPScoutPermissionError
 from .models import AddressFamily
 from .ports import EchoResult
+from .resolve import split_zone, zone_index
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -204,6 +205,24 @@ _TIME_EXCEEDED_V4 = 11
 _TIME_EXCEEDED_V6 = 3
 
 
+def _destination_for(address: str, *, is_ipv6: bool) -> tuple[str, int] | tuple[str, int, int, int]:
+    """Return the sockaddr to send to, carrying the interface when scoped.
+
+    An ICMPv6 socket refuses a zone written into the address string: measured
+    on Linux, ``sendto(datagram, ("fe80::1%eth0", 0))`` fails with EINVAL, and
+    so does the bare form, while the same address with the interface index in
+    the sockaddr's scope-id field is answered. So the zone travels as a number
+    here rather than as text, even though ``getaddrinfo`` accepts either.
+    """
+
+    if not is_ipv6:
+        return (address, 0)
+    bare, zone = split_zone(address)
+    if zone is None:
+        return (bare, 0)
+    return (bare, 0, 0, zone_index(zone))
+
+
 def _offender_address(control: bytes, *, is_ipv6: bool) -> str | None:
     """Return the router named by ``SO_EE_OFFENDER``, if the message carries one.
 
@@ -314,6 +333,9 @@ class PosixEchoTransport:
         self._address = address
         self._family = family
         self._is_ipv6 = family is AddressFamily.IPV6
+        # Resolved once: an unknown interface name is a setup problem, so it
+        # must raise while the transport is being built, not per probe.
+        self._destination = _destination_for(address, is_ipv6=self._is_ipv6)
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
         self._errqueue = _enable_error_queue(self._socket, is_ipv6=self._is_ipv6)
@@ -421,7 +443,7 @@ class PosixEchoTransport:
 
         started = time.perf_counter()
         try:
-            self._socket.sendto(datagram, (self._address, 0))
+            self._socket.sendto(datagram, self._destination)
         except OSError:
             # An unreachable network refuses at send time; that is a result.
             return EchoResult()
@@ -497,6 +519,9 @@ class AsyncPosixEchoTransport:
         self._address = address
         self._family = family
         self._is_ipv6 = family is AddressFamily.IPV6
+        # Resolved once: an unknown interface name is a setup problem, so it
+        # must raise while the transport is being built, not per probe.
+        self._destination = _destination_for(address, is_ipv6=self._is_ipv6)
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
         # settimeout(0) is setblocking(False) without a boolean positional arg.
@@ -585,7 +610,7 @@ class AsyncPosixEchoTransport:
         started = time.perf_counter()
         try:
             try:
-                self._socket.sendto(datagram, (self._address, 0))
+                self._socket.sendto(datagram, self._destination)
             except OSError:
                 return EchoResult()
 
