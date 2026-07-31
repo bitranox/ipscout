@@ -144,16 +144,27 @@ def test_a_retransmission_does_not_hold_the_quiet_window_open() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_asking_twice_gives_the_same_answer_without_blocking_again() -> None:
+def test_asking_twice_gives_the_same_answer_even_when_more_arrives_between() -> None:
     # A result records something that already happened, so observing it twice
-    # cannot be allowed to give two answers.
-    with observe_dhcp_session(GUEST_MAC, capture=ScriptedCapture(FIRST), **FAST) as session:
+    # cannot give two answers - not even when the wire kept talking after the
+    # first look. Asserted by letting a second address genuinely arrive in
+    # between, rather than by timing the second call: with a settle of 0.05 a
+    # call that DID block again would return just as fast, so the clock could
+    # never tell the two apart. It only ever measured runner load, and did
+    # exactly that on a macOS lane at 0.0526s.
+    with observe_dhcp_session(GUEST_MAC, capture=ScriptedCapture(FIRST, SECOND, delay=0.3), timeout=3.0, settle=0.05) as session:
         first = session.result()
-        started = time.monotonic()
+
+        # The second frame is still in flight here: the quiet window closed
+        # after the first, and the pump keeps running until the block exits.
+        deadline = time.monotonic() + 2.0
+        while session.running and len(session._found) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert len(session._found) == 2, "the later address never arrived, so this proves nothing"
         second = session.result()
 
-    assert first == second == ["198.51.100.36"]
-    assert time.monotonic() - started < 0.05
+    assert first == ["198.51.100.36"]
+    assert second == first, "the recorded answer changed after a later address arrived"
 
 
 def test_the_answer_survives_the_block_it_was_captured_in() -> None:
