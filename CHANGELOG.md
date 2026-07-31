@@ -5,6 +5,26 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.6.0] 2026-08-01 01:08:25
+
+## [1.6.0] 2026-08-01
+
+### Added
+
+- **`family=` on the three calls that return addresses**, matching the twelve probing functions
+  that already had it: `find_ip_by_mac`, `neighbours` and `arp_scan` now take
+  `family=AddressFamily.IPV4` / `IPV6`, and `find-ip`, `arp-scan` and `neighbours` take `-4` /
+  `-6` on the command line, spelled as on `resolve`. One hardware address commonly holds an IPv4
+  AND an IPv6 link-local, and they come back in the order the cache learned them, so a caller
+  taking the first entry of an unfiltered list was letting that order decide - and got a
+  link-local whenever one happened to be learned first. Keyword-only and defaulting to `None`,
+  so the unfiltered behaviour is unchanged.
+
+  Unlike `resolve`, asking for a family the target does not hold returns an EMPTY result rather
+  than raising: empty already means "not known here" for these calls, and "that MAC holds no
+  IPv6" is an ordinary finding, not a failure.
+
+
 ## [1.5.0] 2026-07-31 23:04:58
 
 ### Fixed

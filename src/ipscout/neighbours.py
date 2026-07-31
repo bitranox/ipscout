@@ -28,6 +28,7 @@ Note:
 
 from __future__ import annotations
 
+import ipaddress
 import sys
 
 from .errors import IPScoutUnsupportedError
@@ -76,13 +77,44 @@ def normalise_mac(mac: str) -> str | None:
     return ":".join(digits[index : index + 2] for index in range(0, _MAC_DIGITS, 2))
 
 
-def neighbours() -> tuple[Neighbour, ...]:
+def _version_of(ip: str) -> int | None:
+    """The address family of ``ip`` as 4 or 6, or None when it will not parse."""
+
+    try:
+        return ipaddress.ip_address(ip).version
+    except ValueError:  # pragma: no cover - the kernel does not emit these
+        return None
+
+
+def of_family(entries: tuple[Neighbour, ...], family: AddressFamily | None) -> tuple[Neighbour, ...]:
+    """Keep the entries in ``family``, or all of them when it is ``None``.
+
+    One place, because the three address-returning calls must agree on what "IPv4" selects.
+    An entry the kernel listed with an address that will not parse is dropped rather than
+    guessed at; that cannot happen from a real cache, and a caller asking for one family has
+    said they will not handle the other.
+
+    Read from the ADDRESS, not from ``entry.family``: that field is stored and defaults to
+    IPv4, so a record built without it claims IPv4 while holding an IPv6 address. The backends
+    do set it, but deriving here cannot disagree with ``scoped``, which is also derived.
+    """
+    if family is None:
+        return entries
+    wanted = 4 if family is AddressFamily.IPV4 else 6
+    return tuple(entry for entry in entries if _version_of(entry.ip) == wanted)
+
+
+def neighbours(*, family: AddressFamily | None = None) -> tuple[Neighbour, ...]:
     """Return every entry this host's neighbour cache currently holds.
 
+    Args:
+        family: Restrict to one address family. ``None``, the default, returns
+            both, which is what this has always done.
+
     Returns:
-        One record per entry, across both address families. Entries with no
-        learned hardware address are not included: an unanswered query is not
-        a neighbour this host knows.
+        One record per entry, in the family asked for. Entries with no learned
+        hardware address are not included: an unanswered query is not a
+        neighbour this host knows.
 
     Note:
         Passive by definition. It reports what the kernel already learned, so
@@ -102,7 +134,7 @@ def neighbours() -> tuple[Neighbour, ...]:
         from .neighbours_macos import list_neighbours  # noqa: PLC0415 - macOS-only import
     else:
         from .neighbours_linux import list_neighbours  # noqa: PLC0415 - Linux-only import
-    return list_neighbours()
+    return of_family(list_neighbours(), family)
 
 
 def _sending_interface(ip: str, family: AddressFamily) -> tuple[str, str, str]:

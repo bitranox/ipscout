@@ -492,11 +492,13 @@ def _neighbour_table(entries: tuple[Neighbour, ...]) -> Table:
 
 
 @cli.command("neighbours", context_settings=CLICK_CONTEXT_SETTINGS)
+@option("-4", "ipv4", is_flag=True, default=False, help="Report only IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Report only IPv6.")
 @click.pass_context
-def cli_neighbours(ctx: click.Context) -> None:
+def cli_neighbours(ctx: click.Context, *, ipv4: bool, ipv6: bool) -> None:
     """List the neighbour cache: which addresses this host has learned."""
 
-    entries = neighbours()
+    entries = neighbours(family=_family(ipv4=ipv4, ipv6=ipv6))
     _emit(ctx, CommandName.NEIGHBOURS, entries, lambda: console.print(_neighbour_table(entries)))
     if not entries:
         ctx.exit(EXIT_NOT_REACHED)
@@ -534,8 +536,12 @@ def cli_mac(ctx: click.Context, ip: str, *, strict: bool, active: bool) -> None:
 @argument("mac")
 @option("--scan", is_flag=True, default=False, help="Sweep the subnet first, so hosts not spoken to recently are found.")
 @option("--network", default=None, help="CIDR to sweep. Defaults to the subnets this host is attached to.")
+@option("-4", "ipv4", is_flag=True, default=False, help="Report only IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Report only IPv6.")
 @click.pass_context
-def cli_find_ip(ctx: click.Context, mac: str, *, scan: bool, network: str | None) -> None:
+def cli_find_ip(  # noqa: PLR0913 - one parameter per documented CLI option; collapsing them would hide the interface
+    ctx: click.Context, mac: str, *, scan: bool, network: str | None, ipv4: bool, ipv6: bool
+) -> None:
     """Find which addresses currently hold a hardware address."""
 
     if network is not None and not scan:
@@ -555,7 +561,7 @@ def cli_find_ip(ctx: click.Context, mac: str, *, scan: bool, network: str | None
             scope = sweep_scope(network)
         # The scope reported is the scope swept, rather than two independent
         # computations that could disagree if an interface changed between them.
-        addresses = find_ip_by_mac(mac, scan=scan, scope=scope)
+        addresses = find_ip_by_mac(mac, scan=scan, scope=scope, family=_family(ipv4=ipv4, ipv6=ipv6))
     except (IPScoutError, ValueError) as exc:
         _fail(ctx, CommandName.FIND_IP, exc, skipped=scope.skipped if scope else ())
         return
@@ -575,14 +581,16 @@ def cli_find_ip(ctx: click.Context, mac: str, *, scan: bool, network: str | None
 @cli.command("arp-scan", context_settings=CLICK_CONTEXT_SETTINGS)
 @option("--network", default=None, help="CIDR to sweep. Defaults to the subnets this host is attached to.")
 @option("--concurrency", type=int, default=64, show_default=True, help="Probes in flight at once.")
+@option("-4", "ipv4", is_flag=True, default=False, help="Report only IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Report only IPv6.")
 @click.pass_context
-def cli_arp_scan(ctx: click.Context, *, network: str | None, concurrency: int) -> None:
+def cli_arp_scan(ctx: click.Context, *, network: str | None, concurrency: int, ipv4: bool, ipv6: bool) -> None:
     """Sweep a network, then report every hardware address it learned."""
 
     scope: SweepScope | None = None
     try:
         scope = sweep_scope(network)
-        entries = arp_scan(scope=scope, concurrency=concurrency)
+        entries = arp_scan(scope=scope, concurrency=concurrency, family=_family(ipv4=ipv4, ipv6=ipv6))
     except (IPScoutError, ValueError) as exc:
         _fail(ctx, CommandName.ARP_SCAN, exc, skipped=scope.skipped if scope else ())
         return

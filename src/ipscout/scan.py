@@ -38,8 +38,8 @@ from typing import TYPE_CHECKING
 from .api import ping_many
 from .errors import IPScoutSweepIncompleteError, IPScoutSweepTooWideError
 from .interfaces import local_interfaces
-from .models import SweepScope
-from .neighbours import neighbours, normalise_mac
+from .models import AddressFamily, SweepScope
+from .neighbours import neighbours, normalise_mac, of_family
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -272,6 +272,7 @@ def arp_scan(
     scope: SweepScope | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     timeout: float = DEFAULT_SWEEP_TIMEOUT,
+    family: AddressFamily | None = None,
 ) -> tuple[Neighbour, ...]:
     """Sweep a network, then return what the neighbour cache learned from it.
 
@@ -283,6 +284,9 @@ def arp_scan(
             sweep under a different bound. Mutually exclusive with ``network``.
         concurrency: How many probes are in flight at once.
         timeout: Seconds to wait for each reply.
+        family: Restrict the RESULT to one address family. The sweep itself is
+            IPv4 either way - there is no IPv6 sweep - but the cache it then
+            reads holds both, so the choice belongs on the way out.
 
     Returns:
         Every cache entry that falls inside the swept networks. Hosts that
@@ -309,16 +313,17 @@ def arp_scan(
 
     plan = _plan(network, scope)
     _refuse_an_empty_scope(plan)
-    return _sweep(plan, concurrency=concurrency, timeout=timeout)
+    return of_family(_sweep(plan, concurrency=concurrency, timeout=timeout), family)
 
 
-def find_ip_by_mac(
+def find_ip_by_mac(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful
     mac: str,
     *,
     scan: bool = False,
     network: str | None = None,
     scope: SweepScope | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
+    family: AddressFamily | None = None,
 ) -> list[str]:
     """Return the addresses currently holding a hardware address.
 
@@ -333,6 +338,14 @@ def find_ip_by_mac(
         scope: A plan from :func:`sweep_scope` to sweep exactly as it stands.
             Mutually exclusive with ``network``.
         concurrency: How many probes are in flight at once.
+        family: Restrict to one address family. Worth asking for whenever the
+            answer is going to be connected to: one hardware address commonly
+            holds an IPv4 AND an IPv6 link-local, and they come out in the
+            order the cache learned them, so taking the first of an unfiltered
+            list is decided by that order rather than by what the caller can
+            use. Unlike :func:`resolve`, a family this hardware does not hold
+            is an empty list, not an error - empty already means "not known
+            here" for this call, and "holds no IPv6" is an ordinary finding.
 
     Returns:
         Every address holding that hardware address, which can legitimately be
@@ -364,11 +377,12 @@ def find_ip_by_mac(
 
     _refuse_a_sweep_argument_without_a_sweep(scan=scan, network=network, scope=scope)
     if not scan:
-        return _matching(neighbours(), wanted)
+        return _matching(of_family(neighbours(), family), wanted)
 
     plan = _plan(network, scope)
     _refuse_an_empty_scope(plan)
-    found = _matching(_sweep(plan, concurrency=concurrency, timeout=DEFAULT_SWEEP_TIMEOUT), wanted)
+    swept = of_family(_sweep(plan, concurrency=concurrency, timeout=DEFAULT_SWEEP_TIMEOUT), family)
+    found = _matching(swept, wanted)
     if not found:
         _refuse_a_partial_miss(mac, plan)
     return found
