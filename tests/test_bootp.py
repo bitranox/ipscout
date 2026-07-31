@@ -22,12 +22,9 @@ from dhcp_capture_fixture import REAL_REPLY_FRAMES
 from ipscout.arp import ETH_P_IP, ETH_P_IPV6, ETH_P_VLAN, ETHERNET
 from ipscout.bootp import (
     BOOTP_FIXED_SIZE,
-    BOOTREPLY,
-    BOOTREQUEST,
-    DHCPACK,
-    DHCPNAK,
-    DHCPOFFER,
     MAGIC_COOKIE,
+    BootpOperation,
+    DhcpMessageType,
     DhcpReply,
     merge_offers,
     offers_from_frames,
@@ -58,8 +55,8 @@ def _reply_frame(
     *,
     client_mac: str = GUEST_MAC,
     yiaddr: str = "198.51.100.36",
-    operation: int = BOOTREPLY,
-    message_type: int | None = DHCPOFFER,
+    operation: BootpOperation = BootpOperation.REPLY,
+    message_type: DhcpMessageType | None = DhcpMessageType.OFFER,
     server_ip: str = "198.51.100.1",
     cookie: bool = True,
     tags: int = 0,
@@ -189,13 +186,13 @@ def test_a_client_request_offers_nothing_and_is_not_a_reply() -> None:
 
 
 def test_a_packet_travelling_the_other_way_is_not_a_reply() -> None:
-    assert DhcpReply.from_frame(_reply_frame(operation=BOOTREQUEST)) is None
+    assert DhcpReply.from_frame(_reply_frame(operation=BootpOperation.REQUEST)) is None
 
 
 def test_a_refusal_hands_out_no_address_so_it_never_counts() -> None:
     # A DHCPNAK sets yiaddr to zero, so the same rule that drops a request
     # drops it too, without needing to know the message type at all.
-    assert DhcpReply.from_frame(_reply_frame(yiaddr=_OFFERS_NOTHING, message_type=DHCPNAK)) is None
+    assert DhcpReply.from_frame(_reply_frame(yiaddr=_OFFERS_NOTHING, message_type=DhcpMessageType.NAK)) is None
 
 
 @pytest.mark.parametrize(
@@ -268,6 +265,10 @@ def test_a_plain_bootp_reply_without_options_still_hands_out_an_address() -> Non
 def test_no_prefix_of_a_real_frame_ever_raises() -> None:
     # A capture truncated mid-packet is ordinary input, not an exception.
     frame = REAL_REPLY_FRAMES["offer_198.51.100.36"]
+    # The contract is asserted by the absence of an exception, so the count is
+    # asserted too: a fixture that shrank to nothing would otherwise leave this
+    # passing while covering almost no prefixes.
+    assert len(frame) > _SMALLEST_PARSEABLE
 
     for cut in range(len(frame) + 1):
         DhcpReply.from_frame(frame[:cut])
@@ -320,11 +321,44 @@ def test_merging_keeps_the_position_an_address_was_first_seen_at() -> None:
 
 
 def test_narrowing_to_one_message_type_selects_only_that_type() -> None:
-    offer = _reply_frame(yiaddr="198.51.100.36", message_type=DHCPOFFER)
-    ack = _reply_frame(yiaddr="198.51.100.51", message_type=DHCPACK)
+    offer = _reply_frame(yiaddr="198.51.100.36", message_type=DhcpMessageType.OFFER)
+    ack = _reply_frame(yiaddr="198.51.100.51", message_type=DhcpMessageType.ACK)
 
     assert offers_from_frames([offer, ack], mac=GUEST_MAC) == EXPECTED_OFFERS
-    assert offers_from_frames([offer, ack], mac=GUEST_MAC, message_types=frozenset({DHCPACK})) == ["198.51.100.51"]
+    assert offers_from_frames([offer, ack], mac=GUEST_MAC, message_types=frozenset({DhcpMessageType.ACK})) == ["198.51.100.51"]
+
+
+def test_the_message_type_numbers_are_the_ones_on_the_wire() -> None:
+    # An IntEnum member IS the byte, so this pins the wire values rather than
+    # merely the names: renumbering one would silently reinterpret captures.
+    assert (DhcpMessageType.DISCOVER, DhcpMessageType.OFFER, DhcpMessageType.ACK) == (1, 2, 5)
+    assert (DhcpMessageType.NAK, DhcpMessageType.INFORM) == (6, 8)
+    assert (BootpOperation.REQUEST, BootpOperation.REPLY) == (1, 2)
+
+
+def test_an_informing_host_is_a_recognised_type_not_an_unknown_one() -> None:
+    # Not hypothetical: an unrelated host's DHCPINFORM arrived mid-capture on
+    # the bridge this codec was measured against. It carries no address, so it
+    # never becomes an offer, but it must still parse as a known type.
+    reply = DhcpReply.from_frame(_reply_frame(message_type=DhcpMessageType.INFORM))
+
+    assert reply is not None
+    assert reply.message_type is DhcpMessageType.INFORM
+
+
+def test_a_message_type_this_codec_does_not_know_is_absent_rather_than_fatal() -> None:
+    # The hazard the enum introduces: a vendor or future option-53 value must
+    # not turn a real offer into a ValidationError. It reports no type, and
+    # the yiaddr rule still counts the address.
+    frame = _reply_frame()
+    unknown = bytearray(frame)
+    unknown[284] = 99
+
+    reply = DhcpReply.from_frame(bytes(unknown))
+
+    assert reply is not None
+    assert reply.message_type is None
+    assert offers_from_frames([bytes(unknown)], mac=GUEST_MAC) == ["198.51.100.36"]
 
 
 def test_a_typeless_reply_matches_only_the_unnarrowed_default() -> None:
@@ -333,4 +367,4 @@ def test_a_typeless_reply_matches_only_the_unnarrowed_default() -> None:
     plain = _reply_frame(cookie=False)
 
     assert offers_from_frames([plain], mac=GUEST_MAC) == ["198.51.100.36"]
-    assert offers_from_frames([plain], mac=GUEST_MAC, message_types=frozenset({DHCPOFFER})) == []
+    assert offers_from_frames([plain], mac=GUEST_MAC, message_types=frozenset({DhcpMessageType.OFFER})) == []

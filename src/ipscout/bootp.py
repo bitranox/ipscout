@@ -33,6 +33,7 @@ Note:
 
 from __future__ import annotations
 
+import enum
 import socket
 import struct
 from typing import TYPE_CHECKING
@@ -46,15 +47,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BOOTP_FIXED_SIZE",
-    "BOOTREPLY",
-    "BOOTREQUEST",
-    "DHCPACK",
-    "DHCPDISCOVER",
-    "DHCPNAK",
-    "DHCPOFFER",
     "DHCP_CLIENT_PORT",
     "DHCP_SERVER_PORT",
     "MAGIC_COOKIE",
+    "BootpOperation",
+    "DhcpMessageType",
     "DhcpReply",
     "merge_offers",
     "offers_from_frames",
@@ -84,21 +81,42 @@ DHCP_CLIENT_PORT = 68
 MAGIC_COOKIE = b"\x63\x82\x53\x63"
 _COOKIE_END = BOOTP_FIXED_SIZE + len(MAGIC_COOKIE)
 
-#: BOOTP operations.
-BOOTREQUEST = 1
-BOOTREPLY = 2
+
+class BootpOperation(enum.IntEnum):
+    """Which way a BOOTP packet is travelling.
+
+    ``IntEnum`` rather than ``StrEnum``: this is one byte of the fixed header
+    and is genuinely an integer on the wire, so the members compare equal to
+    the bytes without any conversion at the parse.
+    """
+
+    REQUEST = 1
+    REPLY = 2
+
 
 #: Ethernet is hardware type 1, with six-byte addresses. Anything else means
 #: ``chaddr`` is not a MAC, so comparing it to one would be meaningless.
 _HTYPE_ETHERNET = 1
 
-#: DHCP message types, carried in option 53.
-DHCPDISCOVER = 1
-DHCPOFFER = 2
-DHCPREQUEST = 3
-DHCPDECLINE = 4
-DHCPACK = 5
-DHCPNAK = 6
+
+class DhcpMessageType(enum.IntEnum):
+    """What a DHCP packet is saying, from option 53 (RFC 2132).
+
+    The whole RFC 2131 set, not only the ones this codec reasons about: a
+    capture sees the entire segment, and INFORM in particular turns up
+    unbidden from unrelated hosts. Declaring the full set is what keeps such a
+    packet a recognised value rather than an unknown one.
+    """
+
+    DISCOVER = 1
+    OFFER = 2
+    REQUEST = 3
+    DECLINE = 4
+    ACK = 5
+    NAK = 6
+    RELEASE = 7
+    INFORM = 8
+
 
 #: Option block codes used while walking it.
 _OPT_PAD = 0
@@ -185,7 +203,7 @@ def _udp_payload(packet: bytes) -> tuple[str, bytes] | None:
     return socket.inet_ntoa(packet[12:16]), packet[header_len + _UDP_HEADER_SIZE :]
 
 
-def _message_type(body: bytes) -> int | None:
+def _message_type(body: bytes) -> DhcpMessageType | None:
     """Return the DHCP message type in option 53, or None when there is none.
 
     A reply is not required to carry options at all - a plain BOOTP server
@@ -213,9 +231,21 @@ def _message_type(body: bytes) -> int | None:
         if position + 2 + length > len(body):
             return None
         if code == _OPT_MESSAGE_TYPE and length >= 1:
-            return body[position + 2]
+            # An unrecognised type is reported as absent rather than raised:
+            # a vendor or future value must not turn a real offer into an
+            # exception, and the yiaddr rule decides what counts anyway.
+            return _known_message_type(body[position + 2])
         position += 2 + length
     return None
+
+
+def _known_message_type(value: int) -> DhcpMessageType | None:
+    """Return the message type for a byte, or None when it names none."""
+
+    try:
+        return DhcpMessageType(value)
+    except ValueError:
+        return None
 
 
 class DhcpReply(BaseModel):
@@ -244,7 +274,7 @@ class DhcpReply(BaseModel):
     offered_ip: str
     server_ip: str
     transaction_id: int
-    message_type: int | None = None
+    message_type: DhcpMessageType | None = None
 
     @classmethod
     def from_frame(cls, frame: bytes) -> DhcpReply | None:
@@ -285,7 +315,7 @@ class DhcpReply(BaseModel):
         # travelling the other way, its chaddr is not a MAC so comparing it to
         # one would be meaningless, or it hands out no address at all - which
         # is what both a client request and a DHCPNAK look like.
-        if operation != BOOTREPLY or (htype, hlen) != (_HTYPE_ETHERNET, MAC_LENGTH) or yiaddr == _UNSPECIFIED:
+        if operation != BootpOperation.REPLY or (htype, hlen) != (_HTYPE_ETHERNET, MAC_LENGTH) or yiaddr == _UNSPECIFIED:
             return None
 
         client_mac = format_mac(chaddr[:MAC_LENGTH])
@@ -330,7 +360,7 @@ def merge_offers(existing: Sequence[str], new: Iterable[str]) -> list[str]:
     return merged
 
 
-def offers_from_frames(frames: Iterable[bytes], *, mac: str, message_types: frozenset[int] | None = None) -> list[str]:
+def offers_from_frames(frames: Iterable[bytes], *, mac: str, message_types: frozenset[DhcpMessageType] | None = None) -> list[str]:
     """Return every distinct address offered to one hardware address.
 
     Args:
