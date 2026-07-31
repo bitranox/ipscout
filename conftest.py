@@ -135,12 +135,26 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 
 def _skip_capture_doctests(items: list[pytest.Item]) -> None:
-    """Skip doctests that open a capture when this host may not open one."""
+    """Skip doctests that open a capture where this host cannot run them.
+
+    Two separate reasons, and they are not the same thing: the process may lack
+    the privilege, or the example may name an interface this platform does not
+    have. The examples say ``interface="lo"``, which is a POSIX device name -
+    Windows has no such adapter and SIO_RCVALL binds to an address anyway, so
+    the example is unrunnable there however elevated the process is.
+    """
 
     candidates = [item for item in items if any(marker in _doctest_source(item) for marker in _NEEDS_CAPTURE)]
-    if not candidates or dhcp_capture_available():
+    if not candidates:
         return
 
-    skip = pytest.mark.skip(reason="capturing DHCP needs root or CAP_NET_RAW here; the doctest opens a real link-layer socket")
+    if sys.platform == "win32":
+        reason = 'the example names the POSIX interface "lo"; Windows adapters are named differently and SIO_RCVALL binds to an address'
+    elif not dhcp_capture_available():
+        reason = "capturing DHCP needs root or CAP_NET_RAW here; the doctest opens a real link-layer socket"
+    else:
+        return
+
+    skip = pytest.mark.skip(reason=reason)
     for item in candidates:
         item.add_marker(skip)

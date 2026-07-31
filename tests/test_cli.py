@@ -11,6 +11,7 @@ import json
 from typing import Any
 
 import pytest
+from capture_support import capture_interface
 from click.testing import CliRunner
 
 import ipscout
@@ -43,10 +44,11 @@ ALL_COMMANDS: list[list[str]] = [
     ["scan-ports", "127.0.0.1", "--ports", "1", "--timeout", "0.3"],
     ["mtu", "127.0.0.1"],
     ["wake", "aa:bb:cc:dd:ee:ff", "--broadcast", "127.0.0.1"],
-    # A window short enough not to slow the sweep, on an interface that
-    # exists everywhere and that nothing ever DHCPs on. Naming "lo"
-    # deliberately also means the suite never sniffs a developer's real LAN.
-    ["observe-dhcp", "aa:bb:cc:dd:ee:ff", "--interface", "lo", "--timeout", "0.3", "--settle", "0.1"],
+    # A window short enough not to slow the sweep. The interface is chosen per
+    # platform: "lo" on POSIX, where nothing ever DHCPs, so the suite never
+    # sniffs a developer's real LAN. Windows has no "lo" and SIO_RCVALL binds
+    # to an address, so it gets a real adapter's - and is skipped if it has none.
+    ["observe-dhcp", "aa:bb:cc:dd:ee:ff", "--interface", capture_interface() or "lo", "--timeout", "0.3", "--settle", "0.1"],
     ["capabilities"],
     ["info"],
 ]
@@ -88,7 +90,9 @@ def _skip_what_this_host_cannot_do(args: list[str]) -> None:
     if args[0] == "traceroute" and not _traceroute_supported():
         pytest.skip("this platform does not surface ICMP Time Exceeded to an unprivileged process")
     if args[0] == "observe-dhcp" and not ipscout.dhcp_capture_available():
-        pytest.skip("capturing DHCP needs a link-layer socket, so root or CAP_NET_RAW")
+        pytest.skip("capturing DHCP needs elevation: root or CAP_NET_RAW on POSIX, Administrator on Windows")
+    if args[0] == "observe-dhcp" and capture_interface() is None:
+        pytest.skip("no interface on this host can be captured on")
 
 
 @pytest.mark.parametrize("args", ALL_COMMANDS, ids=lambda a: a[0])
@@ -231,13 +235,14 @@ def test_observe_dhcp_reports_the_window_its_empty_answer_rests_on(runner: CliRu
     # An empty list after sixty seconds and an empty list after a fifth of a
     # second are different facts, and a machine reader has no other way to
     # tell them apart.
-    if not ipscout.dhcp_capture_available():
-        pytest.skip("capturing DHCP needs a link-layer socket, so root or CAP_NET_RAW")
-    args = ["--json", "observe-dhcp", "aa:bb:cc:dd:ee:ff", "--interface", "lo", "--timeout", "0.3", "--settle", "0.1"]
+    interface = capture_interface()
+    if not ipscout.dhcp_capture_available() or interface is None:
+        pytest.skip("capturing DHCP needs elevation and an interface this host can watch")
+    args = ["--json", "observe-dhcp", "aa:bb:cc:dd:ee:ff", "--interface", interface, "--timeout", "0.3", "--settle", "0.1"]
     data = json.loads(_invoke(runner, args).output)["data"]
 
     assert data["addresses"] == []
-    assert (data["timeout"], data["settle"], data["interface"]) == (0.3, 0.1, "lo")
+    assert (data["timeout"], data["settle"], data["interface"]) == (0.3, 0.1, interface)
 
 
 def test_a_refused_sweep_reports_the_uncovered_network_as_data(runner: CliRunner) -> None:

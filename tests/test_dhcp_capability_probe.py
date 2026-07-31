@@ -155,4 +155,4 @@ def test_the_library_never_claims_more_than_the_platform_allows() -> None:
     # dhcp_capture_available() gates the CLI and the test sweep, so it
     # claiming a capability this host lacks would be worse than useless.
     if dhcp_capture_available():
-        assert sys.platform.startswith("linux"), "only the Linux backend exists so far"
+        assert sys.platform.startswith("linux") or sys.platform == "win32", "only Linux and Windows have a backend"

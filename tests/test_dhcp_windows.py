@@ -12,10 +12,10 @@ account, so unlike the Linux backend this one is genuinely exercised there.
 
 from __future__ import annotations
 
-import socket
 import sys
 
 import pytest
+from capture_support import capture_interface
 
 from ipscout.dhcp import _open_capture, dhcp_capture_available
 from ipscout.dhcp_windows import (
@@ -96,7 +96,9 @@ def test_a_real_capture_opens_and_satisfies_the_protocol() -> None:
     if not dhcp_capture_available():
         pytest.skip("this process is not elevated, so no raw socket may be opened")
 
-    address = socket.gethostbyname(socket.gethostname())
+    address = capture_interface()
+    if address is None:
+        pytest.skip("no capturable adapter on this host")
     with open_capture(address) as capture:
         assert isinstance(capture, PacketCapture)
         assert isinstance(capture, RawSocketCapture)
@@ -112,7 +114,10 @@ def test_the_facade_reaches_the_windows_backend() -> None:
     if not dhcp_capture_available():
         pytest.skip("this process is not elevated, so no raw socket may be opened")
 
-    with _open_capture(socket.gethostbyname(socket.gethostname())) as capture:
+    address = capture_interface()
+    if address is None:
+        pytest.skip("no capturable adapter on this host")
+    with _open_capture(address) as capture:
         assert isinstance(capture, RawSocketCapture)
 
 
@@ -130,4 +135,4 @@ def test_an_unelevated_process_is_refused_with_the_remedy_named() -> None:
         pytest.skip("this process is elevated, so there is no refusal to observe")
 
     with pytest.raises(IPScoutPermissionError, match="Administrator"):
-        open_capture(socket.gethostbyname(socket.gethostname()))
+        open_capture(capture_interface() or "127.0.0.1")

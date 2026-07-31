@@ -17,6 +17,7 @@ import time
 from typing import TYPE_CHECKING, TypedDict
 
 import pytest
+from capture_support import capture_interface
 from dhcp_capture_fixture import REAL_REPLY_FRAMES
 
 from ipscout.dhcp import (
@@ -307,7 +308,7 @@ def test_a_capture_that_cannot_open_says_so_before_the_caller_starts_anything() 
     if dhcp_capture_available():
         pytest.skip("this host may capture, so there is no refusal to observe")
 
-    with pytest.raises((IPScoutPermissionError, IPScoutUnsupportedError)), DhcpSession(GUEST_MAC, interface="lo"):
+    with pytest.raises((IPScoutPermissionError, IPScoutUnsupportedError)), DhcpSession(GUEST_MAC, interface=capture_interface() or "lo"):
         pytest.fail("the capture should not have opened")
 
 
@@ -315,10 +316,11 @@ def test_opening_a_real_capture_yields_something_satisfying_the_protocol() -> No
     # The mirror of the test above, for a host that does have the privilege.
     # Between them one of the two always runs, so the un-injected path is
     # never left entirely unexercised.
-    if not dhcp_capture_available():
+    interface = capture_interface()
+    if not dhcp_capture_available() or interface is None:
         pytest.skip("this host cannot capture, so there is nothing to open")
 
-    with DhcpSession(GUEST_MAC, interface="lo", timeout=0.2, settle=0.05) as session:
+    with DhcpSession(GUEST_MAC, interface=interface, timeout=0.2, settle=0.05) as session:
         assert session.result() == []
 
 
