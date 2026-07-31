@@ -49,7 +49,7 @@ import time
 from typing import TYPE_CHECKING
 
 from .api import is_reachable
-from .bootp import DhcpReply, merge_offers
+from .bootp import DhcpReply
 from .errors import IPScoutError, IPScoutUnsupportedError
 from .neighbours import normalise_mac
 from .routes import default_gateway
@@ -184,6 +184,7 @@ class DhcpSession:
 
         self._condition = threading.Condition()
         self._found: list[str] = []
+        self._seen: set[str] = set()
         self._last_seen: float | None = None
         self._started = 0.0
         self._finished = threading.Event()
@@ -233,9 +234,29 @@ class DhcpSession:
         self._capture = self._injected if self._injected is not None else _open_capture(interface, promiscuous=self._promiscuous)
 
         self._started = time.monotonic()
-        self._reader = threading.Thread(target=self._read_until_done, name=f"ipscout-dhcp-{self._mac}", daemon=True)
-        self._reader.start()
+        reader = threading.Thread(target=self._read_until_done, name=f"ipscout-dhcp-{self._mac}", daemon=True)
+        try:
+            reader.start()
+        except RuntimeError:
+            # A context manager's __exit__ runs only if __enter__ RETURNED, so
+            # anything that fails after the capture is open has to release it
+            # here or nothing ever will. That is not merely a leaked socket:
+            # the interface stays promiscuous for the life of the process,
+            # which is a host-wide state change this class promises to undo.
+            self._close_capture()
+            raise
+        self._reader = reader
         return self
+
+    def _close_capture(self) -> None:
+        """Release the capture, at most once, whatever else is going on."""
+
+        capture, self._capture = self._capture, None
+        if capture is not None:
+            # Closing twice is harmless, and a capture already torn down by a
+            # failure must not turn a tidy exit into a second error.
+            with contextlib.suppress(OSError):
+                capture.close()
 
     def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> None:
         """Stop watching and release the capture, whatever happened inside."""
@@ -275,13 +296,18 @@ class DhcpSession:
         if reply is None or reply.client_mac != self._mac:
             return
         with self._condition:
-            grown = merge_offers(self._found, [reply.offered_ip])
-            if len(grown) == len(self._found):
+            if reply.offered_ip in self._seen:
                 # A retransmission of an address already seen. It does not
                 # restart the quiet window, or a chatty server would hold the
                 # answer open indefinitely.
                 return
-            self._found = grown
+            # The incremental form of merge_offers: same rule, distinct and in
+            # first-seen order, but O(1) per frame. Rebuilding the list and its
+            # set on every arrival made this quadratic in the number of
+            # addresses, which is per-item work inside a per-item loop for no
+            # reason. A test asserts the two forms agree.
+            self._seen.add(reply.offered_ip)
+            self._found.append(reply.offered_ip)
             self._last_seen = time.monotonic()
             self._condition.notify_all()
 
@@ -396,12 +422,7 @@ class DhcpSession:
         reader, self._reader = self._reader, None
         if reader is not None:
             reader.join(_JOIN_TIMEOUT)
-        capture, self._capture = self._capture, None
-        if capture is not None:
-            # Closing twice is harmless, and a capture already torn down by a
-            # failure must not turn a tidy exit into a second error.
-            with contextlib.suppress(OSError):
-                capture.close()
+        self._close_capture()
         with self._condition:
             self._finished.set()
             self._condition.notify_all()
@@ -560,6 +581,12 @@ def observe_dhcp_first_reachable(  # noqa: PLR0913 - public API: every knob is k
         including when nothing was offered at all. Both are the same practical
         fact, "no usable address", and neither is an error.
 
+        **The two outcomes cost very different amounts of time.** An answer
+        returns as soon as that candidate replies, typically seconds. ``None``
+        costs the whole ``timeout``, because giving up early would mean
+        declaring a machine absent while its window was still open - so a
+        default call that finds nothing blocks for a minute.
+
     Raises:
         ValueError: The hardware address is not one.
         IPScoutPermissionError: Capturing needs a privilege this process lacks.
@@ -567,8 +594,11 @@ def observe_dhcp_first_reachable(  # noqa: PLR0913 - public API: every knob is k
         IPScoutError: The capture stopped part-way through the window.
 
     Note:
-        Consumes the stream rather than the finished list, so it returns as
-        soon as a candidate answers instead of waiting out the quiet window.
+        Consumes the stream rather than the finished list, so a SUCCESSFUL
+        answer returns immediately instead of waiting out the quiet window.
+        The settle window is set to the whole timeout here deliberately: there
+        is no reason to stop listening early when the thing being waited for
+        is an address that works, so a failure runs the window out.
         Reachability is asked through :func:`ipscout.is_reachable`, which
         never raises and falls back to TCP, because a machine that is up early
         in its boot routinely answers a port while still ignoring ICMP.

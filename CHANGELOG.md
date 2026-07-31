@@ -58,6 +58,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - **The CLI gained `observe-dhcp`**, and the command tables in `docs/usage.md` and
   `module_reference.md` are correct again - they claimed nine and seventeen commands while there
   were eighteen.
+- **The package summary is qualified rather than absolute.** It read "no subprocess, no admin
+  rights"; it now reads "no subprocess, and no admin rights on the default paths". The no-subprocess
+  half is unchanged and absolute. The privilege half never was: a SYN scan, an active MAC lookup and
+  traceroute on macOS have always needed elevation, and `observe_dhcp` is the first capability with
+  no unprivileged route to the same answer at all, so an unqualified claim had become the kind of
+  headline a reader would have to discover was wrong.
 
 ## [1.2.1] - 2026-07-30
 

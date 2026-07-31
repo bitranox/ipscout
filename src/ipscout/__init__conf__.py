@@ -24,7 +24,7 @@ import sys
 #: Distribution name declared in ``pyproject.toml``.
 name = "ipscout"
 #: Human-readable summary shown in CLI help output.
-title = "Ping, traceroute and local-network inspection in pure Python - no subprocess, no admin rights"
+title = "Ping, traceroute and local-network inspection in pure Python - no subprocess, and no admin rights on the default paths"
 #: Current release version pulled from ``pyproject.toml`` by automation.
 version = "1.3.0"
 #: Repository homepage presented to users.

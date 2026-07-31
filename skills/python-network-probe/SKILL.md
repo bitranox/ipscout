@@ -3,7 +3,7 @@ name: python-network-probe
 description: Use when Python code needs to ping a host, sweep hosts for reachability, measure round-trip time or packet loss, run a traceroute, scan ports, find a MAC address or the host holding one, read the neighbour/ARP cache, look up the default gateway or a route, inspect local interfaces and subnets, send a wake-on-LAN packet, find the path MTU, or watch a DHCP handshake to learn the address of a machine that has just been started and does not have one yet - especially when it must run as an ordinary user with no root, sudo, Administrator or CAP_NET_RAW, and must not shell out to ping, tracert, arp, ip, ifconfig or netstat. Also use when reaching for icmplib, scapy, python-nmap, netifaces, or subprocess around a system network command, or for tcpdump/tshark to watch a VM or container boot and find its address.
 ---
 
-# Network probing from Python without admin rights
+# Network probing from Python, unprivileged on the default paths
 
 ## Overview
 
@@ -166,7 +166,9 @@ hands out an address the guest declines offers the working one afterwards, so
 the list is chronological, not ranked. Taking `[0]` is how a perfectly
 reachable machine gets reported as never having booted. Either check each one,
 or let `observe_dhcp_first_reachable(mac, interface="br0")` do it - it returns
-as soon as a candidate answers, so it also skips the settle wait.
+as soon as a candidate answers, so a SUCCESSFUL lookup skips the settle
+wait entirely. Finding nothing still costs the whole `timeout`, because
+giving up earlier would declare a machine absent while its window was open.
 
 `result()` returns once 12 seconds pass with no new address, or when `timeout`
 runs out. That makes 12 seconds a floor on every call; if that is too slow,

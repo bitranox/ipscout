@@ -12,7 +12,7 @@
 [![Maintainability](https://qlty.sh/badges/041ba2c1-37d6-40bb-85a0-ec5a8a0aca0c/maintainability.svg)](https://qlty.sh/gh/bitranox/projects/ipscout)
 [![security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
-Ping, traceroute and local-network inspection in pure Python. No subprocess, no admin rights.
+Ping, traceroute and local-network inspection in pure Python. No subprocess, and no admin rights on the default paths.
 
 ## A red light that cannot go grey is decoration
 

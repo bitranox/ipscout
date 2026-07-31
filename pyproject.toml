@@ -1,7 +1,7 @@
 [project]
 name = "ipscout"
 version = "1.3.0"
-description = "Ping, traceroute and local-network inspection in pure Python - no subprocess, no admin rights"
+description = "Ping, traceroute and local-network inspection in pure Python - no subprocess, and no admin rights on the default paths"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

@@ -20,6 +20,7 @@ import pytest
 from capture_support import capture_interface
 from dhcp_capture_fixture import REAL_REPLY_FRAMES
 
+from ipscout.bootp import offers_from_frames
 from ipscout.dhcp import (
     DhcpSession,
     _open_capture,
@@ -199,6 +200,20 @@ def test_partly_consuming_the_stream_does_not_subtract_from_the_answer() -> None
             break
 
         assert session.result() == EXPECTED_OFFERS
+
+
+def test_the_incremental_ordering_matches_the_pure_rule() -> None:
+    # The session appends against a set rather than calling merge_offers per
+    # frame, because rebuilding the list and its set on every arrival was
+    # quadratic. That makes two implementations of one rule, so this pins them
+    # together: if they ever diverge, the answer's ORDER is what breaks.
+    frames = [FIRST, SECOND, FIRST, SECOND, FIRST]
+
+    with observe_dhcp_session(GUEST_MAC, capture=ScriptedCapture(*frames), **FAST) as session:
+        incremental = session.result()
+
+    assert incremental == offers_from_frames(frames, mac=GUEST_MAC)
+    assert incremental == EXPECTED_OFFERS
 
 
 def test_two_readers_each_see_the_whole_sequence() -> None:

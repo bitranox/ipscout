@@ -343,7 +343,10 @@ ipscout.observe_dhcp_first_reachable(mac, interface="br0")
 # '198.51.100.51', or None if nothing answered
 ```
 
-That returns as soon as a candidate answers, so it also skips the settle wait.
+That returns as soon as a candidate answers, so a successful lookup skips the
+settle wait entirely. The two outcomes cost very different amounts of time,
+though: `None` runs the whole `timeout` out, because giving up earlier would
+mean declaring a machine absent while its window was still open.
 For a custom stopping rule, iterate `session.offers()`, which yields each new
 address as it arrives; `result()` still reports all of them afterwards.
 

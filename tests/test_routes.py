@@ -26,7 +26,7 @@ import ipscout
 from ipscout import bsdroute, winapi
 from ipscout import routes_macos as macos
 from ipscout import routes_windows as windows
-from ipscout.cli import EXIT_NOT_REACHED, EXIT_OK, cli
+from ipscout.cli import EXIT_NOT_REACHED, EXIT_OK, cli, main
 from ipscout.models import AddressFamily, RouteInfo
 
 pytestmark = pytest.mark.os_agnostic
@@ -252,10 +252,13 @@ def test_the_gateway_command_emits_a_valid_envelope() -> None:
 
 @pytest.mark.os_agnostic
 def test_the_gateway_command_exits_one_when_there_is_no_route() -> None:
-    runner = CliRunner()
+    # Through main(), not CliRunner(standalone_mode=False): that harness swallows
+    # ctx.exit() and reports 0 for every not-reached path, so this assertion used
+    # to pass only because the developer box happens to HAVE a default route, and
+    # would have failed on the routeless host it is named for.
     expected = EXIT_OK if ipscout.default_gateway() is not None else EXIT_NOT_REACHED
 
-    assert runner.invoke(cli, ["gateway"], standalone_mode=False).exit_code == expected
+    assert main(["gateway"]) == expected
 
 
 @pytest.mark.os_agnostic

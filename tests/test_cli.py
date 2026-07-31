@@ -60,6 +60,14 @@ def runner() -> CliRunner:
 
 
 def _invoke(runner: CliRunner, args: list[str]) -> Any:
+    """Invoke for OUTPUT, never for an exit code.
+
+    ``standalone_mode=False`` makes Click swallow ``ctx.exit()``, so this
+    reports 0 for every command that exits 1 (not reached) or 2 (via ``_fail``).
+    Measured: ``find-ip`` with an unknown MAC gives 0 here and 1 for real.
+    Assert exit codes through :func:`main` or a standalone ``runner.invoke``.
+    """
+
     return runner.invoke(cli, args, standalone_mode=False)
 
 
@@ -215,6 +223,28 @@ def test_a_human_failure_does_not_name_a_python_class(runner: CliRunner) -> None
     assert "not a hardware address" in output
     assert "ValueError" not in output
     assert "IPScout" not in output
+
+
+@pytest.mark.parametrize(
+    ("args", "why"),
+    [
+        (["reachable", NEVER_ANSWERS, "--timeout", "1"], "nothing answers a TEST-NET-3 address"),
+        (["reverse-dns", NEVER_ANSWERS], "a reserved address has no PTR record"),
+        (["find-ip", "aa:bb:cc:dd:ee:ff"], "that hardware address holds nothing here"),
+        # "mac" is deliberately absent: for a routed address it reports the
+        # gateway's MAC labelled next_hop, which is a positive answer and
+        # exits 0. That is the documented router-hop behaviour, not a miss.
+    ],
+    ids=lambda v: v if isinstance(v, str) else v[0],
+)
+def test_a_valid_but_negative_answer_exits_one(args: list[str], why: str) -> None:
+    # Exit 1 is published in README, docs/usage.md and the shipped skill as the
+    # contract for machine consumers, so it needs pinning per command rather
+    # than trusting one example. Through main(), because CliRunner with
+    # standalone_mode=False swallows ctx.exit() and reports 0 for all of these.
+    _skip_what_this_host_cannot_do(args)
+
+    assert main(args) == EXIT_NOT_REACHED, why
 
 
 def test_observe_dhcp_refuses_a_bad_address_before_it_needs_any_privilege(runner: CliRunner) -> None:
