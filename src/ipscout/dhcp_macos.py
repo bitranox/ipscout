@@ -44,6 +44,7 @@ import contextlib
 import os
 import select
 import struct
+import sys
 from collections import deque
 
 from .bpf import BIOCGDLT, DLT_EN10MB, iter_bpf_frames, open_bpf_device
@@ -54,6 +55,21 @@ __all__ = ["BpfCapture", "capture_available", "open_capture"]
 
 #: The first device to try when only asking whether one may be opened at all.
 _PROBE_DEVICE = "/dev/bpf0"
+
+
+def _require_bpf() -> None:
+    """Refuse before touching a device where the platform has no BPF at all.
+
+    The mirror of ``dhcp_linux._af_packet``: a backend guards its own platform
+    facility with this package's error rather than letting a foreign one
+    escape. Without it the first call reaches ``fcntl``, which does not exist
+    off Unix, and a ``ModuleNotFoundError`` leaves the package's promise that
+    every failure is an ``IPScoutError`` untrue for exactly this path.
+    """
+
+    if not sys.platform.startswith(("darwin", "freebsd", "openbsd", "netbsd")):  # pragma: no cover - non-BSD
+        msg = f"the BPF devices are a BSD facility and this process is on {sys.platform!r}"
+        raise IPScoutUnsupportedError(msg)
 
 
 def _permission_error(exc: OSError) -> IPScoutPermissionError:
@@ -166,6 +182,7 @@ def open_capture(interface: str, *, promiscuous: bool = True) -> BpfCapture:
 
     """
 
+    _require_bpf()
     try:
         descriptor, buffer_length = open_bpf_device(interface, promiscuous=promiscuous, complete_headers=False)
     except PermissionError as exc:

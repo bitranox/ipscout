@@ -380,6 +380,16 @@ def test_each_supported_platform_dispatches_to_its_own_backend(platform: str, re
         _open_capture("br0", platform=platform)
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32", "sunos5"])
+def test_no_backend_ever_leaks_a_foreign_exception(platform: str) -> None:
+    # The package promises every failure is an IPScoutError. A backend reaching
+    # for a facility its host lacks broke that: on Windows the macOS backend hit
+    # 'import fcntl' and raised ModuleNotFoundError straight through the public
+    # API. CI caught it; this keeps it caught for every backend, not just that one.
+    with pytest.raises((IPScoutError, ValueError)):
+        _open_capture("br0", platform=platform)
+
+
 # --------------------------------------------------------------------------
 # The first-reachable convenience
 # --------------------------------------------------------------------------
