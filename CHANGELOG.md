@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.3.0] 2026-07-31 14:42:32
+
 ### Added
 
 - **`observe_dhcp()`, `observe_dhcp_session()` and `observe_dhcp_first_reachable()`: find a machine
