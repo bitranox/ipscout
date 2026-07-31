@@ -5,6 +5,37 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.4.0] 2026-07-31 16:30:04
+
+
+### Added
+
+- **A macOS capture backend, through `/dev/bpf`.** `observe_dhcp` now works on all three
+  platforms. macOS has no `AF_PACKET`; it has the BSD packet filter, the same facility `tcpdump`
+  uses and one this package already opens to resolve neighbours actively. The plumbing moved into
+  a shared `bpf` module rather than being copied, for the reason `unixio` already records: the
+  first copy was written into the macOS neighbour backend and the next caller re-derived it. This
+  was that next caller.
+
+  Two things the BSD filter needs that the Linux one does not. A read returns SEVERAL frames at
+  once, packed with per-record headers and 4-byte alignment, so the surplus is held and handed out
+  on later calls - dropping it would lose exactly the reply being waited for, since a DHCP exchange
+  arrives in a burst. And a device reports its framing through `BIOCGDLT`: loopback uses `DLT_NULL`,
+  which prefixes a protocol family rather than an Ethernet header, so a non-Ethernet link type is
+  refused by name instead of quietly decoding the wrong bytes.
+
+### Changed
+
+- **The macOS device path ships untested on real hardware, and says so in the module, the skill and
+  the docs.** No CI runner may open a BPF device - measured, `/dev/bpf0` is refused with EACCES on
+  every macos-latest lane - and it was written without a Mac to hand. What IS proven is everything
+  that does not need the device: the ioctl encoding is pinned against the values in `<net/bpf.h>`,
+  including that `BIOCPROMISC` is an `_IO` request carrying no argument, and the record splitting is
+  pinned against hand-built buffers. Linux remains the backend to trust; it is exercised as root on
+  a developer box and against a real bridge.
+- **The `fcntl` typed facade accepts a request with no argument.** Its Protocol declared the ioctl
+  argument as required, which a BSD `_IO` request does not take. Widened to match what the module
+  really accepts, rather than suppressing the type error at the one call site that needed it.
 ## [1.3.0] 2026-07-31 14:42:32
 
 ### Added

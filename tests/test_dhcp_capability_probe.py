@@ -16,7 +16,9 @@ settle:
     intuitive answer. Measure it rather than believing it.
 
     **macOS** - BPF through ``/dev/bpf``, which this package already uses to
-    resolve neighbours actively. Needs root, which a runner does not have.
+    resolve neighbours actively. Implemented, but needs root, which a runner
+    does not have - so this probe reports "no" there and the device path stays
+    unproven until somebody runs it on real hardware.
 
 This module answers that empirically on whatever host it runs on and reports
 the answer in the test output. It never fails a build: an unprivileged or
@@ -155,4 +157,4 @@ def test_the_library_never_claims_more_than_the_platform_allows() -> None:
     # dhcp_capture_available() gates the CLI and the test sweep, so it
     # claiming a capability this host lacks would be worse than useless.
     if dhcp_capture_available():
-        assert sys.platform.startswith("linux") or sys.platform == "win32", "only Linux and Windows have a backend"
+        assert sys.platform.startswith("linux") or sys.platform in {"win32", "darwin"}, "no backend exists for this platform"

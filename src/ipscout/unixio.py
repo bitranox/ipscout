@@ -25,9 +25,15 @@ __all__ = ["fcntl_module"]
 
 
 class _Fcntl(Protocol):
-    """The one ``fcntl`` call this package makes, in the one form used."""
+    """The ``fcntl`` calls this package makes, in the forms it uses.
 
-    def ioctl(self, fd: int, request: int, arg: bytes, /) -> bytes: ...
+    ``arg`` is optional because a BSD ``_IO`` request - ``BIOCPROMISC``, for
+    one - carries no argument at all, and passing one makes the kernel refuse
+    the call. Declaring it required would have forced a suppression at that
+    call site instead of typing what the module really accepts.
+    """
+
+    def ioctl(self, fd: int, request: int, arg: bytes = ..., /) -> bytes: ...
 
 
 def fcntl_module() -> _Fcntl:

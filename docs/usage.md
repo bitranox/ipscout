@@ -358,16 +358,19 @@ because only the whole window can establish absence, and it returns `[]` rather
 than raising: a machine that did not appear is a different fact from a capture
 that could not run.
 
-Needs elevation: root or `CAP_NET_RAW` on Linux, Administrator on Windows.
-macOS raises `IPScoutUnsupportedError`. Ask `ipscout.dhcp_capture_available()`
-first. The interface goes into promiscuous mode for the session's lifetime,
+Needs elevation on every platform: root or `CAP_NET_RAW` on Linux, root on
+macOS, Administrator on Windows. Ask `ipscout.dhcp_capture_available()` first.
+The macOS backend's device path has not been run on real hardware - no CI runner
+may open a BPF device - so treat it as new; on macOS name a bridge or physical
+interface rather than `lo0`, which is not Ethernet-framed and is refused. The interface goes into promiscuous mode for the session's lifetime,
 which is not optional in practice: on a bridge a reply is forwarded to the
 guest's own port and a Linux client does not set the broadcast flag that would
 make it visible otherwise.
 
-The two backends do not see the same traffic, and it is worth knowing which you
-are on. Linux binds `AF_PACKET` to the interface you name, so pointing it at a
-bridge shows the frames the bridge forwards to its guests. Windows uses
+The backends do not all see the same traffic, and it is worth knowing which you
+are on. Linux binds `AF_PACKET` and macOS a `/dev/bpf` device to the interface
+you name, so pointing either at a bridge shows the frames the bridge forwards to
+its guests. Windows uses
 `SIO_RCVALL` on a raw socket, which shows what reaches this host's own
 interface - on a Hyper-V virtual switch that does **not** include other guests'
 traffic unless the port is configured to mirror it. On Windows `interface=` may

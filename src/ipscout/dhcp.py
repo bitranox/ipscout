@@ -650,6 +650,10 @@ def dhcp_capture_available() -> bool:
         from .dhcp_windows import capture_available as windows_capture_available  # noqa: PLC0415 - Windows-only import
 
         return windows_capture_available()
+    if sys.platform == "darwin":  # pragma: no cover - macOS only
+        from .dhcp_macos import capture_available as macos_capture_available  # noqa: PLC0415 - macOS-only import
+
+        return macos_capture_available()
     return False
 
 
@@ -676,14 +680,9 @@ def _open_capture(interface: str, *, promiscuous: bool = True, platform: str = s
 
         return open_capture(interface, promiscuous=promiscuous)
     if platform == "darwin":
-        msg = (
-            "observing DHCP is not implemented on macOS yet. The mechanism exists - BPF, through "
-            "/dev/bpf, which this package already uses to resolve neighbours - but it is unmeasured "
-            "here, and shipping an untested capture would report a machine that booted fine as one "
-            "that never appeared. Read this host's own lease with subnet_info() instead, which needs "
-            "nothing but only describes this host, or watch from the Linux host owning the bridge"
-        )
-        raise IPScoutUnsupportedError(msg)
+        from .dhcp_macos import open_capture as open_macos_capture  # noqa: PLC0415 - macOS-only import
+
+        return open_macos_capture(interface, promiscuous=promiscuous)
     if platform == "win32":
         from .dhcp_windows import open_capture as open_windows_capture  # noqa: PLC0415 - Windows-only import
 

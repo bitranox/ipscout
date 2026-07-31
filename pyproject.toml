@@ -1,6 +1,6 @@
 [project]
 name = "ipscout"
-version = "1.3.0"
+version = "1.4.0"
 description = "Ping, traceroute and local-network inspection in pure Python - no subprocess, and no admin rights on the default paths"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -195,6 +195,7 @@ omit = [
   "src/ipscout/leases_linux.py",
   "src/ipscout/dhcp_linux.py",
   "src/ipscout/dhcp_windows.py",
+  "src/ipscout/dhcp_macos.py",
 ]
 fail_under = 85
 show_missing = true
@@ -252,8 +253,8 @@ layers = [
   "ipscout.interfaces : ipscout.routes",
   "ipscout.service",
   "ipscout.factory",
-  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows : ipscout.routes_linux : ipscout.routes_macos : ipscout.routes_windows : ipscout.neighbours_linux : ipscout.neighbours_macos : ipscout.neighbours_windows : ipscout.dhcp_linux : ipscout.dhcp_windows",
-  "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi : ipscout.netlink : ipscout.bsdroute : ipscout.arp : ipscout.tcpsyn : ipscout.pool : ipscout.unixio : ipscout.bootp",
+  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows : ipscout.routes_linux : ipscout.routes_macos : ipscout.routes_windows : ipscout.neighbours_linux : ipscout.neighbours_macos : ipscout.neighbours_windows : ipscout.dhcp_linux : ipscout.dhcp_windows : ipscout.dhcp_macos",
+  "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi : ipscout.netlink : ipscout.bsdroute : ipscout.arp : ipscout.tcpsyn : ipscout.pool : ipscout.unixio : ipscout.bootp : ipscout.bpf",
   "ipscout.models",
   "ipscout.errors",
 ]

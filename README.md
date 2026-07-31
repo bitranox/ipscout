@@ -264,7 +264,7 @@ Measured on real CI runners, not assumed.
 | Traceroute              | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | no, raises `IPScoutUnsupportedError` | yes, `IP_TTL_EXPIRED_TRANSIT`          |
 | Async on the event loop | yes, one socket per probe          | yes, one socket per probe            | no, `IcmpSendEcho` runs in an executor |
 | Interface listing       | yes, `getifaddrs`                  | yes, `getifaddrs`                    | yes, `GetAdaptersAddresses`            |
-| Observing a DHCP handshake | yes, `AF_PACKET`, needs root    | no, raises `IPScoutUnsupportedError` | yes, `SIO_RCVALL`, needs Administrator |
+| Observing a DHCP handshake | yes, `AF_PACKET`, needs root    | yes, `/dev/bpf`, needs root (untested on real hardware) | yes, `SIO_RCVALL`, needs Administrator |
 
 Ask the host itself rather than guessing, with `ipscout capabilities` or `ipscout.icmp_available()`.
 

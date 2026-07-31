@@ -152,7 +152,7 @@ Established by running the suite on real CI runners, not by reading documentatio
 | Async model             | one socket on the event loop       | one socket on the event loop  | blocking C call in a thread pool  |
 | Interface enumeration   | `getifaddrs`                       | `getifaddrs`                  | `GetAdaptersAddresses`            |
 | Route lookup            | netlink `RTM_GETROUTE`             | not implemented               | not implemented                   |
-| Observing a DHCP handshake | `AF_PACKET`, needs root         | not implemented               | `SIO_RCVALL`, needs Administrator |
+| Observing a DHCP handshake | `AF_PACKET`, needs root         | `/dev/bpf`, needs root        | `SIO_RCVALL`, needs Administrator |
 
 ### Traceroute on macOS
 
@@ -225,6 +225,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `bsdroute.py` | Routing-message and `sockaddr` walkers for the macOS backends, plus `sysctl`.     |
 | `arp.py`      | ARP and NDP codecs. Testable without the privilege the sockets need.              |
 | `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.           |
+| `bpf.py`      | BSD packet filter ioctl encoding and record splitting, shared by two backends.   |
 | `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.             |
 
 ### Platform backends
@@ -243,6 +244,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `neighbours_linux.py`   | `RTM_GETNEIGH` for both families in one dump; `AF_PACKET` ARP and raw ICMPv6 for the active path.                        |
 | `dhcp_linux.py`         | `AF_PACKET` bound to `ETH_P_IP`, plus the `PACKET_ADD_MEMBERSHIP` promiscuous join that drops with the socket. |
 | `dhcp_windows.py`       | A raw IPv4 socket put into promiscuous receive with `SIO_RCVALL`; no driver, but a weaker promise. |
+| `dhcp_macos.py`         | A `/dev/bpf` device bound to one interface, buffering the several frames each read returns. |
 | `neighbours_macos.py`   | `NET_RT_FLAGS` sysctl dump; BPF for the active path.                                                                     |
 | `neighbours_windows.py` | `GetIpNetTable2`; `SendARP` and `ResolveIpNetEntry2` for the active path.                                                |
 | `leases_linux.py`       | systemd-networkd and dhclient lease stores. Reads a file; sends no DHCP traffic.                                         |
@@ -331,6 +333,13 @@ and it was measured rather than assumed: `windows-latest` runs elevated, so the
 Windows backend is covered on every push, while `ubuntu-latest` (euid 1001) and
 `macos-latest` (euid 501) are unprivileged and always skip theirs.
 `tests/test_dhcp_capability_probe.py` records that per runner.
+
+The macOS backend is therefore the one whose device path has never been run:
+Linux is exercised on a developer box as root and against a real bridge, Windows
+on every CI push, and macOS nowhere. Its ioctl encoding is pinned against the
+values in `<net/bpf.h>` and its record splitting against hand-built buffers, so
+the arithmetic is proven; the syscalls are not. That is stated in the module
+rather than left for a reader to discover.
 
 ## The error contract
 
