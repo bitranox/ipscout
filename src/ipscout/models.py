@@ -58,6 +58,7 @@ __all__ = [
     "MtuReport",
     "Neighbour",
     "NeighbourState",
+    "ObserveDhcpReport",
     "PackageInfo",
     "PortResult",
     "PortScanReport",
@@ -198,6 +199,7 @@ class CommandName(str, enum.Enum):
     SCAN_PORTS = "scan-ports"
     MTU = "mtu"
     WAKE = "wake"
+    OBSERVE_DHCP = "observe-dhcp"
     CAPABILITIES = "capabilities"
     INFO = "info"
 
@@ -614,6 +616,27 @@ class FindIpReport(_Frozen):
     scope: SweepScope | None = None
 
 
+class ObserveDhcpReport(_Frozen):
+    """The addresses a DHCP server was seen offering to one machine.
+
+    Attributes:
+        timeout: The window that was watched, and ``settle`` the quiet period
+            that ended it. Both are recorded for the reason :class:`SweepScope`
+            records its limit: an empty list after sixty seconds and an empty
+            list after a fifth of a second are different facts, and a reader
+            has no other way to tell them apart.
+        interface: Which interface was watched. An empty answer from the wrong
+            one means nothing at all.
+
+    """
+
+    mac: str
+    interface: str | None = None
+    addresses: tuple[str, ...] = ()
+    timeout: float
+    settle: float
+
+
 class CapabilityReport(_Frozen):
     """What this host can actually do.
 
@@ -624,6 +647,7 @@ class CapabilityReport(_Frozen):
     icmp_ipv4: bool
     icmp_ipv6: bool
     traceroute: bool
+    dhcp_capture: bool
 
 
 class ReachabilityReport(_Frozen):

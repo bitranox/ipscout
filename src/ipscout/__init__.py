@@ -37,6 +37,13 @@ from .api import (
     ping,
     ping_many,
 )
+from .dhcp import (
+    DhcpSession,
+    dhcp_capture_available,
+    observe_dhcp,
+    observe_dhcp_first_reachable,
+    observe_dhcp_session,
+)
 from .errors import (
     IPScoutError,
     IPScoutPermissionError,
@@ -86,6 +93,7 @@ __all__ = [
     "AddressFamily",
     "CapabilityReport",
     "CommandName",
+    "DhcpSession",
     "IPScoutError",
     "IPScoutPermissionError",
     "IPScoutResolutionError",
@@ -120,6 +128,7 @@ __all__ = [
     "atrace_path",
     "atraceroute",
     "default_gateway",
+    "dhcp_capture_available",
     "find_ip_by_mac",
     "get_mac_address",
     "icmp_available",
@@ -129,6 +138,9 @@ __all__ = [
     "lookup_mac",
     "neighbours",
     "normalise_mac",
+    "observe_dhcp",
+    "observe_dhcp_first_reachable",
+    "observe_dhcp_session",
     "parse_ports",
     "path_mtu",
     "ping",

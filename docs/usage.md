@@ -309,6 +309,58 @@ worth knowing:
   find something returns it, though the list can be short an address that hardware holds on the
   network left out.
 
+## Watching a DHCP handshake
+
+Everything above needs the target already up and answering. A machine that has
+just been started has no address, answers no ARP, and has no neighbour entry -
+and it asks for an address about a second after the start command. Watching
+that exchange is the only way to catch it.
+
+```python
+import ipscout
+
+with ipscout.observe_dhcp_session(mac, interface="br0", timeout=150) as watch:
+    start_the_machine()  # the handshake happens ~1s into this
+    addresses = watch.result()
+# ['198.51.100.36', '198.51.100.51']
+```
+
+Start the session *before* the machine. A one-shot `observe_dhcp(mac,
+interface="br0")` begins capturing when it is called, which is already too late
+if the start command went first; it is there for a machine that is booting
+anyway. Opening the capture on entry is also what makes a missing privilege
+surface before you start anything, rather than as an empty list two minutes
+later.
+
+**Every offer is returned, in the order seen, and the last one is usually the
+address that stuck.** A pool that hands out an address the guest declines after
+duplicate-address detection offers a working one seconds later, and both land in
+the same exchange. Taking `addresses[0]` is exactly how a reachable machine gets
+reported as never having booted. Check each, or let the wrapper do it:
+
+```python
+ipscout.observe_dhcp_first_reachable(mac, interface="br0")
+# '198.51.100.51', or None if nothing answered
+```
+
+That returns as soon as a candidate answers, so it also skips the settle wait.
+For a custom stopping rule, iterate `session.offers()`, which yields each new
+address as it arrives; `result()` still reports all of them afterwards.
+
+`result()` blocks until 12 seconds pass with no new address (`settle`), or until
+`timeout` runs out - so 12 seconds is a floor on every call. If that is too slow,
+use `offers()`; do not shorten `timeout`, which cuts off the second offer and
+re-creates the problem above. Nothing appearing at all costs the full `timeout`,
+because only the whole window can establish absence, and it returns `[]` rather
+than raising: a machine that did not appear is a different fact from a capture
+that could not run.
+
+Needs root or `CAP_NET_RAW`, and Linux. Ask `ipscout.dhcp_capture_available()`
+first. The interface goes into promiscuous mode for the session's lifetime,
+which is not optional in practice: on a bridge a reply is forwarded to the
+guest's own port and a Linux client does not set the broadcast flag that would
+make it visible otherwise.
+
 ## Routes and subnets
 
 ```python
@@ -366,19 +418,29 @@ one produces a silent black hole.
 
 ## The CLI
 
-Nine commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
+19 commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
 
-| Command        | What it does                                                 |
-|----------------|--------------------------------------------------------------|
-| `ping`         | Ping a host and report what came back.                       |
-| `ping-many`    | Ping many hosts concurrently.                                |
-| `reachable`    | Answer whether a host responds, by ICMP or failing that TCP. |
-| `traceroute`   | Report the path packets take to a host.                      |
-| `resolve`      | Resolve a hostname to its addresses.                         |
-| `reverse-dns`  | Resolve an address back to a hostname.                       |
-| `interfaces`   | List local network interfaces.                               |
-| `capabilities` | Report what this host can actually do.                       |
-| `info`         | Print resolved package metadata.                             |
+| Command        | What it does                                                            |
+|----------------|-------------------------------------------------------------------------|
+| `ping`         | Ping a host and report what came back.                                  |
+| `ping-many`    | Ping many hosts concurrently.                                           |
+| `reachable`    | Answer whether a host responds, by ICMP or failing that TCP.            |
+| `traceroute`   | Report the path packets take to a host.                                 |
+| `resolve`      | Resolve a hostname to its addresses.                                    |
+| `reverse-dns`  | Resolve an address back to a hostname.                                  |
+| `interfaces`   | List local network interfaces.                                          |
+| `gateway`      | Show the default route, or the next hop toward one address.             |
+| `neighbours`   | List the neighbour cache: which addresses this host has learned.        |
+| `mac`          | Show the hardware address for an address, and whose it is.              |
+| `find-ip`      | Find which addresses currently hold a hardware address.                 |
+| `arp-scan`     | Sweep a network, then report every hardware address it learned.         |
+| `subnet`       | Show addressing, gateway and stored DHCP facts per subnet.              |
+| `scan-ports`   | Report which ports are open, closed or filtered.                        |
+| `mtu`          | Show the largest packet that reaches a target unfragmented.             |
+| `wake`         | Send a wake-on-LAN magic packet.                                        |
+| `observe-dhcp` | Watch a DHCP handshake for the addresses offered to a hardware address. |
+| `capabilities` | Report what this host can actually do.                                  |
+| `info`         | Print resolved package metadata.                                        |
 
 Global options, which live on the group so they compose with every subcommand:
 
@@ -403,6 +465,7 @@ Per-command options:
 | `resolve`      | `-4`, `-6`                                                                                                |
 | `reverse-dns`  | none beyond the global flags                                                                              |
 | `interfaces`   | none beyond the global flags                                                                              |
+| `observe-dhcp` | `--interface` (the default route's), `--timeout` (60.0), `--settle` (12.0)                                |
 | `capabilities` | none beyond the global flags                                                                              |
 | `info`         | none beyond the global flags                                                                              |
 
@@ -427,6 +490,7 @@ ipscout subnet                            # addressing, gateway, stored DHCP fac
 ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
 ipscout mtu 8.8.8.8
 ipscout wake aa:bb:cc:dd:ee:ff --broadcast 192.168.1.255
+ipscout observe-dhcp 02:00:5e:10:00:00 --interface br0   # needs root; last line is the bound address
 ipscout capabilities
 ipscout info
 ```
@@ -631,6 +695,11 @@ Everything below is exported from the package root. This table is generated from
 | `sweep_scope`      | function  | Which networks a sweep would cover, and which it would not.       |
 | `trace_path`       | function  | Walk the hop limit over a transport the caller owns.              |
 | `traceroute`       | function  | Report the path packets take to a target.                         |
+| `observe_dhcp`     | function  | Every address a DHCP server offers a machine, in order seen.      |
+| `observe_dhcp_first_reachable` | function | The first offered address that answers, or None.      |
+| `observe_dhcp_session` | function | The same, startable before the machine is started.            |
+| `dhcp_capture_available` | function | Whether this host may capture at all.                       |
+| `DhcpSession`      | class     | The running capture: result(), offers(), stop().                  |
 | `wake_on_lan`      | function  | Send a wake-on-LAN magic packet.                                  |
 
 Result models, all frozen Pydantic models with `extra="forbid"`:

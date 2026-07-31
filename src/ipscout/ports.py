@@ -10,6 +10,7 @@ Contents:
     EchoResult: What a single probe attempt reports back.
     EchoTransport: Synchronous probe interface.
     AsyncEchoTransport: The same contract for asyncio callers.
+    PacketCapture: A source of raw link-layer frames.
 
 Note:
     A transport reports *what happened*, including "nothing came back", and
@@ -27,7 +28,7 @@ from pydantic import BaseModel, ConfigDict
 if TYPE_CHECKING:
     from types import TracebackType
 
-__all__ = ["AsyncEchoTransport", "EchoResult", "EchoTransport"]
+__all__ = ["AsyncEchoTransport", "EchoResult", "EchoTransport", "PacketCapture"]
 
 
 class EchoResult(BaseModel):
@@ -109,6 +110,48 @@ class EchoTransport(Protocol):
         ...
 
     def __enter__(self) -> EchoTransport: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None: ...
+
+
+@runtime_checkable
+class PacketCapture(Protocol):
+    """A source of raw link-layer frames, read until the caller stops asking.
+
+    Implementations must be usable as a context manager so the caller can
+    release sockets and OS handles deterministically rather than at GC time.
+
+    Like :class:`EchoTransport`, a capture reports *what arrived*, including
+    "nothing did", and raises only when it cannot capture at all. Silence is
+    the ordinary case here rather than the exceptional one: a capture watching
+    for one machine's traffic spends nearly all of its time seeing none of it.
+    """
+
+    def receive(self, *, timeout: float) -> bytes | None:
+        """Return the next frame, or ``None`` if none arrived in ``timeout``.
+
+        Args:
+            timeout: Seconds to wait. A caller holding a deadline passes a
+                short slice of it repeatedly rather than the whole remainder,
+                so that a request to stop is noticed promptly.
+
+        Returns:
+            One frame exactly as captured, or ``None`` on timeout. ``None``
+            means "not yet", never "give up": when to stop is a decision only
+            the caller can make.
+        """
+        ...
+
+    def close(self) -> None:
+        """Release the socket or handle held by this capture."""
+        ...
+
+    def __enter__(self) -> PacketCapture: ...
 
     def __exit__(
         self,

@@ -34,6 +34,7 @@ from rich.table import Table
 
 from . import __init__conf__
 from .api import is_reachable, ping, ping_many
+from .dhcp import DEFAULT_SETTLE, DEFAULT_TIMEOUT, dhcp_capture_available, observe_dhcp
 from .errors import IPScoutError
 from .factory import icmp_available
 from .interfaces import local_interfaces
@@ -49,6 +50,7 @@ from .models import (
     MacScope,
     MtuReport,
     Neighbour,
+    ObserveDhcpReport,
     PackageInfo,
     PortResult,
     PortScanReport,
@@ -701,6 +703,30 @@ def cli_wake(ctx: click.Context, mac: str, *, broadcast: str, port: int) -> None
     _emit(ctx, CommandName.WAKE, payload, lambda: console.print(f"magic packet sent to {broadcast}:{port}", highlight=False))
 
 
+@cli.command("observe-dhcp", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("mac")
+@option("--interface", default=None, help="Interface to watch. Defaults to the one carrying the default route; name the bridge for a VM.")
+@option("--timeout", type=float, default=DEFAULT_TIMEOUT, show_default=True, help="Seconds to watch for the machine appearing.")
+@option("--settle", type=float, default=DEFAULT_SETTLE, show_default=True, help="Seconds of quiet after the last address before answering.")
+@click.pass_context
+def cli_observe_dhcp(ctx: click.Context, mac: str, *, interface: str | None, timeout: float, settle: float) -> None:
+    """Watch a DHCP handshake for the addresses offered to a hardware address."""
+
+    try:
+        addresses = observe_dhcp(mac, interface=interface, timeout=timeout, settle=settle)
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, CommandName.OBSERVE_DHCP, exc)
+        return
+
+    payload = ObserveDhcpReport(mac=mac, interface=interface, addresses=tuple(addresses), timeout=timeout, settle=settle)
+    # Printed in arrival order, and the last line is the address the machine
+    # most likely settled on rather than the first. Said in the docs rather
+    # than here, where it would print on every run.
+    _emit(ctx, CommandName.OBSERVE_DHCP, payload, lambda: console.print("\n".join(addresses) or "(nothing offered)", highlight=False))
+    if not addresses:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
 @cli.command("capabilities", context_settings=CLICK_CONTEXT_SETTINGS)
 @click.pass_context
 def cli_capabilities(ctx: click.Context) -> None:
@@ -733,6 +759,7 @@ def _probe_capabilities() -> CapabilityReport:
         icmp_ipv4=icmp_v4,
         icmp_ipv6=icmp_available(AddressFamily.IPV6),
         traceroute=_traceroute_available(icmp_v4=icmp_v4),
+        dhcp_capture=dhcp_capture_available(),
     )
 
 

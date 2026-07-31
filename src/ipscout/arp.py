@@ -23,6 +23,8 @@ import socket
 import struct
 
 __all__ = [
+    "ETHERNET",
+    "ETHERNET_HEADER_SIZE",
     "build_arp_request",
     "build_neighbour_solicitation",
     "format_mac",
@@ -32,8 +34,11 @@ __all__ = [
 ]
 
 #: Ethernet: destination, source, ethertype.
-_ETHERNET = struct.Struct("!6s6sH")
+ETHERNET = struct.Struct("!6s6sH")
+ETHERNET_HEADER_SIZE = ETHERNET.size
+ETH_P_IP = 0x0800
 ETH_P_ARP = 0x0806
+ETH_P_VLAN = 0x8100
 ETH_P_IPV6 = 0x86DD
 BROADCAST = b"\xff" * 6
 
@@ -117,7 +122,7 @@ def build_arp_request(*, sender_mac: str, sender_ip: str, target_ip: str) -> byt
         bytes(MAC_LENGTH),
         socket.inet_aton(target_ip),
     )
-    return _ETHERNET.pack(BROADCAST, sender, ETH_P_ARP) + body
+    return ETHERNET.pack(BROADCAST, sender, ETH_P_ARP) + body
 
 
 def parse_arp_reply(frame: bytes, target_ip: str) -> str | None:
@@ -139,13 +144,13 @@ def parse_arp_reply(frame: bytes, target_ip: str) -> str | None:
 
     """
 
-    if len(frame) < _ETHERNET.size + _ARP.size:
+    if len(frame) < ETHERNET.size + _ARP.size:
         return None
-    _dst, _src, ethertype = _ETHERNET.unpack(frame[: _ETHERNET.size])
+    _dst, _src, ethertype = ETHERNET.unpack(frame[: ETHERNET.size])
     if ethertype != ETH_P_ARP:
         return None
 
-    htype, ptype, hlen, plen, operation, sender_mac, sender_ip, _tha, _tpa = _ARP.unpack(frame[_ETHERNET.size : _ETHERNET.size + _ARP.size])
+    htype, ptype, hlen, plen, operation, sender_mac, sender_ip, _tha, _tpa = _ARP.unpack(frame[ETHERNET.size : ETHERNET.size + _ARP.size])
     if (htype, ptype, hlen, plen, operation) != (_HTYPE_ETHERNET, _PTYPE_IPV4, _HLEN, _PLEN, ARP_REPLY):
         return None
     # struct "4s" always yields four bytes, so this conversion cannot fail.

@@ -43,6 +43,10 @@ ALL_COMMANDS: list[list[str]] = [
     ["scan-ports", "127.0.0.1", "--ports", "1", "--timeout", "0.3"],
     ["mtu", "127.0.0.1"],
     ["wake", "aa:bb:cc:dd:ee:ff", "--broadcast", "127.0.0.1"],
+    # A window short enough not to slow the sweep, on an interface that
+    # exists everywhere and that nothing ever DHCPs on. Naming "lo"
+    # deliberately also means the suite never sniffs a developer's real LAN.
+    ["observe-dhcp", "aa:bb:cc:dd:ee:ff", "--interface", "lo", "--timeout", "0.3", "--settle", "0.1"],
     ["capabilities"],
     ["info"],
 ]
@@ -83,6 +87,8 @@ def _skip_what_this_host_cannot_do(args: list[str]) -> None:
         pytest.skip("unprivileged ICMP unavailable on this host")
     if args[0] == "traceroute" and not _traceroute_supported():
         pytest.skip("this platform does not surface ICMP Time Exceeded to an unprivileged process")
+    if args[0] == "observe-dhcp" and not ipscout.dhcp_capture_available():
+        pytest.skip("capturing DHCP needs a link-layer socket, so root or CAP_NET_RAW")
 
 
 @pytest.mark.parametrize("args", ALL_COMMANDS, ids=lambda a: a[0])
@@ -205,6 +211,33 @@ def test_a_human_failure_does_not_name_a_python_class(runner: CliRunner) -> None
     assert "not a hardware address" in output
     assert "ValueError" not in output
     assert "IPScout" not in output
+
+
+def test_observe_dhcp_refuses_a_bad_address_before_it_needs_any_privilege(runner: CliRunner) -> None:
+    # Runs on every host, including the ones that could never capture: the
+    # hardware address is validated before the socket is opened, so a typo is
+    # reported as a typo rather than as a missing permission.
+    # Invoked in standalone mode deliberately: ctx.exit() is swallowed by
+    # standalone_mode=False, so _invoke would report 0 here for any command
+    # that fails through _fail, including the ones that already existed.
+    result = runner.invoke(cli, ["observe-dhcp", "nonsense"])
+
+    assert result.exit_code == EXIT_ERROR
+    assert "not a hardware address" in result.output
+    assert "ValueError" not in result.output
+
+
+def test_observe_dhcp_reports_the_window_its_empty_answer_rests_on(runner: CliRunner) -> None:
+    # An empty list after sixty seconds and an empty list after a fifth of a
+    # second are different facts, and a machine reader has no other way to
+    # tell them apart.
+    if not ipscout.dhcp_capture_available():
+        pytest.skip("capturing DHCP needs a link-layer socket, so root or CAP_NET_RAW")
+    args = ["--json", "observe-dhcp", "aa:bb:cc:dd:ee:ff", "--interface", "lo", "--timeout", "0.3", "--settle", "0.1"]
+    data = json.loads(_invoke(runner, args).output)["data"]
+
+    assert data["addresses"] == []
+    assert (data["timeout"], data["settle"], data["interface"]) == (0.3, 0.1, "lo")
 
 
 def test_a_refused_sweep_reports_the_uncovered_network_as_data(runner: CliRunner) -> None:
@@ -337,7 +370,7 @@ def test_interfaces_renders_addresses_as_address_slash_prefix(runner: CliRunner)
 def test_capabilities_answers_with_a_boolean_per_capability(runner: CliRunner) -> None:
     data = json.loads(_invoke(runner, ["--json", "capabilities"]).output)["data"]
 
-    assert set(data) == {"icmp_ipv4", "icmp_ipv6", "traceroute"}
+    assert set(data) == {"icmp_ipv4", "icmp_ipv6", "traceroute", "dhcp_capture"}
     assert all(isinstance(value, bool) for value in data.values())
 
 

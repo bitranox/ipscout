@@ -5,6 +5,50 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- **`observe_dhcp()`, `observe_dhcp_session()` and `observe_dhcp_first_reachable()`: find a machine
+  that does not have an address yet.** Every other way this package finds a host needs it already up
+  and answering - a neighbour entry only exists after real traffic, a sweep needs the host to answer
+  ARP, and a lease describes this host rather than one handed to somebody else. A machine that has
+  just been started has none of those and asks for an address about a second later, so watching that
+  exchange is the only way to catch it. The session form is the important one: it opens the capture
+  on entry, so the machine can be started inside the block and a missing privilege surfaces before
+  anything is started rather than as an empty list two minutes later.
+- **Every offer is returned, in the order seen, not just the first.** A pool that hands out an
+  address the guest declines after duplicate-address detection offers a working one seconds later,
+  and both land in the same exchange. Returning the first is how a perfectly reachable machine gets
+  reported as never having booted. What that costs is that the answer is a list to check rather than
+  an address to use, and that the one which stuck is usually last, not first;
+  `observe_dhcp_first_reachable()` walks it and returns as soon as a candidate answers.
+- **`result()` waits for the exchange to go quiet, not for the whole window.** It answers once
+  `settle` seconds pass with no new address, each new one restarting that clock, bounded by
+  `timeout`. Nothing appearing at all costs the full window, because only the whole window can
+  establish absence. The cost is a second time knob and a floor of `settle` seconds on every call:
+  iterate `session.offers()` when that is too slow, rather than shortening `timeout`, which cuts off
+  the second offer and re-creates the problem above.
+- **A machine that never appears returns `[]`; a capture that could not run raises.** The same split
+  `IPScoutSweepIncompleteError` already draws, for the same reason: "did not appear" and "could not
+  look" are different facts and a caller has to be able to tell them apart.
+- **`dhcp_capture_available()`, and `dhcp_capture` on `capabilities`.** Ask before provoking an
+  error, as `icmp_available()` already allows.
+
+### Changed
+
+- **This is the first capability that needs elevation on the platform it works on, and the first
+  that reads traffic addressed to other hosts.** It is Linux only for now; macOS and Windows raise
+  `IPScoutUnsupportedError` naming the mechanism each would use and what to do meanwhile. It needs
+  root or `CAP_NET_RAW`, and unlike every other privileged operation here there is no unprivileged
+  route to the same answer - the error message says that rather than implying one exists. It also
+  puts the interface into promiscuous mode, which is not decorative: on a bridge a reply is
+  forwarded to the guest's own port, and a Linux client does not set the broadcast flag that would
+  make it visible otherwise, so without it the capture sees only address-less requests and reports a
+  healthy machine as absent. The join is reference-counted by the kernel and released with the
+  socket, so a crash cannot leave the interface promiscuous.
+- **The CLI gained `observe-dhcp`**, and the command tables in `docs/usage.md` and
+  `module_reference.md` are correct again - they claimed nine and seventeen commands while there
+  were eighteen.
+
 ## [1.2.1] - 2026-07-30
 
 ### Changed

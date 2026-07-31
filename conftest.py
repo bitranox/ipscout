@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from ipscout.dhcp import dhcp_capture_available
 from ipscout.factory import icmp_available
 
 if TYPE_CHECKING:
@@ -60,6 +61,14 @@ _NEEDS_ICMP = (
     "PosixEchoTransport(",
     "AsyncPosixEchoTransport(",
     "WindowsEchoTransport(",
+)
+
+#: Call fragments that open a link-layer capture, which needs root or
+#: CAP_NET_RAW. ``dhcp_capture_available(`` is deliberately absent: answering
+#: "no" is exactly what it is for, so its example runs everywhere.
+_NEEDS_CAPTURE = (
+    "observe_dhcp(",
+    "observe_dhcp_first_reachable(",
 )
 
 
@@ -112,6 +121,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """
 
     _skip_foreign_platform_doctests(items)
+    _skip_capture_doctests(items)
 
     candidates = [item for item in items if any(marker in _doctest_source(item) for marker in _NEEDS_ICMP)]
     if not candidates or _icmp_available():
@@ -120,5 +130,17 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     skip = pytest.mark.skip(
         reason='unprivileged ICMP unavailable on this host (set net.ipv4.ping_group_range="0 2147483647", or grant CAP_NET_RAW); the doctest sends a real echo'
     )
+    for item in candidates:
+        item.add_marker(skip)
+
+
+def _skip_capture_doctests(items: list[pytest.Item]) -> None:
+    """Skip doctests that open a capture when this host may not open one."""
+
+    candidates = [item for item in items if any(marker in _doctest_source(item) for marker in _NEEDS_CAPTURE)]
+    if not candidates or dhcp_capture_available():
+        return
+
+    skip = pytest.mark.skip(reason="capturing DHCP needs root or CAP_NET_RAW here; the doctest opens a real link-layer socket")
     for item in candidates:
         item.add_marker(skip)

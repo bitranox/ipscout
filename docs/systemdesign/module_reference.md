@@ -152,6 +152,7 @@ Established by running the suite on real CI runners, not by reading documentatio
 | Async model             | one socket on the event loop       | one socket on the event loop  | blocking C call in a thread pool  |
 | Interface enumeration   | `getifaddrs`                       | `getifaddrs`                  | `GetAdaptersAddresses`            |
 | Route lookup            | netlink `RTM_GETROUTE`             | not implemented               | not implemented                   |
+| Observing a DHCP handshake | `AF_PACKET`, needs root         | not implemented               | not implemented                   |
 
 ### Traceroute on macOS
 
@@ -207,6 +208,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `portscan.py`   | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                         |
 | `mtu.py`        | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                |
 | `wol.py`        | `wake_on_lan` and the magic packet it builds.                                                                   |
+| `dhcp.py`       | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                   |
 | `resolve.py`    | `resolve`, `resolve_one`, `reverse_dns`, `family_of`.                                                           |
 | `factory.py`    | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path. |
 
@@ -222,6 +224,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `netlink.py`  | Message and attribute walkers for the Linux route and neighbour backends.         |
 | `bsdroute.py` | Routing-message and `sockaddr` walkers for the macOS backends, plus `sysctl`.     |
 | `arp.py`      | ARP and NDP codecs. Testable without the privilege the sockets need.              |
+| `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.           |
 | `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.             |
 
 ### Platform backends
@@ -238,6 +241,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `routes_macos.py`       | `RTM_GET` on a routing socket, matched on pid and sequence because the socket is shared.                                 |
 | `routes_windows.py`     | `GetBestRoute2`, and `GetIpForwardTable2` for the zero-length prefix.                                                    |
 | `neighbours_linux.py`   | `RTM_GETNEIGH` for both families in one dump; `AF_PACKET` ARP and raw ICMPv6 for the active path.                        |
+| `dhcp_linux.py`         | `AF_PACKET` bound to `ETH_P_IP`, plus the `PACKET_ADD_MEMBERSHIP` promiscuous join that drops with the socket. |
 | `neighbours_macos.py`   | `NET_RT_FLAGS` sysctl dump; BPF for the active path.                                                                     |
 | `neighbours_windows.py` | `GetIpNetTable2`; `SendARP` and `ResolveIpNetEntry2` for the active path.                                                |
 | `leases_linux.py`       | systemd-networkd and dhclient lease stores. Reads a file; sends no DHCP traffic.                                         |
@@ -246,7 +250,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 
 | Module              | Role                                                                       |
 |---------------------|----------------------------------------------------------------------------|
-| `cli.py`            | The rich-click group, seventeen subcommands, `_emit` and `_fail`, `main`.  |
+| `cli.py`            | The rich-click group, nineteen subcommands, `_emit` and `_fail`, `main`.  |
 | `serialize.py`      | `to_jsonable` and `dumps` at the output boundary.                          |
 | `typed_click.py`    | Typed facade over rich-click's partially-typed decorators.                 |
 | `__main__.py`       | `python -m ipscout`.                                                       |
@@ -290,6 +294,28 @@ conversion happens at the boundary. `StrEnum` is the modern spelling but arrived
 package supports 3.10.
 
 ---
+
+### Observing DHCP
+
+The one capability here that needs elevation on the platform it works on, and
+the only one that reads traffic addressed to other hosts. Three decisions are
+load-bearing and each was measured rather than reasoned:
+
+- **Promiscuous mode is on by default.** On a bridge a reply is forwarded to
+  the guest's own port and never reaches the bridge device's receive path. It
+  is only visible without promiscuous mode if the client set the broadcast
+  flag, which Windows does and Linux generally does not. Measured on a real
+  bridge: every reply to a booting Linux guest was unicast. Without it the
+  backend sees only the broadcast requests, all of which carry no address, and
+  reports a healthy machine as absent.
+- **It joins with `PACKET_ADD_MEMBERSHIP`, not `SIOCSIFFLAGS`.** The kernel
+  reference-counts the membership and drops it when the socket closes, even on
+  an abrupt exit. The ioctl form leaves the interface promiscuous forever if
+  teardown is missed.
+- **Any `BOOTREPLY` with a non-zero `yiaddr` counts**, whatever its message
+  type. A real capture showed `OFFER, OFFER, ACK, OFFER, ACK` for one address;
+  duplicates de-duplicate regardless, so a narrower filter buys no precision
+  and can only lose addresses.
 
 ## The error contract
 
@@ -345,6 +371,15 @@ dead weight on the two platforms that cannot run it and sinks the gate on every 
 
 ---
 
+The capture backend follows the same split. `bootp.py` decodes frames and needs nothing, so every
+wire-format story runs unprivileged on every platform; `dhcp.py` is driven through the
+`PacketCapture` protocol in `ports.py` with an in-process double, so the ordering, the quiet
+window, the teardown and the error split are all exercised without a socket. The frames those
+tests replay are real, captured off a bridge during a guest's cold boot, so the codec is measured
+against the wire rather than against an idea of it. `tests/test_dhcp_capability_probe.py` follows
+the `test_ttl_capability_probe.py` pattern: it reports what each platform can actually do and never
+fails a build, and its recorded answer is what decides whether macOS and Windows get a real backend.
+
 ## Security considerations
 
 - **No subprocess, ever.** Nothing is spawned, so there is no shell quoting, no `PATH` lookup and no
@@ -358,6 +393,16 @@ dead weight on the two platforms that cannot run it and sinks the gate on every 
 - **Fixed-width ctypes.** `c_ulong` is 4 bytes on Windows and 8 on 64-bit Linux, so every Windows
   structure field is declared with an explicit width. That keeps layouts identical everywhere and
   lets tests assert the sizes from Linux.
+- **One capability reads other hosts' traffic, and says so.** `observe_dhcp` is the only thing
+  here that captures frames not addressed to this host, and it puts the interface into promiscuous
+  mode to do it. It is opt-in per call, it never transmits, the socket is bound to `ETH_P_IP` so
+  the kernel hands over nothing else, and replies are matched on the caller's own hardware address.
+  The promiscuous join is reference-counted by the kernel and released when the socket closes, so a
+  crashed process cannot leave the interface promiscuous.
+- **Captured frames are scrubbed before they become fixtures.** A DHCP option block carries the
+  site's routers, DNS and NTP servers and its internal domain (options 3, 6, 15, 42, 54, 119), none
+  of which a header-level rewrite touches. The checked-in fixture's options are truncated to the
+  message type, and a test asserts that, so a richer capture cannot be added without noticing.
 - **Dependency hygiene.** `pip-audit` and `bandit` run in CI; `codecov-cli` is commented out rather
   than deleted, because its `click<8.3.0` pin would drag click below the CVE-2026-7246 fix.
 

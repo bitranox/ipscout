@@ -47,7 +47,7 @@ Issues = "https://github.com/bitranox/ipscout/issues"
 dev = [
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
-  "ruff>=0.16.0",
+  "ruff>=0.16.1",
   "pyright[nodejs]>=1.1.411",
   "bandit>=1.9.4",
   # 1.5.1 was yanked upstream (unintended breaking changes), so 1.5.0 is the newest usable
@@ -193,6 +193,7 @@ omit = [
   "src/ipscout/neighbours_macos.py",
   "src/ipscout/neighbours_windows.py",
   "src/ipscout/leases_linux.py",
+  "src/ipscout/dhcp_linux.py",
 ]
 fail_under = 85
 show_missing = true
@@ -242,7 +243,7 @@ root_package = "ipscout"
 name = "Layered dependencies point one way only"
 type = "layers"
 layers = [
-  "ipscout.scan : ipscout.subnet : ipscout.portscan : ipscout.mtu : ipscout.wol",
+  "ipscout.scan : ipscout.subnet : ipscout.portscan : ipscout.mtu : ipscout.wol : ipscout.dhcp",
   "ipscout.api",
   "ipscout.traceroute",
   "ipscout.neighbours",
@@ -250,8 +251,8 @@ layers = [
   "ipscout.interfaces : ipscout.routes",
   "ipscout.service",
   "ipscout.factory",
-  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows : ipscout.routes_linux : ipscout.routes_macos : ipscout.routes_windows : ipscout.neighbours_linux : ipscout.neighbours_macos : ipscout.neighbours_windows",
-  "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi : ipscout.netlink : ipscout.bsdroute : ipscout.arp : ipscout.tcpsyn : ipscout.pool : ipscout.unixio",
+  "ipscout.transport_posix : ipscout.transport_windows : ipscout.transport_tcp : ipscout.interfaces_posix : ipscout.interfaces_windows : ipscout.routes_linux : ipscout.routes_macos : ipscout.routes_windows : ipscout.neighbours_linux : ipscout.neighbours_macos : ipscout.neighbours_windows : ipscout.dhcp_linux",
+  "ipscout.packet : ipscout.resolve : ipscout.ports : ipscout.winapi : ipscout.netlink : ipscout.bsdroute : ipscout.arp : ipscout.tcpsyn : ipscout.pool : ipscout.unixio : ipscout.bootp",
   "ipscout.models",
   "ipscout.errors",
 ]

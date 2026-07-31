@@ -76,8 +76,8 @@ context manager or a start/collect pair:
 
 ```python
 with ipscout.observe_dhcp_session(mac, interface="br0", timeout=150) as session:
-    start_the_machine()          # the handshake happens ~1s into this
-    addresses = session.result() # blocks until seen, or the timeout
+    start_the_machine()  # the handshake happens ~1s into this
+    addresses = session.result()  # blocks until seen, or the timeout
 ```
 
 The one-shot form is still worth having for the case where the machine is already booting.

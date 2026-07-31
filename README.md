@@ -158,14 +158,19 @@ ipscout.subnet_info()  # addressing, gateway, stored DHCP facts
 ipscout.scan_ports(host, "22,80,8000-8100")
 ipscout.path_mtu("8.8.8.8")
 ipscout.wake_on_lan(mac, broadcast="192.168.1.255")
+ipscout.observe_dhcp(mac, interface="br0")  # a machine that has no address yet (needs root)
 ```
 
 A MAC address does not survive a router hop, so `lookup_mac` puts the scope in the answer and
-`get_mac_address` returns `None` for anything routed rather than passing off the gateway's as the
-host's. A sweep with no network given covers the subnets this host is attached to that fit inside
-one sweep's 4096-address budget, and names the ones left out - a container bridge on a `/16` is
-skipped rather than cancelling the sweep, and a search that matched nothing while a network went
-uncovered says so instead of reporting "not found". Full worked examples are in [docs/usage.md](docs/usage.md).
+`get_mac_address` returns `None` for anything routed rather than passing off the gateway's as the host's. A
+sweep with no network given covers the subnets this host is attached to that fit inside one sweep's
+4096-address budget, and names the ones left out - a container bridge on a `/16` is skipped rather than
+cancelling the sweep, and a search that matched nothing while a network went uncovered says so instead of
+reporting "not found". One call is different in kind: `observe_dhcp` watches a DHCP handshake, so it is the
+only way here to find a machine that is not up yet - everything else needs the target already answering. It
+returns every address offered, in order, because a pool that hands out an address the guest declines offers
+the working one afterwards and the last is the one that stuck. Full worked examples are in
+[docs/usage.md](docs/usage.md).
 
 ## Output for machines
 
@@ -259,6 +264,7 @@ Measured on real CI runners, not assumed.
 | Traceroute              | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | no, raises `IPScoutUnsupportedError` | yes, `IP_TTL_EXPIRED_TRANSIT`          |
 | Async on the event loop | yes, one socket per probe          | yes, one socket per probe            | no, `IcmpSendEcho` runs in an executor |
 | Interface listing       | yes, `getifaddrs`                  | yes, `getifaddrs`                    | yes, `GetAdaptersAddresses`            |
+| Observing a DHCP handshake | yes, `AF_PACKET`, needs root    | no, raises `IPScoutUnsupportedError` | no, raises `IPScoutUnsupportedError`   |
 
 Ask the host itself rather than guessing, with `ipscout capabilities` or `ipscout.icmp_available()`.
 
