@@ -152,7 +152,7 @@ Established by running the suite on real CI runners, not by reading documentatio
 | Async model             | one socket on the event loop       | one socket on the event loop  | blocking C call in a thread pool  |
 | Interface enumeration   | `getifaddrs`                       | `getifaddrs`                  | `GetAdaptersAddresses`            |
 | Route lookup            | netlink `RTM_GETROUTE`             | not implemented               | not implemented                   |
-| Observing a DHCP handshake | `AF_PACKET`, needs root         | not implemented               | not implemented                   |
+| Observing a DHCP handshake | `AF_PACKET`, needs root         | not implemented               | `SIO_RCVALL`, needs Administrator |
 
 ### Traceroute on macOS
 
@@ -242,6 +242,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `routes_windows.py`     | `GetBestRoute2`, and `GetIpForwardTable2` for the zero-length prefix.                                                    |
 | `neighbours_linux.py`   | `RTM_GETNEIGH` for both families in one dump; `AF_PACKET` ARP and raw ICMPv6 for the active path.                        |
 | `dhcp_linux.py`         | `AF_PACKET` bound to `ETH_P_IP`, plus the `PACKET_ADD_MEMBERSHIP` promiscuous join that drops with the socket. |
+| `dhcp_windows.py`       | A raw IPv4 socket put into promiscuous receive with `SIO_RCVALL`; no driver, but a weaker promise. |
 | `neighbours_macos.py`   | `NET_RT_FLAGS` sysctl dump; BPF for the active path.                                                                     |
 | `neighbours_windows.py` | `GetIpNetTable2`; `SendARP` and `ResolveIpNetEntry2` for the active path.                                                |
 | `leases_linux.py`       | systemd-networkd and dhclient lease stores. Reads a file; sends no DHCP traffic.                                         |
@@ -316,6 +317,20 @@ load-bearing and each was measured rather than reasoned:
   type. A real capture showed `OFFER, OFFER, ACK, OFFER, ACK` for one address;
   duplicates de-duplicate regardless, so a narrower filter buys no precision
   and can only lose addresses.
+
+The two backends are NOT equivalent, and the shared function name must not be
+read as saying they are. `AF_PACKET` bound to a Linux bridge sees the frames
+the bridge forwards to its guests, which is the case the feature was built for.
+`SIO_RCVALL` sees what reaches this host's own interface; on a Hyper-V virtual
+switch that excludes other guests unless the port mirrors. Windows also delivers
+bare IPv4 packets with no link header, which the codec already accepts because
+it detects that shape from the data rather than from `sys.platform`.
+
+Which platforms CI can actually exercise is the inverse of the intuitive guess,
+and it was measured rather than assumed: `windows-latest` runs elevated, so the
+Windows backend is covered on every push, while `ubuntu-latest` (euid 1001) and
+`macos-latest` (euid 501) are unprivileged and always skip theirs.
+`tests/test_dhcp_capability_probe.py` records that per runner.
 
 ## The error contract
 

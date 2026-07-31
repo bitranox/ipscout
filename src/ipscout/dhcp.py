@@ -474,15 +474,17 @@ def observe_dhcp(  # noqa: PLR0913 - public API: every knob is keyword-only and 
         mac: The hardware address to watch for, in any common written form.
         interface: Which interface to watch. Defaults to the one carrying the
             default route; name the bridge explicitly for a virtual machine.
+            On Windows this may also be the IPv4 address to bind, since
+            ``SIO_RCVALL`` binds to an address rather than to a device.
         timeout: Seconds to watch before giving up.
         settle: Seconds of quiet before answering.
         capture: A substitute frame source, for tests.
-        promiscuous: Whether to put the interface into promiscuous mode, on by
-            default. **Turning it off usually means seeing nothing.** On a
-            bridge a reply is forwarded to the guest's own port and never
-            reaches this host's capture unless the interface is promiscuous,
-            and only a client that sets the broadcast flag is visible without
-            it - which Windows does and Linux generally does not.
+        promiscuous: Whether to capture promiscuously, on by default.
+            **Turning it off usually means seeing nothing.** On a bridge a
+            reply is forwarded to the guest's own port and never reaches this
+            host's capture unless the interface is promiscuous, and only a
+            client that sets the broadcast flag is visible without it - which
+            Windows does and Linux generally does not.
 
     Returns:
         Each distinct address offered, in the order first seen. Empty when
@@ -497,6 +499,12 @@ def observe_dhcp(  # noqa: PLR0913 - public API: every knob is keyword-only and 
         IPScoutError: The capture stopped part-way through the window.
 
     Note:
+        **What this sees differs by platform.** Linux binds a packet socket to
+        the interface named, so a bridge shows the frames it forwards to its
+        guests. Windows uses ``SIO_RCVALL``, which shows what reaches this
+        host's own interface - on a Hyper-V virtual switch that excludes other
+        guests unless the port is configured to mirror. macOS raises.
+
         **The address the machine most likely settled on is the last element,
         not the first.** A pool that hands out an address the guest declines
         offers the working one afterwards, so the order is chronological
@@ -604,11 +612,15 @@ def dhcp_capture_available() -> bool:
 
     """
 
-    if not _IS_LINUX:
-        return False
-    from .dhcp_linux import capture_available  # noqa: PLC0415 - Linux-only import
+    if _IS_LINUX:
+        from .dhcp_linux import capture_available  # noqa: PLC0415 - Linux-only import
 
-    return capture_available()
+        return capture_available()
+    if sys.platform == "win32":  # pragma: no cover - Windows only
+        from .dhcp_windows import capture_available as windows_capture_available  # noqa: PLC0415 - Windows-only import
+
+        return windows_capture_available()
+    return False
 
 
 def _default_interface() -> str:
@@ -643,13 +655,8 @@ def _open_capture(interface: str, *, promiscuous: bool = True, platform: str = s
         )
         raise IPScoutUnsupportedError(msg)
     if platform == "win32":
-        msg = (
-            "observing DHCP is not implemented on Windows yet. A driver-free path exists - a raw "
-            "socket in SIO_RCVALL promiscuous mode, needing Administrator - but it sees only what "
-            "this host's own interface sees, which on a Hyper-V switch excludes other guests' "
-            "traffic unless port mirroring is configured. Read this host's own lease with "
-            "subnet_info() instead, or watch from the Linux host owning the bridge"
-        )
-        raise IPScoutUnsupportedError(msg)
+        from .dhcp_windows import open_capture as open_windows_capture  # noqa: PLC0415 - Windows-only import
+
+        return open_windows_capture(interface, promiscuous=promiscuous)
     msg = f"observing DHCP needs a link-layer capture, and this package has no backend for {platform!r}"
     raise IPScoutUnsupportedError(msg)

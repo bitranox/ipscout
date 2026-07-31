@@ -36,10 +36,18 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 ### Changed
 
 - **This is the first capability that needs elevation on the platform it works on, and the first
-  that reads traffic addressed to other hosts.** It is Linux only for now; macOS and Windows raise
-  `IPScoutUnsupportedError` naming the mechanism each would use and what to do meanwhile. It needs
-  root or `CAP_NET_RAW`, and unlike every other privileged operation here there is no unprivileged
-  route to the same answer - the error message says that rather than implying one exists. It also
+  that reads traffic addressed to other hosts.** Linux uses `AF_PACKET` and needs root or
+  `CAP_NET_RAW`; Windows uses `SIO_RCVALL` on a raw socket and needs Administrator but no driver.
+  macOS raises `IPScoutUnsupportedError`: the mechanism exists there, but no CI runner is
+  privileged enough to test it, so shipping it would mean shipping code nobody has run. Unlike
+  every other privileged operation here there is no unprivileged route to the same answer - the
+  error message says that rather than implying one exists.
+- **What the two backends promise is not the same, and the docs say so rather than letting the
+  shared name imply otherwise.** Linux binds to the interface named, so a bridge shows the frames
+  it forwards to its guests - the case this was built for. Windows sees what reaches this host's
+  own interface, which on a Hyper-V virtual switch excludes other guests unless the port mirrors.
+  On Windows `interface=` also accepts an IPv4 address, because `SIO_RCVALL` binds to an address
+  rather than to a device. It also
   puts the interface into promiscuous mode, which is not decorative: on a bridge a reply is
   forwarded to the guest's own port, and a Linux client does not set the broadcast flag that would
   make it visible otherwise, so without it the capture sees only address-less requests and reports a

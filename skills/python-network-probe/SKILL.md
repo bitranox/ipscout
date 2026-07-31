@@ -173,9 +173,17 @@ runs out. That makes 12 seconds a floor on every call; if that is too slow,
 iterate `session.offers()` rather than shortening `timeout`, which truncates
 the second offer and re-creates the bug above.
 
-Linux only for now, and it needs root or `CAP_NET_RAW`. macOS and Windows raise
-`IPScoutUnsupportedError` naming what to do instead. Ask
+Linux and Windows, and it needs elevation on both: root or `CAP_NET_RAW` on
+Linux, Administrator on Windows. macOS raises `IPScoutUnsupportedError`. Ask
 `dhcp_capture_available()` first.
+
+**The two platforms do not promise the same thing, and the difference decides
+whether this works for you.** On Linux the capture binds to a bridge and sees
+the traffic the bridge forwards, including frames addressed to a guest - which
+is the VM case this exists for. On Windows it uses `SIO_RCVALL`, which sees
+what reaches *this host's* interface; on a Hyper-V virtual switch that excludes
+other guests unless the port is set to mirror. So Windows is right for DHCP on
+this host's own segment, and Linux is right for watching a guest boot.
 
 ## What needs privilege, and what it does about it
 
@@ -187,7 +195,7 @@ Everything above is unprivileged. These are not, and each raises
 | `scan_ports(..., method=ScanMethod.SYN)` | root / `CAP_NET_RAW`. Unavailable on Windows at any privilege level: raw TCP sends have been blocked since XP SP2 |
 | `lookup_mac(ip, active=True)` | root / `CAP_NET_RAW` on Linux and macOS. Windows IPv4 needs none (`SendARP`); Windows IPv6 needs Administrator    |
 | Traceroute on macOS           | a raw socket, so root. Unprivileged macOS does not surface Time Exceeded at all                                   |
-| `observe_dhcp(...)` and its session | root / `CAP_NET_RAW`, for a link-layer capture. Linux only; macOS and Windows raise `IPScoutUnsupportedError` |
+| `observe_dhcp(...)` and its session | root / `CAP_NET_RAW` on Linux, Administrator on Windows (`SIO_RCVALL`, no driver). macOS raises `IPScoutUnsupportedError` |
 
 Two rules these follow, worth relying on:
 

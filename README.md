@@ -158,7 +158,7 @@ ipscout.subnet_info()  # addressing, gateway, stored DHCP facts
 ipscout.scan_ports(host, "22,80,8000-8100")
 ipscout.path_mtu("8.8.8.8")
 ipscout.wake_on_lan(mac, broadcast="192.168.1.255")
-ipscout.observe_dhcp(mac, interface="br0")  # a machine that has no address yet (needs root)
+ipscout.observe_dhcp(mac, interface="br0")  # a machine that has no address yet (needs elevation)
 ```
 
 A MAC address does not survive a router hop, so `lookup_mac` puts the scope in the answer and
@@ -264,7 +264,7 @@ Measured on real CI runners, not assumed.
 | Traceroute              | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | no, raises `IPScoutUnsupportedError` | yes, `IP_TTL_EXPIRED_TRANSIT`          |
 | Async on the event loop | yes, one socket per probe          | yes, one socket per probe            | no, `IcmpSendEcho` runs in an executor |
 | Interface listing       | yes, `getifaddrs`                  | yes, `getifaddrs`                    | yes, `GetAdaptersAddresses`            |
-| Observing a DHCP handshake | yes, `AF_PACKET`, needs root    | no, raises `IPScoutUnsupportedError` | no, raises `IPScoutUnsupportedError`   |
+| Observing a DHCP handshake | yes, `AF_PACKET`, needs root    | no, raises `IPScoutUnsupportedError` | yes, `SIO_RCVALL`, needs Administrator |
 
 Ask the host itself rather than guessing, with `ipscout capabilities` or `ipscout.icmp_available()`.
 

@@ -330,8 +330,12 @@ def test_a_capture_that_dies_mid_window_raises_rather_than_answering_short() -> 
         session.result()
 
 
-@pytest.mark.parametrize(("platform", "expected"), [("darwin", "macOS"), ("win32", "Windows"), ("sunos5", "no backend")])
+@pytest.mark.parametrize(("platform", "expected"), [("darwin", "macOS"), ("sunos5", "no backend")])
 def test_a_platform_without_a_backend_says_which_and_why(platform: str, expected: str) -> None:
+    # Windows is deliberately absent: it HAS a backend now, and asserting a
+    # refusal there passed for the wrong reason while it did not - the Windows
+    # backend's own "iphlpapi is a Windows library" error merely contains the
+    # word "Windows".
     with pytest.raises(IPScoutUnsupportedError, match=expected):
         _open_capture("br0", platform=platform)
 
@@ -339,7 +343,15 @@ def test_a_platform_without_a_backend_says_which_and_why(platform: str, expected
 def test_the_refusal_names_something_a_reader_can_actually_do() -> None:
     # A refusal that only reports refusal leaves the reader stuck.
     with pytest.raises(IPScoutUnsupportedError, match="subnet_info"):
-        _open_capture("br0", platform="win32")
+        _open_capture("br0", platform="darwin")
+
+
+def test_windows_dispatches_to_its_own_backend_rather_than_refusing() -> None:
+    # Off Windows this cannot reach a socket, so what is asserted is the
+    # DISPATCH: the failure must come from the Windows backend looking for an
+    # adapter, not from the facade saying the platform is unsupported.
+    with pytest.raises(IPScoutUnsupportedError, match=r"iphlpapi|no interface named"):
+        _open_capture("Ethernet", platform="win32")
 
 
 # --------------------------------------------------------------------------
