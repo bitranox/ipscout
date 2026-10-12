@@ -63,6 +63,36 @@ Python 3.10 or newer. Runtime dependencies: `lib_cli_exit_tools`, `pydantic`, `r
 Full instructions, including `uvx` and per-user installs, are in
 [docs/installation.md](docs/installation.md).
 
+### Why we recommend uv: supply-chain protection
+
+This repository commits a `uv.lock`. It pins every package the project needs, transitive
+dependencies included, to an exact version and to the hashes of that version's files. The
+`exclude-newer` setting under `[tool.uv]` in `pyproject.toml` adds a cooldown: uv leaves any
+release younger than that out of the lock. CI installs from the lock, so a hijacked release that
+gets pulled again within the cooldown never reaches our builds, and a file whose hash does not
+match is refused.
+
+That protection stays in this repository. The installable package declares only lower bounds
+(`>=`) for its dependencies, so a plain `pip install` takes the newest release of every transitive
+dependency at the moment you run it. If one of them was hijacked an hour earlier, you get the
+hijacked version. `pipx install` and `uv tool install` without options do the same.
+
+To install the command line tool with a cooldown of your own (uv then skips any release younger
+than 7 days, transitive ones included), or to run the exact tree our CI tests:
+
+```bash
+uv tool install --exclude-newer "7 days" ipscout
+git clone https://github.com/bitranox/ipscout.git && cd ipscout && uv sync --locked && uv run ipscout --help
+```
+
+If you depend on ipscout in your own project, give that project the same cooldown (7 days here, as
+an example) and commit the `uv.lock` that `uv add ipscout` writes:
+
+```toml
+[tool.uv]
+exclude-newer = "7 days"
+```
+
 ## Quickstart, as a library
 
 ```python
@@ -225,10 +255,10 @@ ipscout --json ping nothing.invalid
 
 Exit codes are independent of the output format:
 
-| Code | Meaning                                                                   |
-|------|---------------------------------------------------------------------------|
-| 0    | Reached, or the command otherwise succeeded.                              |
-| 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.   |
+| Code | Meaning                                                                                             |
+|------|-----------------------------------------------------------------------------------------------------|
+| 0    | Reached, or the command otherwise succeeded.                                                        |
+| 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.                             |
 | 2    | Error. A bad name, a missing permission, a capability this host lacks, or a malformed command line. |
 
 ## For LLMs and coding agents
@@ -258,13 +288,13 @@ as `coding-python-network-probe`.
 
 Measured on real CI runners, not assumed.
 
-| Capability              | Linux                              | macOS                                | Windows                                |
-|-------------------------|------------------------------------|--------------------------------------|----------------------------------------|
-| ICMP ping, no admin     | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`   | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`     | yes, `iphlpapi.dll` via ctypes         |
-| Traceroute              | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | no, raises `IPScoutUnsupportedError` | yes, `IP_TTL_EXPIRED_TRANSIT`          |
-| Async on the event loop | yes, one socket per probe          | yes, one socket per probe            | no, `IcmpSendEcho` runs in an executor |
-| Interface listing       | yes, `getifaddrs`                  | yes, `getifaddrs`                    | yes, `GetAdaptersAddresses`            |
-| Observing a DHCP handshake | yes, `AF_PACKET`, needs root    | yes, `/dev/bpf`, needs root (untested on real hardware) | yes, `SIO_RCVALL`, needs Administrator |
+| Capability                 | Linux                              | macOS                                                   | Windows                                |
+|----------------------------|------------------------------------|---------------------------------------------------------|----------------------------------------|
+| ICMP ping, no admin        | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`   | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`                        | yes, `iphlpapi.dll` via ctypes         |
+| Traceroute                 | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | no, raises `IPScoutUnsupportedError`                    | yes, `IP_TTL_EXPIRED_TRANSIT`          |
+| Async on the event loop    | yes, one socket per probe          | yes, one socket per probe                               | no, `IcmpSendEcho` runs in an executor |
+| Interface listing          | yes, `getifaddrs`                  | yes, `getifaddrs`                                       | yes, `GetAdaptersAddresses`            |
+| Observing a DHCP handshake | yes, `AF_PACKET`, needs root       | yes, `/dev/bpf`, needs root (untested on real hardware) | yes, `SIO_RCVALL`, needs Administrator |
 
 Ask the host itself rather than guessing, with `ipscout capabilities` or `ipscout.icmp_available()`.
 
