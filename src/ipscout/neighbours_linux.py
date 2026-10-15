@@ -131,6 +131,74 @@ def _is_not_a_neighbour(ip: str) -> bool:
     return address.is_multicast or address.is_unspecified
 
 
+def _read_address_attributes(payload: bytes, family: int) -> tuple[str | None, str | None]:
+    """Return the destination address and link address an entry carries.
+
+    Args:
+        payload: One ``RTM_NEWNEIGH`` message payload, ndmsg header included.
+        family: The entry's address family, which decides how to render the
+            destination.
+
+    Returns:
+        The textual destination address and the formatted MAC, each ``None``
+        when the entry lacks it or it does not decode. A later attribute of the
+        same kind overwrites an earlier one only when it decodes.
+
+    """
+
+    ip: str | None = None
+    mac: str | None = None
+    for attribute, value in iter_attributes(payload, _NDMSG.size):
+        if attribute == _NDA_DST:
+            with contextlib.suppress(OSError, ValueError):
+                ip = socket.inet_ntop(family, value)
+        elif attribute == _NDA_LLADDR:
+            mac = format_mac(value)
+    return ip, mac
+
+
+def _interface_name(ifindex: int) -> str | None:
+    """Return the interface name for a kernel index, or ``None`` when unknown."""
+
+    if ifindex <= 0:
+        return None
+    with contextlib.suppress(OSError, ValueError):
+        return socket.if_indextoname(ifindex)
+    return None
+
+
+def _neighbour_from_payload(payload: bytes) -> Neighbour | None:
+    """Decode one ``RTM_NEWNEIGH`` payload into a neighbour, if it names one.
+
+    Args:
+        payload: The message payload, at least one ndmsg header long.
+
+    Returns:
+        The entry, or ``None`` when it is unresolved or failed, of a family
+        other than IPv4/IPv6, lacks a usable address or MAC, or names a
+        multicast or unspecified address.
+
+    """
+
+    family, _pad1, _pad2, ifindex, state, _flags, _kind = _NDMSG.unpack(payload[: _NDMSG.size])
+    if state & (_NUD_INCOMPLETE | _NUD_FAILED):
+        return None
+    if family not in (socket.AF_INET, socket.AF_INET6):
+        return None
+
+    ip, mac = _read_address_attributes(payload, family)
+    if ip is None or mac is None or _is_not_a_neighbour(ip):
+        return None
+
+    return Neighbour(
+        ip=ip,
+        mac=mac,
+        interface=_interface_name(ifindex),
+        state=_state_of(state),
+        family=AddressFamily.IPV6 if family == socket.AF_INET6 else AddressFamily.IPV4,
+    )
+
+
 def parse_neighbour_dump(data: bytes) -> tuple[list[Neighbour], bool]:
     """Decode one netlink dump chunk into neighbour entries.
 
@@ -154,39 +222,9 @@ def parse_neighbour_dump(data: bytes) -> tuple[list[Neighbour], bool]:
             return found, True
         if message_type != _RTM_NEWNEIGH or len(payload) < _NDMSG.size:
             continue
-
-        family, _pad1, _pad2, ifindex, state, _flags, _kind = _NDMSG.unpack(payload[: _NDMSG.size])
-        if state & (_NUD_INCOMPLETE | _NUD_FAILED):
-            continue
-        if family not in (socket.AF_INET, socket.AF_INET6):
-            continue
-
-        ip: str | None = None
-        mac: str | None = None
-        for attribute, value in iter_attributes(payload, _NDMSG.size):
-            if attribute == _NDA_DST:
-                with contextlib.suppress(OSError, ValueError):
-                    ip = socket.inet_ntop(family, value)
-            elif attribute == _NDA_LLADDR:
-                mac = format_mac(value)
-
-        if ip is None or mac is None or _is_not_a_neighbour(ip):
-            continue
-
-        interface: str | None = None
-        if ifindex > 0:
-            with contextlib.suppress(OSError, ValueError):
-                interface = socket.if_indextoname(ifindex)
-
-        found.append(
-            Neighbour(
-                ip=ip,
-                mac=mac,
-                interface=interface,
-                state=_state_of(state),
-                family=AddressFamily.IPV6 if family == socket.AF_INET6 else AddressFamily.IPV4,
-            )
-        )
+        neighbour = _neighbour_from_payload(payload)
+        if neighbour is not None:
+            found.append(neighbour)
     return found, False
 
 
