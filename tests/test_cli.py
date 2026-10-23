@@ -40,6 +40,10 @@ ALL_COMMANDS: list[list[str]] = [
     ["mac", "127.0.0.1"],
     ["find-ip", "aa:bb:cc:dd:ee:ff"],
     ["arp-scan", "--network", "127.0.0.0/30"],
+    # set-neighbour is absent: its success path needs privilege. Its three
+    # failure shapes are pinned in test_static_neighbours.py instead. Removing
+    # an entry nobody holds reads the cache only, so it runs anywhere.
+    ["remove-neighbour", "192.0.2.254"],
     ["subnet"],
     ["scan-ports", "127.0.0.1", "--ports", "1", "--timeout", "0.3"],
     ["mtu", "127.0.0.1"],
@@ -231,6 +235,7 @@ def test_a_human_failure_does_not_name_a_python_class(runner: CliRunner) -> None
         (["reachable", NEVER_ANSWERS, "--timeout", "1"], "nothing answers a TEST-NET-3 address"),
         (["reverse-dns", NEVER_ANSWERS], "a reserved address has no PTR record"),
         (["find-ip", "aa:bb:cc:dd:ee:ff"], "that hardware address holds nothing here"),
+        (["remove-neighbour", "192.0.2.254"], "no entry for a TEST-NET-1 address, so nothing was removed"),
         # "mac" is deliberately absent: for a routed address it reports the
         # gateway's MAC labelled next_hop, which is a positive answer and
         # exits 0. That is the documented router-hop behaviour, not a miss.

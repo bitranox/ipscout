@@ -543,6 +543,14 @@ def _configure(library: ctypes.CDLL) -> None:  # pragma: no cover - Windows only
         ctypes.c_void_p,  # SourceAddress, optional
     )
 
+    # CreateIpNetEntry2 and DeleteIpNetEntry2 take the row by const pointer and
+    # need Administrator; both return a Win32 error code.
+    library.CreateIpNetEntry2.restype = ctypes.c_uint32
+    library.CreateIpNetEntry2.argtypes = (ctypes.POINTER(MIB_IPNET_ROW2),)
+
+    library.DeleteIpNetEntry2.restype = ctypes.c_uint32
+    library.DeleteIpNetEntry2.argtypes = (ctypes.POINTER(MIB_IPNET_ROW2),)
+
     library.GetIpNetTable2.restype = ctypes.c_uint32
     library.GetIpNetTable2.argtypes = (
         ctypes.c_uint16,  # Family

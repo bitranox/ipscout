@@ -85,6 +85,7 @@ from .portscan import ascan_ports, parse_ports, scan_ports
 from .resolve import resolve, reverse_dns
 from .routes import default_gateway, query_route
 from .scan import arp_scan, find_ip_by_mac, local_networks, sweep_scope
+from .static_neighbours import remove_neighbour, set_neighbour
 from .subnet import subnet_info
 from .traceroute import atrace_path, atraceroute, trace_path, traceroute
 from .wol import wake_on_lan
@@ -147,9 +148,11 @@ __all__ = [
     "ping_many",
     "print_info",
     "query_route",
+    "remove_neighbour",
     "resolve",
     "reverse_dns",
     "scan_ports",
+    "set_neighbour",
     "subnet_info",
     "sweep_scope",
     "trace_path",

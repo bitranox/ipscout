@@ -1,12 +1,18 @@
-"""Neighbour-cache reads on Windows, via ``GetIpNetTable2`` in ``iphlpapi.dll``.
+"""Neighbour-cache reads and writes on Windows, via ``iphlpapi.dll``.
 
 Contents:
-    list_neighbours: Every entry the stack currently holds.
+    list_neighbours: Every entry the stack currently holds (``GetIpNetTable2``).
+    set_static_neighbour / remove_static_neighbour: Write a permanent IPv4
+        entry (``CreateIpNetEntry2``) or delete one (``DeleteIpNetEntry2``).
+    ipv4_neighbour_row: Pure builder of the ``MIB_IPNET_ROW2`` both take.
+    raise_for_status / removed_from_status: The Win32 error code, mapped to an
+        outcome.
 
 Note:
     The read is passive - it reports what the stack already learned and sends
     nothing - and needs no elevation. ``GetIpNetTable2`` covers IPv4 and IPv6
     in one call, so there is no second mechanism for the second family.
+    Writing needs Administrator.
 
 """
 
@@ -17,18 +23,29 @@ import ctypes
 import ipaddress
 import socket
 
-from .errors import IPScoutPermissionError, IPScoutUnsupportedError
+from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily, Neighbour, NeighbourState
 from .winapi import (
     MIB_IPNET_ROW2,
     MIB_IPNET_TABLE2,
+    WIN_AF_INET,
     WIN_AF_INET6,
     WIN_AF_UNSPEC,
     iphlpapi,
     sockaddr_inet_to_string,
 )
 
-__all__ = ["format_mac", "list_neighbours", "resolve_active", "state_of"]
+__all__ = [
+    "format_mac",
+    "ipv4_neighbour_row",
+    "list_neighbours",
+    "raise_for_status",
+    "remove_static_neighbour",
+    "removed_from_status",
+    "resolve_active",
+    "set_static_neighbour",
+    "state_of",
+]
 
 #: NO_ERROR, the only success value these calls return.
 _NO_ERROR = 0
@@ -36,6 +53,12 @@ _NO_ERROR = 0
 #: ERROR_ACCESS_DENIED: the elevation refusal, worth telling apart from a
 #: neighbour that simply did not answer.
 _ERROR_ACCESS_DENIED = 5
+
+#: ERROR_NOT_FOUND: a delete found no such entry, which is an answer.
+_ERROR_NOT_FOUND = 1168
+
+#: ERROR_OBJECT_ALREADY_EXISTS: a create met an entry for that address.
+_ERROR_OBJECT_ALREADY_EXISTS = 5010
 
 #: An Ethernet hardware address is six bytes; the row's buffer is larger.
 _MAC_LENGTH = 6
@@ -240,3 +263,140 @@ def resolve_active(ip: str) -> str | None:  # pragma: no cover - Windows only
     if library.SendARP(destination, 0, ctypes.byref(buffer), ctypes.byref(length)) != _NO_ERROR:
         return None
     return format_mac(bytes(buffer), int(length.value))
+
+
+# --------------------------------------------------------------------------
+# Writing a static entry
+# --------------------------------------------------------------------------
+
+
+def ipv4_neighbour_row(ip: str, mac: bytes, interface_index: int) -> MIB_IPNET_ROW2:
+    """Build the ``MIB_IPNET_ROW2`` for a permanent IPv4 neighbour entry.
+
+    Args:
+        ip: The IPv4 address the entry maps.
+        mac: The six-byte hardware address.
+        interface_index: The interface the entry belongs to. The stack keys
+            the table by address and interface, as ``netsh interface ipv4 add
+            neighbors`` does with its interface argument.
+
+    Returns:
+        A zeroed row with the address (``AF_INET`` is 2 on Windows too), the
+        interface index, the hardware address and its length, and the state
+        ``NlnsPermanent``. The LUID stays zero: the index identifies the
+        interface, and the API takes either.
+
+    Examples:
+        >>> row = ipv4_neighbour_row("192.0.2.7", bytes.fromhex("020000000007"), 4)
+        >>> bytes(row)[:8].hex(), int(row.State)
+        ('02000000c0000207', 6)
+
+    """
+
+    row = MIB_IPNET_ROW2()
+    row.Address.Ipv4.sin_family = WIN_AF_INET
+    row.Address.Ipv4.sin_addr[:] = socket.inet_aton(ip)
+    row.InterfaceIndex = interface_index
+    row.PhysicalAddress[: len(mac)] = mac
+    row.PhysicalAddressLength = len(mac)
+    row.State = _NL_NUD_PERMANENT
+    return row
+
+
+def raise_for_status(status: int, *, action: str) -> None:
+    """Raise unless an ``*IpNetEntry2`` call succeeded.
+
+    Args:
+        status: The Win32 error code the call returned.
+        action: What was asked, for the message (``"add"``, ``"remove"``).
+
+    Raises:
+        IPScoutPermissionError: ``ERROR_ACCESS_DENIED``: changing the neighbour
+            table needs Administrator.
+        IPScoutError: Any other failure.
+
+    Examples:
+        >>> raise_for_status(0, action="add")
+        >>> raise_for_status(5, action="add")
+        Traceback (most recent call last):
+        ...
+        ipscout.errors.IPScoutPermissionError: ...Administrator...
+
+    """
+
+    if status == _NO_ERROR:
+        return
+    if status == _ERROR_ACCESS_DENIED:
+        msg = "changing the neighbour table needs Administrator on Windows (ERROR_ACCESS_DENIED). Run elevated"
+        raise IPScoutPermissionError(msg)
+    msg = f"Windows refused to {action} the neighbour entry: Win32 error {status}"
+    raise IPScoutError(msg)
+
+
+def removed_from_status(status: int) -> bool:
+    """Return whether a delete removed an entry, raising on a real failure.
+
+    Args:
+        status: The Win32 error code ``DeleteIpNetEntry2`` returned.
+
+    Returns:
+        ``True`` when the entry went, ``False`` when there was none
+        (``ERROR_NOT_FOUND``).
+
+    Examples:
+        >>> removed_from_status(0), removed_from_status(1168)
+        (True, False)
+
+    """
+
+    if status == _ERROR_NOT_FOUND:
+        return False
+    raise_for_status(status, action="remove")
+    return True
+
+
+def set_static_neighbour(ip: str, mac: bytes, ifindex: int) -> None:  # pragma: no cover - Windows only
+    """Add or replace a permanent IPv4 neighbour entry.
+
+    Args:
+        ip: The IPv4 address the entry maps.
+        mac: The six-byte hardware address.
+        ifindex: The interface the entry belongs to.
+
+    Raises:
+        IPScoutPermissionError: The process is not elevated.
+        IPScoutError: The stack refused for another reason.
+
+    Note:
+        ``CreateIpNetEntry2`` refuses an address that already has an entry on
+        that interface, so on ``ERROR_OBJECT_ALREADY_EXISTS`` the existing one
+        is deleted and the create is repeated once.
+
+    """
+
+    library = iphlpapi()
+    status = library.CreateIpNetEntry2(ctypes.byref(ipv4_neighbour_row(ip, mac, ifindex)))
+    if status == _ERROR_OBJECT_ALREADY_EXISTS:
+        removed_from_status(library.DeleteIpNetEntry2(ctypes.byref(ipv4_neighbour_row(ip, mac, ifindex))))
+        status = library.CreateIpNetEntry2(ctypes.byref(ipv4_neighbour_row(ip, mac, ifindex)))
+    raise_for_status(int(status), action="add")
+
+
+def remove_static_neighbour(ip: str, ifindex: int) -> bool:  # pragma: no cover - Windows only
+    """Delete one IPv4 neighbour entry.
+
+    Args:
+        ip: The address whose entry goes.
+        ifindex: The interface it is on.
+
+    Returns:
+        Whether an entry was removed.
+
+    Raises:
+        IPScoutPermissionError: The process is not elevated.
+        IPScoutError: The stack refused for another reason.
+
+    """
+
+    row = ipv4_neighbour_row(ip, bytes(0), ifindex)
+    return removed_from_status(int(iphlpapi().DeleteIpNetEntry2(ctypes.byref(row))))

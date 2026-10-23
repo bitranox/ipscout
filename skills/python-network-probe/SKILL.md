@@ -1,6 +1,6 @@
 ---
 name: python-network-probe
-description: Use when Python code needs to ping a host, sweep hosts for reachability, measure round-trip time or packet loss, run a traceroute, scan ports, find a MAC address or the host holding one, read the neighbour/ARP cache, look up the default gateway or a route, inspect local interfaces and subnets, reach an IPv6 link-local (fe80::) address that needs its interface zone, send a wake-on-LAN packet, find the path MTU, or watch a DHCP handshake to learn the address of a machine that has just been started and does not have one yet - especially when it must run as an ordinary user with no root, sudo, Administrator or CAP_NET_RAW, and must not shell out to ping, tracert, arp, ip, ifconfig or netstat. Also use when reaching for icmplib, scapy, python-nmap, netifaces, or subprocess around a system network command, or for tcpdump/tshark to watch a VM or container boot and find its address.
+description: Use when Python code needs to ping a host, sweep hosts for reachability, measure round-trip time or packet loss, run a traceroute, scan ports, find a MAC address or the host holding one, read the neighbour/ARP cache or write a static (permanent) entry to it, look up the default gateway or a route, inspect local interfaces and subnets, reach an IPv6 link-local (fe80::) address that needs its interface zone, send a wake-on-LAN packet, find the path MTU, or watch a DHCP handshake to learn the address of a machine that has just been started and does not have one yet - especially when it must run as an ordinary user with no root, sudo, Administrator or CAP_NET_RAW, and must not shell out to ping, tracert, arp, ip, ifconfig or netstat. Also use when reaching for icmplib, scapy, python-nmap, netifaces, or subprocess around a system network command, or for tcpdump/tshark to watch a VM or container boot and find its address.
 ---
 
 # Network probing from Python, unprivileged on the default paths
@@ -32,32 +32,34 @@ Python 3.10+.
 
 ## Quick reference
 
-| Task                              | Call                                                                 |
-|-----------------------------------|----------------------------------------------------------------------|
-| Ping one host                     | `ping("1.1.1.1", 4)`                                                 |
-| Sweep many, concurrently          | `ping_many(hosts, concurrency=64)`                                   |
-| Is it up, by any means            | `is_reachable(host)`                                                 |
-| Path to a host                    | `traceroute(host)`                                                   |
-| Scan ports                        | `scan_ports(host, "22,80,8000-8100")`                                |
-| MAC of an address                 | `lookup_mac(ip)`, `get_mac_address(ip)`                              |
-| Which host holds a MAC            | `find_ip_by_mac(mac, scan=True, family=AddressFamily.IPV4)`          |
-| Neighbour / ARP cache             | `neighbours()`, `arp_scan(network)`; both take `family=`             |
-| What a sweep will cover           | `sweep_scope()` -> `SweepScope(limit, networks, skipped, complete)`  |
-| Sweep exactly that plan           | `arp_scan(scope=scope)`, `find_ip_by_mac(mac, scan=True, scope=...)` |
-| Default route, any route          | `default_gateway()`, `query_route(ip)`                               |
-| Interfaces and subnets            | `local_interfaces()`, `subnet_info()`, `local_networks()`            |
-| Wake a sleeping host              | `wake_on_lan(mac)`                                                   |
-| Address of a machine just started | `observe_dhcp(mac, interface="br0")` -> every offer, in order        |
-| ... startable before you start it | `with observe_dhcp_session(mac, interface="br0") as s:`              |
-| ... and just the one that answers | `observe_dhcp_first_reachable(mac, interface="br0")`                 |
-| Largest unfragmented packet       | `path_mtu(host)`                                                     |
-| What can this host do             | `icmp_available()`, `dhcp_capture_available()`                       |
-| Package metadata                  | `print_info()`                                                       |
-| Name to address, and back         | `resolve(name)`, `reverse_dns(ip)`                                   |
-| Compare two hardware addresses    | `normalise_mac(written)`                                             |
-| Parse a port specification        | `parse_ports("22,80,8000-8100")`                                     |
-| Trace over your own transport     | `trace_path(transport, ...)`, `atrace_path(...)`                     |
-| async equivalents                 | `aping`, `aping_many`, `ais_reachable`, `atraceroute`, `ascan_ports` |
+| Task                               | Call                                                                 |
+|------------------------------------|----------------------------------------------------------------------|
+| Ping one host                      | `ping("1.1.1.1", 4)`                                                 |
+| Sweep many, concurrently           | `ping_many(hosts, concurrency=64)`                                   |
+| Is it up, by any means             | `is_reachable(host)`                                                 |
+| Path to a host                     | `traceroute(host)`                                                   |
+| Scan ports                         | `scan_ports(host, "22,80,8000-8100")`                                |
+| MAC of an address                  | `lookup_mac(ip)`, `get_mac_address(ip)`                              |
+| Which host holds a MAC             | `find_ip_by_mac(mac, scan=True, family=AddressFamily.IPV4)`          |
+| Neighbour / ARP cache              | `neighbours()`, `arp_scan(network)`; both take `family=`             |
+| Static ARP entry, IPv4 (privilege) | `set_neighbour(ip, mac, interface="eth0")` -> the entry read back    |
+| ... and out again                  | `remove_neighbour(ip, interface="eth0")` -> whether there was one    |
+| What a sweep will cover            | `sweep_scope()` -> `SweepScope(limit, networks, skipped, complete)`  |
+| Sweep exactly that plan            | `arp_scan(scope=scope)`, `find_ip_by_mac(mac, scan=True, scope=...)` |
+| Default route, any route           | `default_gateway()`, `query_route(ip)`                               |
+| Interfaces and subnets             | `local_interfaces()`, `subnet_info()`, `local_networks()`            |
+| Wake a sleeping host               | `wake_on_lan(mac)`                                                   |
+| Address of a machine just started  | `observe_dhcp(mac, interface="br0")` -> every offer, in order        |
+| ... startable before you start it  | `with observe_dhcp_session(mac, interface="br0") as s:`              |
+| ... and just the one that answers  | `observe_dhcp_first_reachable(mac, interface="br0")`                 |
+| Largest unfragmented packet        | `path_mtu(host)`                                                     |
+| What can this host do              | `icmp_available()`, `dhcp_capture_available()`                       |
+| Package metadata                   | `print_info()`                                                       |
+| Name to address, and back          | `resolve(name)`, `reverse_dns(ip)`                                   |
+| Compare two hardware addresses     | `normalise_mac(written)`                                             |
+| Parse a port specification         | `parse_ports("22,80,8000-8100")`                                     |
+| Trace over your own transport      | `trace_path(transport, ...)`, `atrace_path(...)`                     |
+| async equivalents                  | `aping`, `aping_many`, `ais_reachable`, `atraceroute`, `ascan_ports` |
 
 ```python
 import ipscout
@@ -75,13 +77,14 @@ function exists.
 
 ## From the shell
 
-Nineteen subcommands, one per capability above:
+Twenty-one subcommands, one per capability above:
 
 ```
-ping          ping-many     reachable     traceroute    scan-ports
-mac           find-ip       arp-scan      neighbours    gateway
-subnet        interfaces    resolve       reverse-dns   mtu
-wake          observe-dhcp  capabilities  info
+ping            ping-many         reachable     traceroute    scan-ports
+mac             find-ip           arp-scan      neighbours    gateway
+set-neighbour   remove-neighbour  subnet        interfaces    resolve
+reverse-dns     mtu               wake          observe-dhcp  capabilities
+info
 ```
 
 ```bash
@@ -266,18 +269,24 @@ and is refused by name rather than silently returning nothing.
 Everything above is unprivileged. These are not, and each raises
 `IPScoutPermissionError` naming the exact remedy rather than degrading:
 
-| Operation                                | Needs                                                                                                             |
-|------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `scan_ports(..., method=ScanMethod.SYN)` | root / `CAP_NET_RAW`. Unavailable on Windows at any privilege level: raw TCP sends have been blocked since XP SP2 |
-| `lookup_mac(ip, active=True)`            | root / `CAP_NET_RAW` on Linux and macOS. Windows IPv4 needs none (`SendARP`); Windows IPv6 needs Administrator    |
-| Traceroute on macOS                      | a raw socket, so root. Unprivileged macOS does not surface Time Exceeded at all                                   |
-| `observe_dhcp(...)` and its session      | root / `CAP_NET_RAW` on Linux, root on macOS (`/dev/bpf`), Administrator on Windows (`SIO_RCVALL`, no driver)     |
+| Operation                                     | Needs                                                                                                                                                                                                                                       |
+|-----------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `scan_ports(..., method=ScanMethod.SYN)`      | root / `CAP_NET_RAW`. Unavailable on Windows at any privilege level: raw TCP sends have been blocked since XP SP2                                                                                                                           |
+| `lookup_mac(ip, active=True)`                 | root / `CAP_NET_RAW` on Linux and macOS. Windows IPv4 needs none (`SendARP`); Windows IPv6 needs Administrator                                                                                                                              |
+| Traceroute on macOS                           | a raw socket, so root. Unprivileged macOS does not surface Time Exceeded at all                                                                                                                                                             |
+| `observe_dhcp(...)` and its session           | root / `CAP_NET_RAW` on Linux, root on macOS (`/dev/bpf`), Administrator on Windows (`SIO_RCVALL`, no driver)                                                                                                                               |
+| `set_neighbour(...)`, `remove_neighbour(...)` | root / `CAP_NET_ADMIN` on Linux, root on macOS (routing socket, untested on real hardware), Administrator on Windows. `remove_neighbour` without `interface=` reads the cache first and answers `False` unprivileged when nothing is listed |
 
 Two rules these follow, worth relying on:
 
 - **They never silently degrade.** `active=True` without the rights raises; it
   does not hand back a stale cache entry dressed up as a fresh one. A SYN scan
   does not quietly become a connect scan.
+- **Writing the neighbour cache has no unprivileged route.** `set_neighbour` maps an IPv4
+  address to one device's MAC (the ARP trick embedded devices are first addressed with), returns
+  the entry read back from the cache, and replaces an existing one; IPv6 raises
+  `IPScoutUnsupportedError`. The entry outlives the process, so `remove_neighbour` it in a
+  `finally`.
 - **The unprivileged route to the same answer is named in the message.**
   Usually `arp_scan()`, which sweeps and then reads the cache, needing nothing.
   `observe_dhcp` is the one exception, and its message says so plainly: there

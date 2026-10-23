@@ -159,6 +159,8 @@ ipscout mac 8.8.8.8                     # the gateway's, labelled NEXT_HOP
 ipscout find-ip dc:b2:2f:44:34:59 --scan
 ipscout arp-scan --network 192.168.1.0/24
 ipscout neighbours
+sudo ipscout set-neighbour 192.0.2.7 00:00:5e:00:53:07 --interface eth0   # a static entry
+sudo ipscout remove-neighbour 192.0.2.7 --interface eth0
 ipscout gateway
 ipscout subnet
 ipscout mtu 8.8.8.8
@@ -189,6 +191,8 @@ ipscout.scan_ports(host, "22,80,8000-8100")
 ipscout.path_mtu("8.8.8.8")
 ipscout.wake_on_lan(mac, broadcast="192.168.1.255")
 ipscout.observe_dhcp(mac, interface="br0")  # a machine that has no address yet (needs elevation)
+ipscout.set_neighbour(ip, mac, interface="eth0")  # a static neighbour entry (needs elevation)
+ipscout.remove_neighbour(ip, interface="eth0")  # and out again
 ```
 
 A MAC address does not survive a router hop, so `lookup_mac` puts the scope in the answer and
@@ -199,8 +203,12 @@ cancelling the sweep, and a search that matched nothing while a network went unc
 reporting "not found". One call is different in kind: `observe_dhcp` watches a DHCP handshake, so it is the
 only way here to find a machine that is not up yet - everything else needs the target already answering. It
 returns every address offered, in order, because a pool that hands out an address the guest declines offers
-the working one afterwards and the last is the one that stuck. Full worked examples are in
-[docs/usage.md](docs/usage.md).
+the working one afterwards and the last is the one that stuck. `set_neighbour` writes a permanent IPv4
+entry mapping an address to a hardware address - the way an embedded device such as a print server is
+first given an address, since it answers whatever address the sender maps to its MAC - and returns the
+entry as read back from the cache; `remove_neighbour` takes it out again. Writing needs root or
+`CAP_NET_ADMIN` on Linux, root on macOS and Administrator on Windows, and IPv6 is refused. Full worked
+examples are in [docs/usage.md](docs/usage.md).
 
 ## Output for machines
 
@@ -288,13 +296,14 @@ as `coding-python-network-probe`.
 
 Measured on real CI runners, not assumed.
 
-| Capability                 | Linux                              | macOS                                                   | Windows                                |
-|----------------------------|------------------------------------|---------------------------------------------------------|----------------------------------------|
-| ICMP ping, no admin        | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`   | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`                        | yes, `iphlpapi.dll` via ctypes         |
-| Traceroute                 | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | no, raises `IPScoutUnsupportedError`                    | yes, `IP_TTL_EXPIRED_TRANSIT`          |
-| Async on the event loop    | yes, one socket per probe          | yes, one socket per probe                               | no, `IcmpSendEcho` runs in an executor |
-| Interface listing          | yes, `getifaddrs`                  | yes, `getifaddrs`                                       | yes, `GetAdaptersAddresses`            |
-| Observing a DHCP handshake | yes, `AF_PACKET`, needs root       | yes, `/dev/bpf`, needs root (untested on real hardware) | yes, `SIO_RCVALL`, needs Administrator |
+| Capability                    | Linux                                                      | macOS                                                                 | Windows                                       |
+|-------------------------------|------------------------------------------------------------|-----------------------------------------------------------------------|-----------------------------------------------|
+| ICMP ping, no admin           | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`                           | yes, `SOCK_DGRAM`/`IPPROTO_ICMP`                                      | yes, `iphlpapi.dll` via ctypes                |
+| Traceroute                    | yes, `IP_RECVERR` + `MSG_ERRQUEUE`                         | no, raises `IPScoutUnsupportedError`                                  | yes, `IP_TTL_EXPIRED_TRANSIT`                 |
+| Async on the event loop       | yes, one socket per probe                                  | yes, one socket per probe                                             | no, `IcmpSendEcho` runs in an executor        |
+| Interface listing             | yes, `getifaddrs`                                          | yes, `getifaddrs`                                                     | yes, `GetAdaptersAddresses`                   |
+| Observing a DHCP handshake    | yes, `AF_PACKET`, needs root                               | yes, `/dev/bpf`, needs root (untested on real hardware)               | yes, `SIO_RCVALL`, needs Administrator        |
+| Static neighbour entry (IPv4) | yes, netlink `RTM_NEWNEIGH`, needs root or `CAP_NET_ADMIN` | yes, routing socket `RTM_ADD`, needs root (untested on real hardware) | yes, `CreateIpNetEntry2`, needs Administrator |
 
 Ask the host itself rather than guessing, with `ipscout capabilities` or `ipscout.icmp_available()`.
 

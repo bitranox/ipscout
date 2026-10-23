@@ -56,6 +56,7 @@ from .models import (
     PortScanReport,
     PortState,
     ReachabilityReport,
+    RemoveNeighbourReport,
     ResolveReport,
     ReverseDnsReport,
     RouteInfo,
@@ -71,6 +72,7 @@ from .resolve import reverse_dns
 from .routes import default_gateway, query_route
 from .scan import arp_scan, find_ip_by_mac, sweep_scope
 from .serialize import dumps, to_jsonable
+from .static_neighbours import remove_neighbour, set_neighbour
 from .subnet import subnet_info
 from .traceroute import traceroute
 from .typed_click import argument, option, version_option
@@ -597,6 +599,42 @@ def cli_arp_scan(ctx: click.Context, *, network: str | None, concurrency: int, i
 
     _emit(ctx, CommandName.ARP_SCAN, entries, lambda: console.print(_neighbour_table(entries)), skipped=scope.skipped if scope else ())
     if not entries:
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+@cli.command("set-neighbour", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("ip")
+@argument("mac")
+@option("--interface", default=None, help="Interface for the entry, by name or index. Defaults to the one whose subnet holds IP.")
+@click.pass_context
+def cli_set_neighbour(ctx: click.Context, ip: str, mac: str, *, interface: str | None) -> None:
+    """Write a permanent IPv4 neighbour entry mapping IP to MAC. Needs root, CAP_NET_ADMIN or Administrator."""
+
+    try:
+        entry = set_neighbour(ip, mac, interface=interface)
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, CommandName.SET_NEIGHBOUR, exc)
+        return
+
+    _emit(ctx, CommandName.SET_NEIGHBOUR, entry, lambda: console.print(_neighbour_table((entry,))))
+
+
+@cli.command("remove-neighbour", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("ip")
+@option("--interface", default=None, help="Interface to remove it from, by name or index. Defaults to every interface the cache lists IP on.")
+@click.pass_context
+def cli_remove_neighbour(ctx: click.Context, ip: str, *, interface: str | None) -> None:
+    """Delete the IPv4 neighbour entry for IP. Exits 1 when there was none."""
+
+    try:
+        removed = remove_neighbour(ip, interface=interface)
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, CommandName.REMOVE_NEIGHBOUR, exc)
+        return
+
+    payload = RemoveNeighbourReport(ip=ip, interface=interface, removed=removed)
+    _emit(ctx, CommandName.REMOVE_NEIGHBOUR, payload, lambda: console.print("removed" if removed else "(no entry)", highlight=False))
+    if not removed:
         ctx.exit(EXIT_NOT_REACHED)
 
 

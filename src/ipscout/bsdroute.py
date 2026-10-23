@@ -5,6 +5,8 @@ Contents:
     split_sockaddrs: Split the self-describing addresses trailing a message.
     address_of: Read an IP address out of one sockaddr.
     link_address_of: Read a hardware address out of a ``sockaddr_dl``.
+    pack_sockaddr_in / pack_sockaddr_dl: Encode the two addresses a static
+        neighbour entry is written with.
     sysctl: Read a kernel MIB into bytes.
     roundup: The alignment the routing socket uses between addresses.
 
@@ -31,12 +33,20 @@ __all__ = [
     "RTA_IFP",
     "RTA_NETMASK",
     "RTF_GATEWAY",
+    "RTF_HOST",
     "RTF_LLINFO",
+    "RTF_STATIC",
     "RTF_UP",
+    "RTM_ADD",
+    "RTM_DELETE",
+    "RTM_VERSION",
+    "RTV_EXPIRE",
     "RT_MSGHDR",
     "SockaddrSet",
     "address_of",
     "link_address_of",
+    "pack_sockaddr_dl",
+    "pack_sockaddr_in",
     "roundup",
     "split_sockaddrs",
     "sysctl",
@@ -66,6 +76,19 @@ RTA_ORDER = (RTA_DST, RTA_GATEWAY, RTA_NETMASK, RTA_GENMASK, RTA_IFP, RTA_IFA, R
 RTF_UP = 0x0001
 RTF_GATEWAY = 0x0002
 RTF_LLINFO = 0x0400
+#: A route to one address rather than a network, and one the kernel must not
+#: age out: together what ``arp -s`` asks for.
+RTF_HOST = 0x0004
+RTF_STATIC = 0x0800
+
+#: The routing-message types that write the table, and the version they speak.
+RTM_ADD = 0x01
+RTM_DELETE = 0x02
+RTM_VERSION = 5
+
+#: rtm_inits bit saying rmx_expire is set. Sent with an expiry of zero, it
+#: says "never expires", which is how ``arp -s`` makes an entry permanent.
+RTV_EXPIRE = 0x04
 
 #: struct rt_msghdr, up to and including rtm_inits, then rt_metrics as opaque
 #: bytes. The two pad bytes after rtm_index are the alignment the C compiler
@@ -83,6 +106,16 @@ SIN6_ADDR_OFFSET = 8
 #: AF_LINK, and the fixed part of sockaddr_dl before its variable data.
 AF_LINK = 18
 SOCKADDR_DL = struct.Struct("=BBHBBBB")
+
+#: sizeof(struct sockaddr_dl): the fixed part plus its 12-byte sdl_data. The
+#: kernel refuses a gateway shorter than this as a "bad gateway value".
+SOCKADDR_DL_SIZE = 20
+
+#: IFT_ETHER, the sdl_type of an Ethernet interface.
+IFT_ETHER = 0x06
+
+#: struct sockaddr_in: len, family, port, address, eight bytes of zero.
+SOCKADDR_IN = struct.Struct("=BBH4s8s")
 
 #: An Ethernet hardware address is six bytes.
 MAC_LENGTH = 6
@@ -164,6 +197,47 @@ def link_address_of(chunk: bytes) -> str | None:
     if not any(raw):
         return None
     return ":".join(f"{octet:02x}" for octet in raw)
+
+
+def pack_sockaddr_in(address: bytes) -> bytes:
+    """Encode an IPv4 address as the BSD ``sockaddr_in`` a routing message carries.
+
+    Args:
+        address: The four address bytes, as ``inet_aton`` returns them.
+
+    Returns:
+        Sixteen bytes. The same layout is the ``sockaddr_inarp`` ``arp -s``
+        sends, whose extra fields all sit in what is padding here and are zero.
+
+    Examples:
+        >>> pack_sockaddr_in(bytes([192, 0, 2, 7])).hex()
+        '10020000c00002070000000000000000'
+
+    """
+
+    return SOCKADDR_IN.pack(SOCKADDR_IN.size, socket.AF_INET, 0, address, bytes(8))
+
+
+def pack_sockaddr_dl(index: int, mac: bytes) -> bytes:
+    """Encode a hardware address as the ``sockaddr_dl`` gateway of a neighbour entry.
+
+    Args:
+        index: The interface the entry belongs to. The kernel picks the
+            entry's interface from this, as it does for ``arp -s``.
+        mac: The six-byte hardware address.
+
+    Returns:
+        A full ``sizeof(struct sockaddr_dl)``: no interface name
+        (``sdl_nlen`` 0), so the address starts ``sdl_data``, zero-padded.
+
+    Examples:
+        >>> pack_sockaddr_dl(4, bytes.fromhex("020000000007")).hex()
+        '1412040006000600020000000007000000000000'
+
+    """
+
+    header = SOCKADDR_DL.pack(SOCKADDR_DL_SIZE, AF_LINK, index, IFT_ETHER, 0, len(mac), 0)
+    return header + mac + bytes(SOCKADDR_DL_SIZE - SOCKADDR_DL.size - len(mac))
 
 
 class SockaddrSet(BaseModel):

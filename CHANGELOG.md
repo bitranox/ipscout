@@ -5,6 +5,28 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `set_neighbour(ip, mac, *, interface=None)` writes a permanent (static) IPv4 neighbour entry and
+  returns it as read back from the neighbour cache; `remove_neighbour(ip, *, interface=None)` deletes
+  one and returns whether there was one. Both are native, with no subprocess: netlink
+  `RTM_NEWNEIGH`/`RTM_DELNEIGH` on Linux, `CreateIpNetEntry2`/`DeleteIpNetEntry2` on Windows, and
+  `RTM_ADD`/`RTM_DELETE` on a routing socket on macOS. Writing needs root or `CAP_NET_ADMIN` on Linux,
+  root on macOS and Administrator on Windows, and a refusal raises `IPScoutPermissionError` naming the
+  remedy. Without `interface=`, `set_neighbour` picks the one interface whose subnet holds the address.
+  IPv6 raises `IPScoutUnsupportedError`; a multicast, broadcast or zero address or MAC raises
+  `ValueError`. The macOS path is untested on real hardware: its message encoding is pinned byte for
+  byte, the system call is not.
+- CLI subcommands `set-neighbour IP MAC [--interface]` and `remove-neighbour IP [--interface]`, with
+  the usual `--json` / `--json-bare` envelope; `remove-neighbour` exits 1 when there was no entry.
+
+### Tests
+
+- A `host_mutating` marker for tests that change this host's network state. Such a test runs only
+  with `IPSCOUT_HOST_WRITE_TESTS=1` (wired in `tests/conftest.py`, pinned by
+  `tests/test_platform_markers.py`), so no CI runner writes its neighbour table - the Windows one is
+  elevated and would otherwise do it on every push.
+
 ## [1.6.2] 2026-10-15 17:13:03
 
 ### Fixed

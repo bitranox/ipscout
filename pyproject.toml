@@ -48,7 +48,7 @@ Issues = "https://github.com/bitranox/ipscout/issues"
 dev = [
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
-  "ruff>=0.17.1",
+  "ruff>=0.17.2",
   "pyright[nodejs]>=1.1.414",
   "bandit>=1.9.4",
   "build>=1.6.1",
@@ -169,6 +169,7 @@ markers = [
   "os_linux: test exercises Linux-only behavior",
   "local_only: test only runs in local development environments (skipped in CI)",
   "integration: test reaches a real external network; skips cleanly when there is no route out",
+  "host_mutating: test changes this host's network state (a static neighbour entry); runs only with IPSCOUT_HOST_WRITE_TESTS=1 and the privilege to do it",
 ]
 
 [tool.coverage.run]
@@ -265,6 +266,7 @@ layers = [
   "ipscout.scan : ipscout.subnet : ipscout.portscan : ipscout.mtu : ipscout.wol : ipscout.dhcp",
   "ipscout.api",
   "ipscout.traceroute",
+  "ipscout.static_neighbours",
   "ipscout.neighbours",
   "ipscout.leases_linux",
   "ipscout.interfaces : ipscout.routes",

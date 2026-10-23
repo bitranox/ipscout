@@ -339,6 +339,44 @@ worth knowing:
   find something returns it, though the list can be short an address that hardware holds on the
   network left out.
 
+## Writing a static neighbour entry
+
+A device answers whatever address the sender's neighbour cache maps to its hardware address. That
+is how many print servers and other embedded devices are given an address the first time: map a
+chosen IPv4 address to the device's MAC with a static entry, talk to that address, then take the
+entry out again.
+
+```python
+entry = ipscout.set_neighbour("192.0.2.7", "00:00:5e:00:53:07", interface="eth0")
+try:
+    ipscout.ping("192.0.2.7", 1)  # the device owning that MAC answers
+finally:
+    ipscout.remove_neighbour("192.0.2.7", interface="eth0")
+```
+
+- **It needs privilege**, unlike every read here: root or `CAP_NET_ADMIN` on Linux, root on macOS,
+  Administrator on Windows. Without it the call raises `IPScoutPermissionError` naming the remedy.
+- **IPv4 only.** An IPv6 address raises `IPScoutUnsupportedError`. A multicast, broadcast or
+  unspecified address, and an all-zero, broadcast or multicast MAC, raise `ValueError` before
+  anything is written.
+- **The interface** is its index as digits (portable everywhere) or its name; on Windows either the
+  friendly name `local_interfaces()` reports or the one `neighbours()` reports. Left out,
+  `set_neighbour` picks the one interface whose IPv4 subnet holds the address, and refuses when
+  none or several do.
+- **The return value is read back from the cache**, so it proves the kernel holds the entry rather
+  than only that the call returned. An existing entry for the address on that interface, learned or
+  static, is replaced.
+- **`remove_neighbour` returns `False` when there was no entry.** Without `interface=` it reads the
+  cache first (no privilege needed) and deletes the address on every interface listed; naming the
+  interface always asks the kernel, so it needs the privilege even when there is nothing to delete.
+- **A static entry outlives the process** and overrides what the network answers until it is
+  removed or the host reboots, so remove it in a `finally`.
+
+Every platform writes natively: netlink `RTM_NEWNEIGH`/`RTM_DELNEIGH` on Linux,
+`CreateIpNetEntry2`/`DeleteIpNetEntry2` on Windows, and `RTM_ADD`/`RTM_DELETE` on a routing socket
+on macOS, as `arp -s` does. The macOS path has not been run on real hardware: its message encoding
+is pinned byte for byte by tests, but no CI runner is root on macOS.
+
 ## Watching a DHCP handshake
 
 Everything above needs the target already up and answering. A machine that has
@@ -464,29 +502,31 @@ one produces a silent black hole.
 
 ## The CLI
 
-19 commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
+21 commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
 
-| Command        | What it does                                                            |
-|----------------|-------------------------------------------------------------------------|
-| `ping`         | Ping a host and report what came back.                                  |
-| `ping-many`    | Ping many hosts concurrently.                                           |
-| `reachable`    | Answer whether a host responds, by ICMP or failing that TCP.            |
-| `traceroute`   | Report the path packets take to a host.                                 |
-| `resolve`      | Resolve a hostname to its addresses.                                    |
-| `reverse-dns`  | Resolve an address back to a hostname.                                  |
-| `interfaces`   | List local network interfaces.                                          |
-| `gateway`      | Show the default route, or the next hop toward one address.             |
-| `neighbours`   | List the neighbour cache: which addresses this host has learned.        |
-| `mac`          | Show the hardware address for an address, and whose it is.              |
-| `find-ip`      | Find which addresses currently hold a hardware address.                 |
-| `arp-scan`     | Sweep a network, then report every hardware address it learned.         |
-| `subnet`       | Show addressing, gateway and stored DHCP facts per subnet.              |
-| `scan-ports`   | Report which ports are open, closed or filtered.                        |
-| `mtu`          | Show the largest packet that reaches a target unfragmented.             |
-| `wake`         | Send a wake-on-LAN magic packet.                                        |
-| `observe-dhcp` | Watch a DHCP handshake for the addresses offered to a hardware address. |
-| `capabilities` | Report what this host can actually do.                                  |
-| `info`         | Print resolved package metadata.                                        |
+| Command            | What it does                                                            |
+|--------------------|-------------------------------------------------------------------------|
+| `ping`             | Ping a host and report what came back.                                  |
+| `ping-many`        | Ping many hosts concurrently.                                           |
+| `reachable`        | Answer whether a host responds, by ICMP or failing that TCP.            |
+| `traceroute`       | Report the path packets take to a host.                                 |
+| `resolve`          | Resolve a hostname to its addresses.                                    |
+| `reverse-dns`      | Resolve an address back to a hostname.                                  |
+| `interfaces`       | List local network interfaces.                                          |
+| `gateway`          | Show the default route, or the next hop toward one address.             |
+| `neighbours`       | List the neighbour cache: which addresses this host has learned.        |
+| `mac`              | Show the hardware address for an address, and whose it is.              |
+| `find-ip`          | Find which addresses currently hold a hardware address.                 |
+| `arp-scan`         | Sweep a network, then report every hardware address it learned.         |
+| `set-neighbour`    | Write a permanent IPv4 neighbour entry. Needs privilege.                |
+| `remove-neighbour` | Delete an IPv4 neighbour entry; exits 1 when there was none.            |
+| `subnet`           | Show addressing, gateway and stored DHCP facts per subnet.              |
+| `scan-ports`       | Report which ports are open, closed or filtered.                        |
+| `mtu`              | Show the largest packet that reaches a target unfragmented.             |
+| `wake`             | Send a wake-on-LAN magic packet.                                        |
+| `observe-dhcp`     | Watch a DHCP handshake for the addresses offered to a hardware address. |
+| `capabilities`     | Report what this host can actually do.                                  |
+| `info`             | Print resolved package metadata.                                        |
 
 Global options, which live on the group so they compose with every subcommand:
 
@@ -502,18 +542,20 @@ Global options, which live on the group so they compose with every subcommand:
 
 Per-command options:
 
-| Command        | Options                                                                                                   |
-|----------------|-----------------------------------------------------------------------------------------------------------|
-| `ping`         | `--times/-c` (4), `--timeout` (2.0), `--interval` (0.2), `-4`, `-6`, `--tcp-fallback`, `--tcp-port` (443) |
-| `ping-many`    | `--times/-c` (4), `--timeout` (2.0), `--concurrency` (64)                                                 |
-| `reachable`    | `--timeout` (2.0), `--tcp-port` (443)                                                                     |
-| `traceroute`   | `--max-hops` (30), `--timeout` (2.0), `-4`, `-6`, `--resolve-names`                                       |
-| `resolve`      | `-4`, `-6`                                                                                                |
-| `reverse-dns`  | none beyond the global flags                                                                              |
-| `interfaces`   | none beyond the global flags                                                                              |
-| `observe-dhcp` | `--interface` (the default route's), `--timeout` (60.0), `--settle` (12.0)                                |
-| `capabilities` | none beyond the global flags                                                                              |
-| `info`         | none beyond the global flags                                                                              |
+| Command            | Options                                                                                                   |
+|--------------------|-----------------------------------------------------------------------------------------------------------|
+| `ping`             | `--times/-c` (4), `--timeout` (2.0), `--interval` (0.2), `-4`, `-6`, `--tcp-fallback`, `--tcp-port` (443) |
+| `ping-many`        | `--times/-c` (4), `--timeout` (2.0), `--concurrency` (64)                                                 |
+| `reachable`        | `--timeout` (2.0), `--tcp-port` (443)                                                                     |
+| `traceroute`       | `--max-hops` (30), `--timeout` (2.0), `-4`, `-6`, `--resolve-names`                                       |
+| `resolve`          | `-4`, `-6`                                                                                                |
+| `reverse-dns`      | none beyond the global flags                                                                              |
+| `interfaces`       | none beyond the global flags                                                                              |
+| `observe-dhcp`     | `--interface` (the default route's), `--timeout` (60.0), `--settle` (12.0)                                |
+| `set-neighbour`    | `--interface` (the one whose subnet holds IP)                                                             |
+| `remove-neighbour` | `--interface` (every interface the cache lists IP on)                                                     |
+| `capabilities`     | none beyond the global flags                                                                              |
+| `info`             | none beyond the global flags                                                                              |
 
 `-4` and `-6` are mutually exclusive.
 
@@ -735,8 +777,10 @@ Everything below is exported from the package root. This table is generated from
 | `print_info`                   | function  | Print the package metadata block.                                 |
 | `query_route`                  | function  | How this host would reach one destination.                        |
 | `resolve`                      | function  | Turn a name or literal into a list of addresses.                  |
+| `remove_neighbour`             | function  | Delete an IPv4 neighbour entry. Needs privilege.                  |
 | `reverse_dns`                  | function  | Turn an address back into a name, or None.                        |
 | `scan_ports`                   | function  | What state each of a set of ports is in.                          |
+| `set_neighbour`                | function  | Write a permanent IPv4 neighbour entry. Needs privilege.          |
 | `subnet_info`                  | function  | Addressing, gateway and stored DHCP facts per subnet.             |
 | `sweep_scope`                  | function  | Which networks a sweep would cover, and which it would not.       |
 | `trace_path`                   | function  | Walk the hop limit over a transport the caller owns.              |
@@ -757,7 +801,7 @@ Result models, all frozen Pydantic models with `extra="forbid"`:
 | `InterfaceAddress`   | the ipv4 and ipv6 fields of Interface            |
 | `LeaseInfo`          | the DHCP fields folded into SubnetInfo           |
 | `MacLookup`          | lookup_mac                                       |
-| `Neighbour`          | neighbours, arp_scan                             |
+| `Neighbour`          | neighbours, arp_scan, set_neighbour              |
 | `PackageInfo`        | the info CLI command                             |
 | `ReachabilityReport` | the reachable CLI command                        |
 | `ResolveReport`      | the resolve CLI command                          |

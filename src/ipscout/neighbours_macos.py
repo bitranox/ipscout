@@ -1,20 +1,33 @@
-"""Neighbour-cache reads on macOS and the BSDs, via a ``sysctl`` route dump.
+"""Neighbour-cache reads and writes on macOS and the BSDs.
 
 Contents:
-    list_neighbours: Every entry the kernel currently holds.
+    list_neighbours: Every entry the kernel currently holds, via a ``sysctl``
+        route dump.
     parse_neighbour_dump: Pure decoder for one dump.
+    set_static_neighbour / remove_static_neighbour: Write a permanent IPv4
+        entry or delete one, with ``RTM_ADD`` / ``RTM_DELETE`` on a routing
+        socket, exactly as ``arp -s`` and ``arp -d`` do.
+    build_add_message / build_delete_message: Pure encoders for those two.
+    raise_for_route_errno / removed_from_route_errno: The kernel's errno,
+        mapped to an outcome.
 
 Note:
     The read is passive - it reports what the kernel already learned and sends
-    nothing - and needs no privileges. The decoder is separated from the
-    ``sysctl`` call so the wire format can be tested on Linux, where none of
-    this can execute.
+    nothing - and needs no privileges. Writing needs root. The decoder and the
+    encoders are separated from the system calls so the wire format can be
+    tested on Linux, where none of this can execute.
+
+    **The write path has not been run on macOS hardware.** No CI runner here
+    is root on macOS, so the message encoding is pinned byte for byte against
+    the BSD headers (``net/route.h``, ``net/if_dl.h``) and ``arp.c`` while the
+    ``write`` to the routing socket itself is untested.
 
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import ipaddress
 import os
 import select
@@ -34,17 +47,39 @@ from .bsdroute import (
     NET_RT_FLAGS,
     PF_ROUTE,
     RT_MSGHDR,
+    RTA_DST,
+    RTA_GATEWAY,
+    RTF_HOST,
     RTF_LLINFO,
+    RTF_STATIC,
+    RTM_ADD,
+    RTM_DELETE,
+    RTM_VERSION,
+    RTV_EXPIRE,
     address_of,
     link_address_of,
+    pack_sockaddr_dl,
+    pack_sockaddr_in,
     roundup,
     split_sockaddrs,
     sysctl,
 )
-from .errors import IPScoutPermissionError
+from .errors import IPScoutError, IPScoutPermissionError
 from .models import AddressFamily, Neighbour, NeighbourState
 
-__all__ = ["iter_bpf_frames", "list_neighbours", "parse_neighbour_dump", "resolve_active_ipv4", "resolve_active_ipv6"]
+__all__ = [
+    "build_add_message",
+    "build_delete_message",
+    "iter_bpf_frames",
+    "list_neighbours",
+    "parse_neighbour_dump",
+    "raise_for_route_errno",
+    "remove_static_neighbour",
+    "removed_from_route_errno",
+    "resolve_active_ipv4",
+    "resolve_active_ipv6",
+    "set_static_neighbour",
+]
 
 
 def parse_neighbour_dump(data: bytes, family: AddressFamily) -> list[Neighbour]:
@@ -241,3 +276,225 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
     finally:
         with contextlib.suppress(OSError):
             sock.close()
+
+
+# --------------------------------------------------------------------------
+# Writing a static entry, over a routing socket
+# --------------------------------------------------------------------------
+
+#: The flags ``arp -s`` sends for a permanent entry, plus RTF_LLINFO, which the
+#: kernel would set on the new entry anyway and which says what it is.
+_STATIC_FLAGS = RTF_HOST | RTF_STATIC | RTF_LLINFO
+
+#: rt_metrics, all zero: with RTV_EXPIRE in rtm_inits that is an expiry of
+#: "never".
+_NO_METRICS = bytes(56)
+
+
+def build_add_message(ip: str, mac: bytes, ifindex: int, *, pid: int, seq: int) -> bytes:
+    """Encode the ``RTM_ADD`` that writes a permanent IPv4 neighbour entry.
+
+    Args:
+        ip: The IPv4 address the entry maps.
+        mac: The six-byte hardware address.
+        ifindex: The interface, carried in the gateway's ``sdl_index``; the
+            kernel takes the entry's interface from it.
+        pid: The sending process, as the header records it.
+        seq: The sequence number, as the header records it.
+
+    Returns:
+        ``rt_msghdr`` (type ``RTM_ADD``, flags ``RTF_HOST | RTF_STATIC |
+        RTF_LLINFO``, addrs ``RTA_DST | RTA_GATEWAY``, inits ``RTV_EXPIRE``
+        with a zero expiry) followed by a ``sockaddr_in`` destination and a
+        ``sockaddr_dl`` gateway carrying the hardware address - the message
+        ``arp -s IP MAC`` writes.
+
+    Examples:
+        >>> len(build_add_message("192.0.2.7", bytes(6), 4, pid=1, seq=1))
+        128
+
+    """
+
+    addresses = pack_sockaddr_in(socket.inet_aton(ip)) + pack_sockaddr_dl(ifindex, mac)
+    return _header(RTM_ADD, RTA_DST | RTA_GATEWAY, len(addresses), pid=pid, seq=seq) + addresses
+
+
+def build_delete_message(ip: str, *, pid: int, seq: int) -> bytes:
+    """Encode the ``RTM_DELETE`` that removes one IPv4 neighbour entry.
+
+    Args:
+        ip: The address whose entry goes. The kernel deletes the host entry
+            keyed on it, which is why the caller must first confirm that the
+            entry is a neighbour and not some other host route.
+        pid: The sending process, as the header records it.
+        seq: The sequence number, as the header records it.
+
+    Returns:
+        ``rt_msghdr`` (type ``RTM_DELETE``, addrs ``RTA_DST``) followed by the
+        ``sockaddr_in`` destination.
+
+    Examples:
+        >>> len(build_delete_message("192.0.2.7", pid=1, seq=1))
+        108
+
+    """
+
+    address = pack_sockaddr_in(socket.inet_aton(ip))
+    return _header(RTM_DELETE, RTA_DST, len(address), pid=pid, seq=seq) + address
+
+
+def _header(message_type: int, addrs: int, payload_length: int, *, pid: int, seq: int) -> bytes:
+    """Return the ``rt_msghdr`` both writes start with."""
+
+    return RT_MSGHDR.pack(
+        RT_MSGHDR.size + payload_length,
+        RTM_VERSION,
+        message_type,
+        0,
+        _STATIC_FLAGS,
+        addrs,
+        pid,
+        seq,
+        0,
+        0,
+        RTV_EXPIRE,
+        _NO_METRICS,
+    )
+
+
+def raise_for_route_errno(error: int, *, action: str) -> None:
+    """Raise unless a routing-socket write succeeded.
+
+    Args:
+        error: ``0`` for success, otherwise the errno the write failed with.
+        action: What was asked, for the message (``"add"``, ``"remove"``).
+
+    Raises:
+        IPScoutPermissionError: ``EPERM`` or ``EACCES``: only root may change
+            the routing table on macOS.
+        IPScoutError: Any other refusal. ``EEXIST`` means something already
+            occupies that address - an unresolved entry, or a host route that
+            is not a neighbour - and is not overwritten blind.
+
+    Examples:
+        >>> raise_for_route_errno(0, action="add")
+        >>> raise_for_route_errno(errno.EPERM, action="add")
+        Traceback (most recent call last):
+        ...
+        ipscout.errors.IPScoutPermissionError: ...root...
+
+    """
+
+    if error == 0:
+        return
+    if error in (errno.EPERM, errno.EACCES):
+        msg = f"changing the neighbour table needs root on macOS: {os.strerror(error)}. Run as root"
+        raise IPScoutPermissionError(msg)
+    msg = f"the kernel refused to {action} the neighbour entry: {os.strerror(error)} (errno {error})"
+    raise IPScoutError(msg)
+
+
+def removed_from_route_errno(error: int) -> bool:
+    """Return whether a delete removed an entry, raising on a real refusal.
+
+    Args:
+        error: ``0`` for success, otherwise the errno the write failed with.
+
+    Returns:
+        ``True`` when the entry went, ``False`` when there was none
+        (``ESRCH``, the routing socket's "no such route").
+
+    Examples:
+        >>> removed_from_route_errno(0), removed_from_route_errno(errno.ESRCH)
+        (True, False)
+
+    """
+
+    if error == errno.ESRCH:
+        return False
+    raise_for_route_errno(error, action="remove")
+    return True
+
+
+def _route_write(message: bytes) -> int:  # pragma: no cover - macOS only
+    """Write one message to a routing socket and return the errno, 0 on success.
+
+    The kernel reports a refused change as the write's own error, so there is
+    no reply to read for the verdict.
+    """
+
+    af_route = getattr(socket, "AF_ROUTE", PF_ROUTE)
+    try:
+        sock = socket.socket(af_route, socket.SOCK_RAW, 0)
+    except OSError as exc:
+        return exc.errno or errno.EIO
+    try:
+        sock.send(message)
+    except OSError as exc:
+        return exc.errno or errno.EIO
+    finally:
+        with contextlib.suppress(OSError):
+            sock.close()
+    return 0
+
+
+def _is_listed(ip: str, ifindex: int | None = None) -> bool:  # pragma: no cover - macOS only
+    """Return whether the neighbour dump holds an entry for ``ip``, on ``ifindex`` when given."""
+
+    name: str | None = None
+    if ifindex is not None:
+        with contextlib.suppress(OSError, ValueError):
+            name = socket.if_indextoname(ifindex)
+    return any(entry.ip == ip and (ifindex is None or entry.interface == name) for entry in list_neighbours())
+
+
+def set_static_neighbour(ip: str, mac: bytes, ifindex: int) -> None:  # pragma: no cover - macOS only
+    """Add or replace a permanent IPv4 neighbour entry.
+
+    Args:
+        ip: The IPv4 address the entry maps.
+        mac: The six-byte hardware address.
+        ifindex: The interface the entry belongs to.
+
+    Raises:
+        IPScoutPermissionError: The process is not root.
+        IPScoutError: The kernel refused for another reason.
+
+    Note:
+        ``RTM_ADD`` refuses an address that already has an entry, so an
+        existing neighbour entry is deleted first - what ``arp -S`` does. Only
+        one the neighbour dump lists is deleted: a host route that is not a
+        neighbour is left alone, and the add then fails with ``EEXIST``.
+
+    """
+
+    pid = os.getpid()
+    # Any interface: the routing socket keys the entry by address alone, so an
+    # entry on another link blocks the add just the same.
+    if _is_listed(ip):
+        removed_from_route_errno(_route_write(build_delete_message(ip, pid=pid, seq=1)))
+    raise_for_route_errno(_route_write(build_add_message(ip, mac, ifindex, pid=pid, seq=2)), action="add")
+
+
+def remove_static_neighbour(ip: str, ifindex: int) -> bool:  # pragma: no cover - macOS only
+    """Delete one IPv4 neighbour entry.
+
+    Args:
+        ip: The address whose entry goes.
+        ifindex: The interface it is on. The message itself deletes by
+            address; the index decides whether there is an entry to delete.
+
+    Returns:
+        Whether an entry was removed. ``False`` without writing anything when
+        the neighbour dump holds no entry for ``ip`` on that interface, so a
+        host route that is not a neighbour can never be deleted through here.
+
+    Raises:
+        IPScoutPermissionError: The process is not root.
+        IPScoutError: The kernel refused for another reason.
+
+    """
+
+    if not _is_listed(ip, ifindex):
+        return False
+    return removed_from_route_errno(_route_write(build_delete_message(ip, pid=os.getpid(), seq=1)))

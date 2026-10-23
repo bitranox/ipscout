@@ -65,6 +65,7 @@ __all__ = [
     "PortState",
     "ProbeMethod",
     "ReachabilityReport",
+    "RemoveNeighbourReport",
     "ResolveReport",
     "ResponseObject",
     "ReverseDnsReport",
@@ -199,6 +200,8 @@ class CommandName(str, enum.Enum):
     MAC = "mac"
     FIND_IP = "find-ip"
     ARP_SCAN = "arp-scan"
+    SET_NEIGHBOUR = "set-neighbour"
+    REMOVE_NEIGHBOUR = "remove-neighbour"
     SUBNET = "subnet"
     SCAN_PORTS = "scan-ports"
     MTU = "mtu"
@@ -528,6 +531,18 @@ class MtuReport(_Frozen):
 
     target: str
     mtu: int | None = None
+
+
+class RemoveNeighbourReport(_Frozen):
+    """The outcome of asking to delete a neighbour entry.
+
+    ``removed`` is ``False`` when there was no entry to delete, which is an
+    answer rather than a failure.
+    """
+
+    ip: str
+    interface: str | None = None
+    removed: bool
 
 
 class WakeReport(_Frozen):

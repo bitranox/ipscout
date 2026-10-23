@@ -1,11 +1,12 @@
-"""The ``os_*`` markers skip a test off its platform; registering them alone would skip nothing.
+"""The ``os_*`` and ``host_mutating`` markers skip a test; registering them alone would skip nothing.
 
-Each test asserts the platform its own marker names, so it fails wherever conftest lets it run by
+Each test asserts the condition its own marker names, so it fails wherever conftest lets it run by
 mistake, and passes where the marker lets it run.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -29,3 +30,8 @@ def test_an_os_linux_test_runs_only_on_linux() -> None:
 @pytest.mark.os_posix
 def test_an_os_posix_test_never_runs_on_windows() -> None:
     assert sys.platform != "win32"
+
+
+@pytest.mark.host_mutating
+def test_a_host_mutating_test_runs_only_when_opted_in() -> None:
+    assert os.environ.get("IPSCOUT_HOST_WRITE_TESTS") == "1"

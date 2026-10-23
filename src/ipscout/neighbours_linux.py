@@ -1,8 +1,12 @@
-"""Neighbour-cache reads on Linux, via a netlink ``RTM_GETNEIGH`` dump.
+"""Neighbour-cache reads and writes on Linux, over netlink.
 
 Contents:
-    list_neighbours: Every entry the kernel currently holds.
+    list_neighbours: Every entry the kernel currently holds (``RTM_GETNEIGH``).
     parse_neighbour_dump: Pure decoder for one dump chunk.
+    set_static_neighbour / remove_static_neighbour: Write a permanent IPv4
+        entry (``RTM_NEWNEIGH``) or delete one (``RTM_DELNEIGH``).
+    build_set_request / build_remove_request: Pure encoders for those two.
+    raise_for_ack / removed_from_ack: The kernel's errno, mapped to an outcome.
 
 Note:
     Netlink covers IPv4 and IPv6 in one dump, so this does not read
@@ -16,7 +20,9 @@ Note:
 from __future__ import annotations
 
 import contextlib
+import errno
 import ipaddress
+import os
 import socket
 import struct
 import time
@@ -29,22 +35,40 @@ from .arp import (
     parse_neighbour_advertisement,
     solicited_node_multicast,
 )
-from .errors import IPScoutPermissionError, IPScoutUnsupportedError
+from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily, Neighbour, NeighbourState
 from .netlink import (
+    NLM_F_ACK,
+    NLM_F_CREATE,
     NLM_F_DUMP,
+    NLM_F_REPLACE,
     NLM_F_REQUEST,
     NLMSG_DONE,
     NLMSG_ERROR,
+    build_attribute,
     build_message,
     iter_attributes,
     iter_messages,
     open_socket,
+    parse_ack,
 )
 
-__all__ = ["format_mac", "list_neighbours", "parse_neighbour_dump", "resolve_active_ipv4", "resolve_active_ipv6"]
+__all__ = [
+    "build_remove_request",
+    "build_set_request",
+    "format_mac",
+    "list_neighbours",
+    "parse_neighbour_dump",
+    "raise_for_ack",
+    "remove_static_neighbour",
+    "removed_from_ack",
+    "resolve_active_ipv4",
+    "resolve_active_ipv6",
+    "set_static_neighbour",
+]
 
 _RTM_NEWNEIGH = 28
+_RTM_DELNEIGH = 29
 _RTM_GETNEIGH = 30
 
 #: struct ndmsg: family, pad, pad, ifindex, state, flags, type.
@@ -388,3 +412,184 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
     finally:
         with contextlib.suppress(OSError):
             sock.close()
+
+
+# --------------------------------------------------------------------------
+# Writing a static entry
+# --------------------------------------------------------------------------
+
+#: Reads allowed while waiting for the acknowledgement. Nothing else is sent
+#: on this private socket, so the first reply is the answer; the bound only
+#: stops a misbehaving stream from looping.
+_MAX_ACK_READS = 8
+
+
+def build_set_request(ip: str, mac: bytes, ifindex: int, sequence: int = 1) -> bytes:
+    """Encode the ``RTM_NEWNEIGH`` that adds or replaces a permanent IPv4 entry.
+
+    Args:
+        ip: The IPv4 address the entry maps.
+        mac: The six-byte hardware address it maps to.
+        ifindex: The interface the entry belongs to. The kernel keys the table
+            by address AND interface, so there is no entry without one.
+        sequence: Sequence number echoed back on the acknowledgement.
+
+    Returns:
+        The message ``ip neigh replace IP lladdr MAC nud permanent dev IF``
+        sends: an ``ndmsg`` in state ``NUD_PERMANENT``, then ``NDA_DST`` and
+        ``NDA_LLADDR``, with ``NLM_F_CREATE | NLM_F_REPLACE`` so an existing
+        entry (learned or static) is overwritten rather than refused.
+
+    Examples:
+        >>> len(build_set_request("192.0.2.7", bytes.fromhex("020000000007"), 2))
+        48
+
+    """
+
+    body = (
+        _NDMSG.pack(socket.AF_INET, 0, 0, ifindex, _NUD_PERMANENT, 0, 0) + build_attribute(_NDA_DST, socket.inet_aton(ip)) + build_attribute(_NDA_LLADDR, mac)
+    )
+    return build_message(_RTM_NEWNEIGH, NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE, body, sequence)
+
+
+def build_remove_request(ip: str, ifindex: int, sequence: int = 1) -> bytes:
+    """Encode the ``RTM_DELNEIGH`` that deletes one IPv4 entry.
+
+    Args:
+        ip: The IPv4 address whose entry goes.
+        ifindex: The interface it is on. The kernel refuses a delete without
+            one (``EINVAL``), since the same address may be on several links.
+        sequence: Sequence number echoed back on the acknowledgement.
+
+    Returns:
+        An ``ndmsg`` plus ``NDA_DST``, asking for an acknowledgement.
+
+    Examples:
+        >>> len(build_remove_request("192.0.2.7", 2))
+        36
+
+    """
+
+    body = _NDMSG.pack(socket.AF_INET, 0, 0, ifindex, 0, 0, 0) + build_attribute(_NDA_DST, socket.inet_aton(ip))
+    return build_message(_RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK, body, sequence)
+
+
+def raise_for_ack(error: int | None, *, action: str) -> None:
+    """Raise unless the kernel acknowledged a neighbour-table change.
+
+    Args:
+        error: What :func:`~ipscout.netlink.parse_ack` read: ``0`` for success,
+            a positive errno for a refusal, ``None`` for no answer at all.
+        action: What was asked, for the message (``"add"``, ``"remove"``).
+
+    Raises:
+        IPScoutPermissionError: ``EPERM`` or ``EACCES``. Writing the table
+            needs ``CAP_NET_ADMIN``, which reading it does not.
+        IPScoutError: Any other refusal, or no acknowledgement.
+
+    Examples:
+        >>> raise_for_ack(0, action="add")
+        >>> raise_for_ack(errno.EPERM, action="add")
+        Traceback (most recent call last):
+        ...
+        ipscout.errors.IPScoutPermissionError: ...CAP_NET_ADMIN...
+
+    """
+
+    if error == 0:
+        return
+    if error is None:
+        msg = f"the kernel did not acknowledge the request to {action} the neighbour entry"
+        raise IPScoutError(msg)
+    if error in (errno.EPERM, errno.EACCES):
+        msg = (
+            f"changing the neighbour table needs root or CAP_NET_ADMIN: {os.strerror(error)}. "
+            f"Run as root, or grant it with 'setcap cap_net_admin+ep $(readlink -f $(which python3))'"
+        )
+        raise IPScoutPermissionError(msg)
+    msg = f"the kernel refused to {action} the neighbour entry: {os.strerror(error)} (errno {error})"
+    raise IPScoutError(msg)
+
+
+def removed_from_ack(error: int | None) -> bool:
+    """Return whether a delete removed an entry, raising on a real refusal.
+
+    Args:
+        error: The acknowledged errno, as for :func:`raise_for_ack`.
+
+    Returns:
+        ``True`` when the kernel deleted an entry, ``False`` when it had none
+        (``ENOENT``) - an ordinary answer, not an error.
+
+    Raises:
+        IPScoutPermissionError: The process lacks ``CAP_NET_ADMIN``.
+        IPScoutError: Any other refusal, or no acknowledgement.
+
+    Examples:
+        >>> removed_from_ack(0), removed_from_ack(errno.ENOENT)
+        (True, False)
+
+    """
+
+    if error == errno.ENOENT:
+        return False
+    raise_for_ack(error, action="remove")
+    return True
+
+
+def _exchange(message: bytes) -> int | None:
+    """Send one request on a private netlink socket and return its errno."""
+
+    sock = open_socket()
+    if sock is None:  # pragma: no cover - non-Linux, or netlink unavailable
+        msg = "no netlink socket on this host, so the neighbour table cannot be changed"
+        raise IPScoutUnsupportedError(msg)
+    try:
+        sock.settimeout(2.0)
+        sock.send(message)
+        for _ in range(_MAX_ACK_READS):
+            error = parse_ack(sock.recv(65535))
+            if error is not None:
+                return error
+        return None  # pragma: no cover - the kernel always acknowledges
+    except OSError:  # pragma: no cover - a timeout, which the kernel does not cause
+        return None
+    finally:
+        with contextlib.suppress(OSError):
+            sock.close()
+
+
+def set_static_neighbour(ip: str, mac: bytes, ifindex: int) -> None:
+    """Add or replace a permanent IPv4 neighbour entry.
+
+    Args:
+        ip: The IPv4 address the entry maps.
+        mac: The six-byte hardware address.
+        ifindex: The interface the entry belongs to.
+
+    Raises:
+        IPScoutPermissionError: The process lacks ``CAP_NET_ADMIN``.
+        IPScoutError: The kernel refused for another reason.
+
+    """
+
+    raise_for_ack(_exchange(build_set_request(ip, mac, ifindex)), action="add")
+
+
+def remove_static_neighbour(ip: str, ifindex: int) -> bool:
+    """Delete one IPv4 neighbour entry.
+
+    Args:
+        ip: The address whose entry goes.
+        ifindex: The interface it is on.
+
+    Returns:
+        Whether an entry was removed.
+
+    Raises:
+        IPScoutPermissionError: The process lacks ``CAP_NET_ADMIN``.
+        IPScoutError: The kernel refused for another reason.
+
+    """
+
+    return removed_from_ack(_exchange(build_remove_request(ip, ifindex)))

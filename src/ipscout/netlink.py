@@ -5,12 +5,16 @@ Contents:
     build_message: Wrap a request body in an ``nlmsghdr``.
     iter_messages: Walk the messages in one received chunk.
     iter_attributes: Walk the ``rtattr`` list trailing a message body.
+    build_attribute: Encode one ``rtattr``, padded for the next one.
+    parse_ack: Read the kernel's verdict on a request out of its reply.
     aligned: The 4-byte rounding netlink uses throughout.
 
 Note:
-    A netlink socket is an ordinary datagram socket and these queries need no
-    privileges. The walkers are pure functions over bytes, which is what lets
-    the wire formats above them be tested without a kernel.
+    A netlink socket is an ordinary datagram socket and the queries need no
+    privileges; a request that CHANGES kernel state (a static neighbour entry)
+    needs ``CAP_NET_ADMIN``, and the kernel answers it with an acknowledgement
+    carrying the errno. The walkers and encoders are pure functions over bytes,
+    which is what lets the wire formats above them be tested without a kernel.
 
 """
 
@@ -26,21 +30,32 @@ if TYPE_CHECKING:
 __all__ = [
     "NLMSG_DONE",
     "NLMSG_ERROR",
+    "NLM_F_ACK",
+    "NLM_F_CREATE",
     "NLM_F_DUMP",
+    "NLM_F_REPLACE",
     "NLM_F_REQUEST",
     "aligned",
+    "build_attribute",
     "build_message",
     "iter_attributes",
     "iter_messages",
     "open_socket",
+    "parse_ack",
 ]
 
 #: NETLINK_ROUTE: routes, addresses, neighbours and links.
 NETLINK_ROUTE = 0
 
 NLM_F_REQUEST = 0x01
+#: Ask for an acknowledgement even on success. Without it a request that
+#: worked is answered with silence, which cannot be told from a lost reply.
+NLM_F_ACK = 0x04
 #: NLM_F_ROOT | NLM_F_MATCH: ask for the whole table rather than one entry.
 NLM_F_DUMP = 0x300
+#: Modifiers of a NEW request: replace an existing object, create a missing one.
+NLM_F_REPLACE = 0x100
+NLM_F_CREATE = 0x400
 
 NLMSG_ERROR = 0x02
 NLMSG_DONE = 0x03
@@ -50,6 +65,10 @@ NLMSGHDR = struct.Struct("=IHHII")
 
 #: struct rtattr: length, type.
 RTATTR = struct.Struct("=HH")
+
+#: struct nlmsgerr starts with a signed errno: zero acknowledges success, a
+#: negative value is the refusal.
+NLMSGERR_CODE = struct.Struct("=i")
 
 
 def aligned(length: int) -> int:
@@ -151,3 +170,53 @@ def iter_attributes(payload: bytes, offset: int) -> Iterator[tuple[int, bytes]]:
             return
         yield attribute, payload[position + RTATTR.size : position + length]
         position += aligned(length)
+
+
+def build_attribute(attribute_type: int, value: bytes) -> bytes:
+    """Encode one ``rtattr`` and pad it so the next one starts aligned.
+
+    Args:
+        attribute_type: The attribute number (``NDA_*``, ``RTA_*``).
+        value: The attribute payload.
+
+    Returns:
+        The header, the value and the zero padding up to 4 bytes. The length
+        field counts header and value only, as the kernel's ``RTA_LENGTH``
+        does; the padding is implied by the alignment rule.
+
+    Examples:
+        >>> build_attribute(2, bytes.fromhex("020000000001")).hex()
+        '0a0002000200000000010000'
+
+    """
+
+    length = RTATTR.size + len(value)
+    return RTATTR.pack(length, attribute_type) + value + bytes(aligned(length) - length)
+
+
+def parse_ack(data: bytes) -> int | None:
+    """Return the errno the kernel answered a request with.
+
+    Args:
+        data: Bytes as read from the socket after sending a request that asked
+            for ``NLM_F_ACK``.
+
+    Returns:
+        ``0`` when the kernel acknowledged success, the positive errno when it
+        refused, or ``None`` when the chunk carries no acknowledgement at all.
+
+    Examples:
+        >>> parse_ack(build_message(NLMSG_ERROR, 0, NLMSGERR_CODE.pack(0)))
+        0
+        >>> parse_ack(build_message(NLMSG_ERROR, 0, NLMSGERR_CODE.pack(-1)))
+        1
+        >>> parse_ack(b"") is None
+        True
+
+    """
+
+    for message_type, payload in iter_messages(data):
+        if message_type == NLMSG_ERROR and len(payload) >= NLMSGERR_CODE.size:
+            (code,) = NLMSGERR_CODE.unpack(payload[: NLMSGERR_CODE.size])
+            return -int(code)
+    return None

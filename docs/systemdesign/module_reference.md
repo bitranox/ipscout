@@ -61,8 +61,9 @@ listed highest first; each may import only from those below it.
 scan : subnet : portscan : mtu : wol   sweeps and single-purpose probes
 api          ping / aping / ping_many / aping_many / is_reachable / ais_reachable
 traceroute   traceroute / atraceroute / trace_path / atrace_path
-leases_linux the OS lease store
+static_neighbours  set_neighbour / remove_neighbour
 neighbours   neighbours / lookup_mac / get_mac_address / resolve_active
+leases_linux the OS lease store
 interfaces : routes
 service      probe sequencing and aggregation
 factory      picks the backend for this platform, family and options
@@ -145,14 +146,14 @@ Two other wire-level facts are handled in `packet.py`:
 
 Established by running the suite on real CI runners, not by reading documentation.
 
-| Capability              | Linux                              | macOS                         | Windows                           |
-|-------------------------|------------------------------------|-------------------------------|-----------------------------------|
-| ICMP echo, no elevation | `SOCK_DGRAM`/`IPPROTO_ICMP`        | `SOCK_DGRAM`/`IPPROTO_ICMP`   | `IcmpSendEcho` via `iphlpapi.dll` |
-| Traceroute              | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | only on a raw socket, so root | yes, `IP_TTL_EXPIRED_TRANSIT`     |
-| Async model             | one socket on the event loop       | one socket on the event loop  | blocking C call in a thread pool  |
-| Interface enumeration   | `getifaddrs`                       | `getifaddrs`                  | `GetAdaptersAddresses`            |
-| Route lookup            | netlink `RTM_GETROUTE`             | not implemented               | not implemented                   |
-| Observing a DHCP handshake | `AF_PACKET`, needs root         | `/dev/bpf`, needs root        | `SIO_RCVALL`, needs Administrator |
+| Capability                 | Linux                              | macOS                         | Windows                           |
+|----------------------------|------------------------------------|-------------------------------|-----------------------------------|
+| ICMP echo, no elevation    | `SOCK_DGRAM`/`IPPROTO_ICMP`        | `SOCK_DGRAM`/`IPPROTO_ICMP`   | `IcmpSendEcho` via `iphlpapi.dll` |
+| Traceroute                 | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | only on a raw socket, so root | yes, `IP_TTL_EXPIRED_TRANSIT`     |
+| Async model                | one socket on the event loop       | one socket on the event loop  | blocking C call in a thread pool  |
+| Interface enumeration      | `getifaddrs`                       | `getifaddrs`                  | `GetAdaptersAddresses`            |
+| Route lookup               | netlink `RTM_GETROUTE`             | not implemented               | not implemented                   |
+| Observing a DHCP handshake | `AF_PACKET`, needs root            | `/dev/bpf`, needs root        | `SIO_RCVALL`, needs Administrator |
 
 ### Traceroute on macOS
 
@@ -195,65 +196,66 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 
 ### Public surface
 
-| Module          | Role                                                                                                            |
-|-----------------|-----------------------------------------------------------------------------------------------------------------|
-| `__init__.py`   | Re-exports the public API so importers depend on the package, not its layout.                                   |
-| `api.py`        | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.           |
-| `traceroute.py` | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                           |
-| `interfaces.py` | `local_interfaces`, dispatching to the per-OS backend.                                                          |
-| `routes.py`     | `query_route`, `default_gateway`, dispatching to the per-OS backend.                                            |
-| `neighbours.py` | `neighbours`, `lookup_mac`, `get_mac_address`, `resolve_active`, `normalise_mac`.                               |
-| `scan.py`       | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.        |
-| `subnet.py`     | `subnet_info`, composing interfaces, routes and the stored lease.                                               |
-| `portscan.py`   | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                         |
-| `mtu.py`        | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                |
-| `wol.py`        | `wake_on_lan` and the magic packet it builds.                                                                   |
-| `dhcp.py`       | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                   |
-| `resolve.py`    | `resolve`, `resolve_one`, `reverse_dns`, `family_of`.                                                           |
-| `factory.py`    | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path. |
+| Module                 | Role                                                                                                                              |
+|------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `__init__.py`          | Re-exports the public API so importers depend on the package, not its layout.                                                     |
+| `api.py`               | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.                             |
+| `traceroute.py`        | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                                             |
+| `interfaces.py`        | `local_interfaces`, dispatching to the per-OS backend.                                                                            |
+| `routes.py`            | `query_route`, `default_gateway`, dispatching to the per-OS backend.                                                              |
+| `neighbours.py`        | `neighbours`, `lookup_mac`, `get_mac_address`, `resolve_active`, `normalise_mac`.                                                 |
+| `static_neighbours.py` | `set_neighbour`, `remove_neighbour`: write and delete a permanent IPv4 entry, choosing the interface and reading the result back. |
+| `scan.py`              | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.                          |
+| `subnet.py`            | `subnet_info`, composing interfaces, routes and the stored lease.                                                                 |
+| `portscan.py`          | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                                           |
+| `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                  |
+| `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                     |
+| `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                     |
+| `resolve.py`           | `resolve`, `resolve_one`, `reverse_dns`, `family_of`.                                                                             |
+| `factory.py`           | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path.                   |
 
 ### Core
 
-| Module        | Role                                                                              |
-|---------------|-----------------------------------------------------------------------------------|
-| `errors.py`   | `IPScoutError` and its subclasses, sweep refusals included. No dependencies.      |
-| `models.py`   | Frozen result models and the `str`-subclass enums.                                |
-| `ports.py`    | `EchoResult`, `EchoTransport`, `AsyncEchoTransport`. The seams.                   |
-| `packet.py`   | ICMP encode and decode. Total functions over bytes: no sockets, no clock, no I/O. |
-| `service.py`  | `PingRequest`, `run_ping`, `arun_ping`. Probe sequencing and aggregation.         |
-| `netlink.py`  | Message and attribute walkers for the Linux route and neighbour backends.         |
-| `bsdroute.py` | Routing-message and `sockaddr` walkers for the macOS backends, plus `sysctl`.     |
-| `arp.py`      | ARP and NDP codecs. Testable without the privilege the sockets need.              |
-| `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.           |
-| `bpf.py`      | BSD packet filter ioctl encoding and record splitting, shared by two backends.   |
-| `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.             |
+| Module        | Role                                                                                                                    |
+|---------------|-------------------------------------------------------------------------------------------------------------------------|
+| `errors.py`   | `IPScoutError` and its subclasses, sweep refusals included. No dependencies.                                            |
+| `models.py`   | Frozen result models and the `str`-subclass enums.                                                                      |
+| `ports.py`    | `EchoResult`, `EchoTransport`, `AsyncEchoTransport`. The seams.                                                         |
+| `packet.py`   | ICMP encode and decode. Total functions over bytes: no sockets, no clock, no I/O.                                       |
+| `service.py`  | `PingRequest`, `run_ping`, `arun_ping`. Probe sequencing and aggregation.                                               |
+| `netlink.py`  | Message and attribute walkers and encoders, and the acknowledgement reader, for the Linux route and neighbour backends. |
+| `bsdroute.py` | Routing-message and `sockaddr` walkers and encoders for the macOS backends, plus `sysctl`.                              |
+| `arp.py`      | ARP and NDP codecs. Testable without the privilege the sockets need.                                                    |
+| `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.                                                  |
+| `bpf.py`      | BSD packet filter ioctl encoding and record splitting, shared by two backends.                                          |
+| `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.                                                   |
 
 ### Platform backends
 
-| Module                  | Role                                                                                                                     |
-|-------------------------|--------------------------------------------------------------------------------------------------------------------------|
-| `transport_posix.py`    | ICMP over the unprivileged datagram socket, sync and asyncio, plus the raw-socket fallback and the permission diagnosis. |
-| `transport_windows.py`  | ICMP through `IcmpSendEcho` / `Icmp6SendEcho2`, plus the executor-backed async variant.                                  |
-| `transport_tcp.py`      | Reachability by full TCP connect. Never selected automatically.                                                          |
-| `interfaces_posix.py`   | `getifaddrs`, handling the Linux/BSD `sockaddr` disagreement.                                                            |
-| `interfaces_windows.py` | `GetAdaptersAddresses`.                                                                                                  |
-| `winapi.py`             | ctypes bindings for `iphlpapi.dll`. Imports safely on every platform.                                                    |
-| `routes_linux.py`       | Netlink `RTM_GETROUTE` for one route, and a table dump for the default.                                                  |
-| `routes_macos.py`       | `RTM_GET` on a routing socket, matched on pid and sequence because the socket is shared.                                 |
-| `routes_windows.py`     | `GetBestRoute2`, and `GetIpForwardTable2` for the zero-length prefix.                                                    |
-| `neighbours_linux.py`   | `RTM_GETNEIGH` for both families in one dump; `AF_PACKET` ARP and raw ICMPv6 for the active path.                        |
-| `dhcp_linux.py`         | `AF_PACKET` bound to `ETH_P_IP`, plus the `PACKET_ADD_MEMBERSHIP` promiscuous join that drops with the socket. |
-| `dhcp_windows.py`       | A raw IPv4 socket put into promiscuous receive with `SIO_RCVALL`; no driver, but a weaker promise. |
-| `dhcp_macos.py`         | A `/dev/bpf` device bound to one interface, buffering the several frames each read returns. |
-| `neighbours_macos.py`   | `NET_RT_FLAGS` sysctl dump; BPF for the active path.                                                                     |
-| `neighbours_windows.py` | `GetIpNetTable2`; `SendARP` and `ResolveIpNetEntry2` for the active path.                                                |
-| `leases_linux.py`       | systemd-networkd and dhclient lease stores. Reads a file; sends no DHCP traffic.                                         |
+| Module                  | Role                                                                                                                                                  |
+|-------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `transport_posix.py`    | ICMP over the unprivileged datagram socket, sync and asyncio, plus the raw-socket fallback and the permission diagnosis.                              |
+| `transport_windows.py`  | ICMP through `IcmpSendEcho` / `Icmp6SendEcho2`, plus the executor-backed async variant.                                                               |
+| `transport_tcp.py`      | Reachability by full TCP connect. Never selected automatically.                                                                                       |
+| `interfaces_posix.py`   | `getifaddrs`, handling the Linux/BSD `sockaddr` disagreement.                                                                                         |
+| `interfaces_windows.py` | `GetAdaptersAddresses`.                                                                                                                               |
+| `winapi.py`             | ctypes bindings for `iphlpapi.dll`. Imports safely on every platform.                                                                                 |
+| `routes_linux.py`       | Netlink `RTM_GETROUTE` for one route, and a table dump for the default.                                                                               |
+| `routes_macos.py`       | `RTM_GET` on a routing socket, matched on pid and sequence because the socket is shared.                                                              |
+| `routes_windows.py`     | `GetBestRoute2`, and `GetIpForwardTable2` for the zero-length prefix.                                                                                 |
+| `neighbours_linux.py`   | `RTM_GETNEIGH` for both families in one dump; `AF_PACKET` ARP and raw ICMPv6 for the active path; `RTM_NEWNEIGH` / `RTM_DELNEIGH` for a static entry. |
+| `dhcp_linux.py`         | `AF_PACKET` bound to `ETH_P_IP`, plus the `PACKET_ADD_MEMBERSHIP` promiscuous join that drops with the socket.                                        |
+| `dhcp_windows.py`       | A raw IPv4 socket put into promiscuous receive with `SIO_RCVALL`; no driver, but a weaker promise.                                                    |
+| `dhcp_macos.py`         | A `/dev/bpf` device bound to one interface, buffering the several frames each read returns.                                                           |
+| `neighbours_macos.py`   | `NET_RT_FLAGS` sysctl dump; BPF for the active path; `RTM_ADD` / `RTM_DELETE` for a static entry (untested on hardware).                              |
+| `neighbours_windows.py` | `GetIpNetTable2`; `SendARP` and `ResolveIpNetEntry2` for the active path; `CreateIpNetEntry2` / `DeleteIpNetEntry2` for a static entry.               |
+| `leases_linux.py`       | systemd-networkd and dhclient lease stores. Reads a file; sends no DHCP traffic.                                                                      |
 
 ### CLI adapter
 
 | Module              | Role                                                                       |
 |---------------------|----------------------------------------------------------------------------|
-| `cli.py`            | The rich-click group, nineteen subcommands, `_emit` and `_fail`, `main`.  |
+| `cli.py`            | The rich-click group, twenty-one subcommands, `_emit` and `_fail`, `main`. |
 | `serialize.py`      | `to_jsonable` and `dumps` at the output boundary.                          |
 | `typed_click.py`    | Typed facade over rich-click's partially-typed decorators.                 |
 | `__main__.py`       | `python -m ipscout`.                                                       |
