@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [1.7.0] 2026-10-23 23:14:12
+
 ### Added
 
 - `set_neighbour(ip, mac, *, interface=None)` writes a permanent (static) IPv4 neighbour entry and

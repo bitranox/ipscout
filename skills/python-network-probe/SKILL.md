@@ -266,8 +266,9 @@ and is refused by name rather than silently returning nothing.
 
 ## What needs privilege, and what it does about it
 
-Everything above is unprivileged. These are not, and each raises
-`IPScoutPermissionError` naming the exact remedy rather than degrading:
+The operations in this table need privilege, apart from the exceptions a row names;
+everything else in this skill runs unprivileged. Each of these raises `IPScoutPermissionError` naming the exact remedy rather than
+degrading:
 
 | Operation                                     | Needs                                                                                                                                                                                                                                       |
 |-----------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -277,17 +278,32 @@ Everything above is unprivileged. These are not, and each raises
 | `observe_dhcp(...)` and its session           | root / `CAP_NET_RAW` on Linux, root on macOS (`/dev/bpf`), Administrator on Windows (`SIO_RCVALL`, no driver)                                                                                                                               |
 | `set_neighbour(...)`, `remove_neighbour(...)` | root / `CAP_NET_ADMIN` on Linux, root on macOS (routing socket, untested on real hardware), Administrator on Windows. `remove_neighbour` without `interface=` reads the cache first and answers `False` unprivileged when nothing is listed |
 
-Two rules these follow, worth relying on:
+The rules these follow, worth relying on:
 
 - **They never silently degrade.** `active=True` without the rights raises; it
   does not hand back a stale cache entry dressed up as a fresh one. A SYN scan
   does not quietly become a connect scan.
 - **Writing the neighbour cache has no unprivileged route.** `set_neighbour` maps an IPv4
   address to one device's MAC (the ARP trick embedded devices are first addressed with), returns
-  the entry read back from the cache, and replaces an existing one; IPv6 raises
-  `IPScoutUnsupportedError`. The entry outlives the process, so `remove_neighbour` it in a
-  `finally`.
-- **The unprivileged route to the same answer is named in the message.**
+  the entry read back from the cache (a `Neighbour`; state `PERMANENT` on Linux and Windows,
+  `OTHER` on macOS), and replaces an existing
+  one; IPv6 raises `IPScoutUnsupportedError`. `interface=` is optional: left out, it picks the one
+  interface whose subnet holds the address and raises `IPScoutUnsupportedError` when none or
+  several do, so an address outside every local subnet needs `interface=` named. The entry
+  outlives the process, so call `set_neighbour` BEFORE the `try` and
+  `remove_neighbour` it in the `finally`: a refused write then leaves nothing to remove.
+  `remove_neighbour` with `interface=` always asks the kernel: unprivileged it raises
+  `IPScoutPermissionError` even when nothing is there, privileged it answers `False` when there
+  was no entry. It deletes rather than restores, so a replaced entry is gone: borrow an address
+  that has no entry, checked first with `get_mac_address(ip, active=True)` (`None` = nothing
+  answers). A neighbour entry is not a route - traffic to an address outside every local subnet
+  still goes to the gateway and never uses it - so borrow an address inside a local subnet; ipscout
+  adds no routes. `interface=` takes the index as digits (portable) or a name - unlike a zone,
+  where Windows resolves only the index: on Windows either
+  the friendly name `local_interfaces()` reports or the one `neighbours()` reports; remove with the
+  same interface you set on, in any of those spellings (each resolves to its index).
+- **For the READ operations, the unprivileged route to the same answer is named in the
+  message** (a write has none, as above).
   Usually `arp_scan()`, which sweeps and then reads the cache, needing nothing.
   `observe_dhcp` is the one exception, and its message says so plainly: there
   is no unprivileged way to watch another machine's traffic. It points at
@@ -314,7 +330,7 @@ JSON. `skipped` names any network a sweep could not cover, which is how a
 partial answer is told from a complete one; the same note goes to stderr, never
 to the stream you parse. Exit codes are `0` reached, `1` not reached, `2` error
 - a bad name, a missing capability, or a malformed command line - independent of
-output format.
+output format. `remove-neighbour` exits `1` when there was no entry to remove.
 
 ## What it will not do, and why
 
