@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.1.0] 2026-10-24 17:18:42
+
 ### Added
 
 - `grab_banners` / `agrab_banners`: read the first line each of many hosts sends on one TCP port,
