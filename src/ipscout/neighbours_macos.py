@@ -107,12 +107,25 @@ def parse_neighbour_dump(data: bytes, family: AddressFamily) -> list[Neighbour]:
     found: list[Neighbour] = []
     position = 0
     while position + RT_MSGHDR.size <= len(data):
-        message_length = int.from_bytes(data[position : position + 2], "little")
+        # The loop guard leaves a whole header in range, so the length is read
+        # as part of it: one struct, one byte order, for every field.
+        (
+            message_length,
+            _version,
+            _message_type,
+            index,
+            _flags,
+            addrs,
+            _pid,
+            _seq,
+            _errno,
+            _use,
+            _inits,
+            _metrics,
+        ) = RT_MSGHDR.unpack_from(data, position)
         if message_length < RT_MSGHDR.size or position + message_length > len(data):
             break
 
-        header = RT_MSGHDR.unpack(data[position : position + RT_MSGHDR.size])
-        index, _flags, addrs = header[3], header[4], header[5]
         sockaddrs = split_sockaddrs(data[position + RT_MSGHDR.size : position + message_length], addrs)
 
         # The destination is the neighbour's IP; the gateway slot holds the
@@ -127,7 +140,10 @@ def parse_neighbour_dump(data: bytes, family: AddressFamily) -> list[Neighbour]:
             address = ipaddress.ip_address(ip)
         except ValueError:  # pragma: no cover - the kernel does not emit these
             continue
-        if address.is_multicast or address.is_unspecified:
+        # A Neighbour refuses a family that disagrees with its address, so an
+        # entry of the other family in this dump is skipped rather than allowed
+        # to fail the whole listing.
+        if address.is_multicast or address.is_unspecified or address.version != family.ip_version:
             continue
 
         interface: str | None = None

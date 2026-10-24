@@ -54,7 +54,7 @@ def test_every_port_carrying_record_refuses_a_port_outside_the_range(build: Any,
 
 @pytest.mark.parametrize("port", OUT_OF_RANGE)
 def test_a_port_list_is_refused_like_a_specification_before_anything_is_sent(port: int) -> None:
-    with pytest.raises(ValueError, match=rf"^port out of range 1-65535: {port}$"):
+    with pytest.raises(ValueError, match=rf"^port scan refused its arguments: ports\.0: port out of range 1-65535: {port}$"):
         scan_ports("127.0.0.1", [port], timeout=0.2)
 
 
@@ -62,7 +62,7 @@ def test_a_port_list_is_refused_like_a_specification_before_anything_is_sent(por
 def test_the_awaitable_scan_refuses_the_same_list(port: int) -> None:
     import asyncio
 
-    with pytest.raises(ValueError, match=rf"^port out of range 1-65535: {port}$"):
+    with pytest.raises(ValueError, match=rf"^port scan refused its arguments: ports\.0: port out of range 1-65535: {port}$"):
         asyncio.run(ascan_ports("127.0.0.1", [port], timeout=0.2))
 
 
@@ -70,13 +70,13 @@ def test_the_awaitable_scan_refuses_the_same_list(port: int) -> None:
 def test_a_syn_scan_refuses_a_bad_port_before_asking_for_privileges(port: int) -> None:
     # Argument errors come first: an unprivileged caller with a bad list
     # must be told about the list, not about the raw socket.
-    with pytest.raises(ValueError, match=rf"^port out of range 1-65535: {port}$"):
+    with pytest.raises(ValueError, match=rf"^port scan refused its arguments: ports\.1: port out of range 1-65535: {port}$"):
         syn_scan("127.0.0.1", [80, port], timeout=0.2)
 
 
 @pytest.mark.parametrize("port", OUT_OF_RANGE)
 def test_the_syn_method_of_scan_ports_refuses_the_same_list(port: int) -> None:
-    with pytest.raises(ValueError, match=rf"^port out of range 1-65535: {port}$"):
+    with pytest.raises(ValueError, match=rf"^port scan refused its arguments: ports\.0: port out of range 1-65535: {port}$"):
         scan_ports("127.0.0.1", [port], method=ScanMethod.SYN, timeout=0.2)
 
 

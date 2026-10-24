@@ -226,13 +226,55 @@ def list_interfaces() -> list[Interface]:  # pragma: no cover - Windows only
     cursor = ctypes.cast(buffer, ctypes.POINTER(_IpAdapterAddresses))
     while cursor:
         adapter = cursor.contents
-        interfaces.append(_to_interface(adapter))
+        interfaces.append(_to_interface(adapter, position=len(interfaces)))
         cursor = adapter.Next
     return interfaces
 
 
-def _to_interface(adapter: _IpAdapterAddresses) -> Interface:  # pragma: no cover - Windows only
-    """Build the public record for one adapter."""
+def _adapter_name(adapter: _IpAdapterAddresses, *, position: int) -> str:
+    """Return the name an adapter is reported under, never an empty one.
+
+    Args:
+        adapter: The adapter record.
+        position: Where the adapter sits in the API's list, the last resort
+            when the adapter reports neither a name nor an index.
+
+    Returns:
+        The friendly name a person recognises ("Ethernet 2") when there is
+        one; otherwise the permanent adapter name, the ``{GUID}`` the API
+        hands back as a narrow ``PCHAR``; otherwise ``ifindex-<n>`` or, with
+        no index either, ``adapter-<position>``. Each fallback is unique per
+        adapter - indexes are unique, and so are positions - which keeps
+        every record addressable by name, and the two prefixes never collide
+        with each other.
+
+    Note:
+        ``AdapterName`` is a ``c_char_p``, which ctypes reads as ``bytes``:
+        ``str()`` of it would report ``"b'{...}'"``. It is decoded as ASCII,
+        which is what a GUID string is; ``errors="replace"`` keeps a stray
+        byte from turning one odd adapter into a failed enumeration.
+
+    """
+
+    if adapter.FriendlyName:
+        return str(adapter.FriendlyName)
+    raw: bytes | None = adapter.AdapterName
+    if raw:
+        return raw.decode("ascii", errors="replace")
+    if adapter.IfIndex:
+        return f"ifindex-{int(adapter.IfIndex)}"
+    return f"adapter-{position}"
+
+
+def _to_interface(adapter: _IpAdapterAddresses, *, position: int) -> Interface:
+    """Build the public record for one adapter.
+
+    Args:
+        adapter: The adapter record.
+        position: Where the adapter sits in the API's list; see
+            :func:`_adapter_name`.
+
+    """
 
     ipv4: list[InterfaceAddress] = []
     ipv6: list[InterfaceAddress] = []
@@ -246,7 +288,7 @@ def _to_interface(adapter: _IpAdapterAddresses) -> Interface:  # pragma: no cove
         unicast = entry.Next
 
     return Interface(
-        name=str(adapter.FriendlyName or adapter.AdapterName or ""),
+        name=_adapter_name(adapter, position=position),
         # The friendly name above is what a person recognises, and it is in a
         # different namespace from the one if_nametoindex and getaddrinfo
         # speak, so the index is the only part of this record usable as a zone.

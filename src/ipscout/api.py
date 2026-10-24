@@ -26,15 +26,15 @@ Note:
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Annotated, NamedTuple
 
-from pydantic import ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, StrictStr, TypeAdapter, ValidationError
 
 from .errors import IPScoutError, refused_arguments
 from .factory import icmp_available, make_async_transport, make_transport
 from .models import AddressFamily, ProbeMethod, ResponseObject
 from .packet import DEFAULT_PAYLOAD_SIZE
-from .pool import gather_bounded
+from .pool import Concurrency, gather_bounded
 from .resolve import resolve_one
 from .service import DEFAULT_INTERVAL, DEFAULT_TIMEOUT, DEFAULT_TIMES, PingRequest, arun_ping, run_ping
 from .transport_tcp import DEFAULT_TCP_PORT
@@ -46,12 +46,15 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
+    "HostNames",
+    "SweepSettings",
     "ais_reachable",
     "aping",
     "aping_many",
     "is_reachable",
     "ping",
     "ping_many",
+    "require_host_names",
 ]
 
 #: Default concurrency for a sweep. High enough to be useful, low enough not to
@@ -61,6 +64,93 @@ DEFAULT_CONCURRENCY = 64
 #: Everything ``is_reachable`` turns into False rather than raising: the setup
 #: errors ``ping`` raises, plus a socket error from either probe.
 _NOT_REACHED = (IPScoutError, ValueError, OSError)
+
+
+def _refuse_bare_text(value: object) -> object:
+    """Refuse one ``str`` or ``bytes`` where a collection of host names belongs.
+
+    A string is itself an iterable of strings, so ``"printer.lan"`` would
+    otherwise be read as the hosts ``"p"``, ``"r"``, ``"i"``... and every
+    one of them probed. No caller means that, so it is refused rather than
+    wrapped: wrapping would guess, and the guess hides the mistake.
+    """
+
+    if isinstance(value, (str, bytes, bytearray)):
+        msg = "one string is a single host, not a collection of hosts; pass a list such as ['printer.lan']"
+        # A ValueError, not a TypeError: pydantic turns only a ValueError into a field refusal.
+        raise ValueError(msg)
+    return value
+
+
+#: Many host names or address literals, as every many-host entry point takes
+#: them: any collection or iterator of ``str`` (consumed once), never one bare
+#: string, and never a non-string entry.
+HostNames = Annotated[list[StrictStr], BeforeValidator(_refuse_bare_text)]
+
+_HOST_NAMES: TypeAdapter[list[str]] = TypeAdapter(HostNames)
+
+
+def require_host_names(values: Iterable[str], *, operation: str, argument: str) -> list[str]:
+    """Return ``values`` as a list of distinct host names, in the order given, or refuse them.
+
+    The one check every many-host entry point applies to its hosts, so a
+    ping sweep and a banner grab refuse the same mistake in the same words.
+    Duplicates are collapsed because every caller keys its result by host,
+    where a repeat could only overwrite itself.
+
+    Args:
+        values: The hosts, as the caller passed them. Consumed once.
+        operation: What refused, as the caller knows it (``"ping sweep"``).
+        argument: The parameter's name, so the refusal names it.
+
+    Returns:
+        The distinct names, in first-seen order.
+
+    Raises:
+        ValueError: ``values`` is one bare string, is not a collection at all,
+            or holds an entry that is not a ``str``; in the
+            ``<operation> refused its arguments: <argument>: <reason>`` shape.
+
+    Examples:
+        >>> require_host_names(["b", "a", "b"], operation="ping sweep", argument="targets")
+        ['b', 'a']
+        >>> require_host_names("ab", operation="ping sweep", argument="targets")
+        Traceback (most recent call last):
+        ...
+        ValueError: ping sweep refused its arguments: targets: one string is a single host, ...
+
+    """
+
+    try:
+        names = _HOST_NAMES.validate_python(values)
+    except ValidationError as refused:
+        raise refused_arguments(operation, refused, field=argument) from refused
+    return list(dict.fromkeys(names))
+
+
+class SweepSettings(BaseModel):
+    """The sweep-wide arguments of a ping sweep, checked before any target is taken.
+
+    Only what belongs to the sweep as a whole lives here; every per-probe
+    argument is checked by the request each target builds, under
+    ``raise_on_error``. Strict: ``True`` is not a concurrency.
+
+    Examples:
+        >>> SweepSettings().concurrency == DEFAULT_CONCURRENCY
+        True
+        >>> SweepSettings(concurrency=0)
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    #: Probes in flight at once, under the pool's one concurrency rule.
+    concurrency: Concurrency = DEFAULT_CONCURRENCY
+    #: Whether one target's failure raises for the whole sweep.
+    raise_on_error: bool = False
 
 
 def _probe_method(family: AddressFamily, *, allow_tcp_fallback: bool) -> ProbeMethod:
@@ -368,9 +458,14 @@ async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only 
         A mapping of target to result, in the order the targets were given.
 
     Raises:
-        ValueError: ``concurrency`` is below 1. Refused for the whole sweep
-            whatever ``raise_on_error`` says, and before any probe: it is a
-            mistake about the sweep, not about one target.
+        ValueError: ``targets`` is one bare string (a string is an iterable
+            of one-letter names, which no caller means) or holds a non-``str``
+            entry, ``concurrency`` is below 1 or not an ``int``, or
+            ``raise_on_error`` is not a ``bool``. Refused for the whole sweep
+            whatever ``raise_on_error`` says, before any target is taken from
+            ``targets`` and before any probe: these are mistakes about the
+            sweep, not about one target. The message reads
+            ``ping sweep refused its arguments: <argument>: <reason>``.
 
     Examples:
         >>> import asyncio
@@ -382,7 +477,11 @@ async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only 
 
     """
 
-    unique = list(dict.fromkeys(targets))
+    try:
+        sweep = SweepSettings(concurrency=concurrency, raise_on_error=raise_on_error)
+    except ValidationError as refused:
+        raise refused_arguments("ping sweep", refused) from refused
+    unique = require_host_names(targets, operation="ping sweep", argument="targets")
 
     async def one(target: str) -> tuple[str, ResponseObject]:
         # Returns the target with its result: the pool completes out of order,
@@ -397,14 +496,14 @@ async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only 
             payload_size=payload_size,
             allow_tcp_fallback=allow_tcp_fallback,
             tcp_port=tcp_port,
-            raise_on_error=raise_on_error,
+            raise_on_error=sweep.raise_on_error,
         )
         return target, result
 
     # A worker pool rather than a semaphore inside a gather over everything:
     # the semaphore bounds probes in flight while still creating one Task per
     # target up front, so a sweep of a large subnet holds them all at once.
-    completed = dict(await gather_bounded(unique, one, concurrency))
+    completed = dict(await gather_bounded(unique, one, sweep.concurrency))
     if len(completed) != len(unique):  # pragma: no cover - a lost result is a bug, not a condition
         msg = f"sweep returned {len(completed)} results for {len(unique)} targets"
         raise RuntimeError(msg)
@@ -436,7 +535,7 @@ def ping_many(  # noqa: PLR0913 - public API: every knob is keyword-only and ind
         RuntimeError: Called from inside a running event loop, where it would
             deadlock. Await :func:`aping_many` there instead. Failing loudly
             beats hanging.
-        ValueError: ``concurrency`` is below 1, as in :func:`aping_many`.
+        ValueError: A sweep-wide argument is refused, as in :func:`aping_many`.
 
     Examples:
         >>> results = ping_many(["127.0.0.1", "::1"], times=1)

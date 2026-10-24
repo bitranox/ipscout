@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from ipaddress import IPv4Network, IPv6Network
 
 import pytest
 from pydantic import ValidationError
@@ -278,12 +279,15 @@ def test_a_prefix_length_is_bounded_by_the_address_family(address: str, good: in
         InterfaceAddress(address=address, prefix_len=-1)
 
 
+_DOC_NETWORK = IPv4Network("192.0.2.0/24")
+
+
 @pytest.mark.os_agnostic
 def test_a_subnet_prefix_and_address_are_bounded_by_its_family() -> None:
-    def subnet(address: str, prefix_len: int, family: AddressFamily) -> SubnetInfo:
-        return SubnetInfo(interface="eth0", address=address, prefix_len=prefix_len, network="192.0.2.0/24", family=family)
+    def subnet(address: str, prefix_len: int, family: AddressFamily, network: IPv4Network | IPv6Network = _DOC_NETWORK) -> SubnetInfo:
+        return SubnetInfo(interface="eth0", address=address, prefix_len=prefix_len, network=network, family=family)
 
-    assert subnet("2001:db8::1", 64, AddressFamily.IPV6).prefix_len == 64
+    assert subnet("2001:db8::1", 64, AddressFamily.IPV6, IPv6Network("2001:db8::/64")).prefix_len == 64
     with pytest.raises(ValidationError, match="prefix_len"):
         subnet("192.0.2.1", 64, AddressFamily.IPV4)
     with pytest.raises(ValidationError, match="is not an ipv4 address"):
@@ -297,7 +301,7 @@ def test_an_mtu_where_present_is_positive() -> None:
     with pytest.raises(ValidationError, match="mtu"):
         MtuReport(target="t", mtu=0)
     with pytest.raises(ValidationError, match="mtu"):
-        SubnetInfo(interface="eth0", address="192.0.2.1", prefix_len=24, network="192.0.2.0/24", mtu=-1)
+        SubnetInfo(interface="eth0", address="192.0.2.1", prefix_len=24, network=IPv4Network("192.0.2.0/24"), mtu=-1)
     assert Interface(name="eth0").mtu is None
 
 
@@ -383,7 +387,7 @@ class _CountingTransport:
 def test_a_walk_past_the_largest_hop_limit_is_refused_before_any_probe() -> None:
     transport = _CountingTransport()
 
-    with pytest.raises(ValueError, match=f"max_hops must be 1-{MAX_HOP_LIMIT}, got {MAX_HOP_LIMIT + 1}"):
+    with pytest.raises(ValueError, match=f"^traceroute refused its arguments: max_hops: Input should be less than or equal to {MAX_HOP_LIMIT}$"):
         trace_path(transport, max_hops=MAX_HOP_LIMIT + 1)
     assert transport.probes == 0
     assert len(trace_path(transport, max_hops=MAX_HOP_LIMIT)) == 1

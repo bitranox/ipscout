@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Annotated
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from .models import DEFAULT_TIMEOUT, MAX_PORT, MAX_TIMEOUT, MAX_TIMES, MIN_PORT, AddressFamily, Port, ProbeMethod, ResponseObject, Timeout, require_address
-from .packet import DEFAULT_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE_IPV4, MAX_PAYLOAD_SIZE_IPV6
+from .packet import DEFAULT_PAYLOAD_SIZE, require_payload_size
 from .transport_tcp import DEFAULT_TCP_PORT
 
 if TYPE_CHECKING:
@@ -90,7 +90,10 @@ class PingRequest(BaseModel):
             ``family``. These are caller mistakes, not network conditions:
             checked whatever the probe method, before any packet moves. The
             bounds live on the fields rather than in each caller, so the
-            constraint and the documentation cannot drift apart.
+            constraint and the documentation cannot drift apart. Strict, like
+            every other arguments model here: ``True`` is not a count and
+            ``"1"`` is not a timeout, where a lax model sent one echo for the
+            first and waited a second for the second.
 
     Examples:
         >>> PingRequest(target="t", address="127.0.0.1", family=AddressFamily.IPV4).times
@@ -102,7 +105,7 @@ class PingRequest(BaseModel):
 
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     target: _Target
     address: str
@@ -134,10 +137,7 @@ class PingRequest(BaseModel):
         # After validation, because both bounds depend on the resolved family:
         # a size only IPv6 can carry is a mistake for IPv4 and fine for IPv6.
         require_address(self.address, self.family)
-        limit = MAX_PAYLOAD_SIZE_IPV6 if self.family is AddressFamily.IPV6 else MAX_PAYLOAD_SIZE_IPV4
-        if self.payload_size > limit:
-            msg = f"payload_size above the {self.family.value} maximum of {limit} bytes: {self.payload_size}"
-            raise ValueError(msg)
+        require_payload_size(self.payload_size, self.family)
         return self
 
 

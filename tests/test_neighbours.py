@@ -110,8 +110,8 @@ def test_an_address_known_on_two_interfaces_is_read_from_the_one_that_carries_th
     # kernel happened to list first reports another host's hardware address
     # with no sign anything went wrong.
     entries = (
-        Neighbour(ip="fe80::1", mac="aa:bb:cc:dd:ee:ff", interface="eth0"),
-        Neighbour(ip="fe80::1", mac="11:22:33:44:55:66", interface="eth1"),
+        Neighbour(ip="fe80::1", mac="aa:bb:cc:dd:ee:ff", interface="eth0", family=AddressFamily.IPV6),
+        Neighbour(ip="fe80::1", mac="11:22:33:44:55:66", interface="eth1", family=AddressFamily.IPV6),
     )
 
     entry = _entry_for("fe80::1", entries, interface="eth1")
@@ -200,7 +200,7 @@ def test_one_hardware_address_on_two_interfaces_reports_its_address_once() -> No
     # while the distinct addresses it also holds must all survive.
     entries = (
         Neighbour(ip="192.0.2.10", mac="aa:bb:cc:dd:ee:ff", interface="lan2"),
-        Neighbour(ip="192.0.2.10", mac="AA-BB-CC-DD-EE-FF", interface="manavf2"),
+        Neighbour(ip="192.0.2.10", mac="aa:bb:cc:dd:ee:ff", interface="manavf2"),
         Neighbour(ip="192.0.2.11", mac="aa:bb:cc:dd:ee:ff", interface="lan2"),
     )
 

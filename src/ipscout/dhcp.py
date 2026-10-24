@@ -49,10 +49,16 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel, ConfigDict, ValidationError
+
 from .api import is_reachable
 from .bootp import DhcpReply
-from .errors import IPScoutError, IPScoutUnsupportedError
-from .models import require_timeout
+from .errors import IPScoutError, IPScoutUnsupportedError, refused_arguments
+
+# The library-wide probe wait, aliased: this module's own DEFAULT_TIMEOUT is the
+# DHCP watch window, a different quantity.
+from .models import DEFAULT_TIMEOUT as _PROBE_TIMEOUT
+from .models import MAX_TIMEOUT, Port, Timeout, require_timeout
 from .neighbours import normalise_mac
 from .routes import default_gateway
 
@@ -100,6 +106,37 @@ _POLL_TICK = 0.25
 _JOIN_TIMEOUT = 2.0
 
 _IS_LINUX = sys.platform.startswith("linux")
+
+#: The port :func:`observe_dhcp_first_reachable` tries when ICMP does not
+#: answer: SSH, which a machine early in its boot is likelier to have up than
+#: HTTPS.
+_REACHABLE_PORT = 22
+
+
+class _ReachabilityProbe(BaseModel):
+    """How each offered address is probed, checked before the capture opens.
+
+    :func:`ipscout.is_reachable` never raises, so a bad value here would not
+    fail: a zero or ``nan`` probe timeout reads every candidate as down and
+    watches the whole window, and port 0 drops the TCP fallback without a
+    word. Strict, so ``True`` is not a port and ``"2"`` is not a timeout.
+
+    Examples:
+        >>> _ReachabilityProbe().tcp_port
+        22
+        >>> _ReachabilityProbe(tcp_port=0)
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    #: The port tried when ICMP does not answer.
+    tcp_port: Port = _REACHABLE_PORT
+    #: Seconds spent on each candidate.
+    probe_timeout: Timeout = _PROBE_TIMEOUT
 
 
 def _the_exchange_has_gone_quiet(*, last_seen_at: float | None, now: float, started_at: float, timeout: float, settle: float) -> bool:
@@ -173,8 +210,11 @@ class DhcpSession:
         # require_timeout also refuses a non-finite window: NaN passed the old
         # comparisons and failed only when the report was built, after watching.
         require_timeout(timeout)
-        if not (math.isfinite(settle) and settle >= 0):
-            msg = f"settle must be a finite number of seconds, not negative, got {settle!r}"
+        # Bounded like every other wait: the report this session feeds refuses a
+        # settle past MAX_TIMEOUT, so a finite 1e12 would run the watch and then
+        # fail to report it.
+        if not (math.isfinite(settle) and 0 <= settle <= MAX_TIMEOUT):
+            msg = f"settle must be a finite number of seconds from 0 to {MAX_TIMEOUT:g}, got {settle!r}"
             raise ValueError(msg)
 
         self._mac = wanted
@@ -560,8 +600,8 @@ def observe_dhcp_first_reachable(  # noqa: PLR0913 - public API: every knob is k
     *,
     interface: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
-    tcp_port: int = 22,
-    probe_timeout: float = 2.0,
+    tcp_port: int = _REACHABLE_PORT,
+    probe_timeout: float = _PROBE_TIMEOUT,
     capture: PacketCapture | None = None,
     promiscuous: bool = True,
 ) -> str | None:
@@ -590,7 +630,10 @@ def observe_dhcp_first_reachable(  # noqa: PLR0913 - public API: every knob is k
         default call that finds nothing blocks for a minute.
 
     Raises:
-        ValueError: The hardware address is not one.
+        ValueError: The hardware address is not one, or ``tcp_port`` is not a
+            port number (1-65535) or ``probe_timeout`` not a number above zero
+            and at most ``MAX_TIMEOUT``. Both are refused before the capture
+            opens, so a mistake costs nothing rather than the whole window.
         IPScoutPermissionError: Capturing needs a privilege this process lacks.
         IPScoutUnsupportedError: This platform cannot capture.
         IPScoutError: The capture stopped part-way through the window.
@@ -612,6 +655,11 @@ def observe_dhcp_first_reachable(  # noqa: PLR0913 - public API: every knob is k
 
     """
 
+    try:
+        probe = _ReachabilityProbe(tcp_port=tcp_port, probe_timeout=probe_timeout)
+    except ValidationError as refused:
+        raise refused_arguments("first-reachable DHCP watch", refused) from refused
+
     with observe_dhcp_session(
         mac,
         interface=interface,
@@ -621,7 +669,7 @@ def observe_dhcp_first_reachable(  # noqa: PLR0913 - public API: every knob is k
         promiscuous=promiscuous,
     ) as session:
         for address in session.offers():
-            if is_reachable(address, timeout=probe_timeout, tcp_port=tcp_port):
+            if is_reachable(address, timeout=probe.probe_timeout, tcp_port=probe.tcp_port):
                 return address
     return None
 

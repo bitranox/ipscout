@@ -184,28 +184,35 @@ def test_every_computed_statistic_is_a_real_field_not_a_bare_property() -> None:
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(
-    ("ip", "interface", "expected"),
+    ("ip", "interface", "family", "expected"),
     [
-        ("fe80::1", "eth0", "fe80::1%eth0"),
-        ("fe80::1", None, "fe80::1"),
-        ("192.168.1.1", "eth0", "192.168.1.1"),
-        ("169.254.1.1", "eth0", "169.254.1.1"),
-        ("2001:db8::1", "eth0", "2001:db8::1"),
-        ("not-an-address", "eth0", "not-an-address"),
+        ("fe80::1", "eth0", AddressFamily.IPV6, "fe80::1%eth0"),
+        ("fe80::1", None, AddressFamily.IPV6, "fe80::1"),
+        ("192.168.1.1", "eth0", AddressFamily.IPV4, "192.168.1.1"),
+        ("169.254.1.1", "eth0", AddressFamily.IPV4, "169.254.1.1"),
+        ("2001:db8::1", "eth0", AddressFamily.IPV6, "2001:db8::1"),
     ],
 )
-def test_a_cache_entry_offers_the_form_a_probe_can_use(ip: str, interface: str | None, expected: str) -> None:
+def test_a_cache_entry_offers_the_form_a_probe_can_use(ip: str, interface: str | None, family: AddressFamily, expected: str) -> None:
     # A link-local address is not a usable target without the link it was
     # learned on, and every probe refuses one written without it. The interface
     # is right there in the record, so the record can offer the joined form
     # rather than making every caller rebuild it - and get the IPv4 case, where
     # a zone is meaningless, wrong.
-    assert Neighbour(ip=ip, interface=interface).scoped == expected
+    assert Neighbour(ip=ip, interface=interface, family=family).scoped == expected
+
+
+@pytest.mark.os_agnostic
+def test_a_cache_entry_holds_an_address_not_arbitrary_text() -> None:
+    # No backend reports anything but a literal, so a record holding other
+    # text is refused where it is built, not passed on as an unusable target.
+    with pytest.raises(ValidationError, match="is not an IP address literal"):
+        Neighbour(ip="not-an-address", interface="eth0")
 
 
 @pytest.mark.os_agnostic
 def test_the_usable_form_is_serialised_rather_than_dropped() -> None:
-    payload = Neighbour(ip="fe80::1", interface="eth0").model_dump(mode="json")
+    payload = Neighbour(ip="fe80::1", interface="eth0", family=AddressFamily.IPV6).model_dump(mode="json")
 
     assert payload["scoped"] == "fe80::1%eth0"
 

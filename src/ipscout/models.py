@@ -33,6 +33,7 @@ Two decisions worth knowing:
 from __future__ import annotations
 
 import enum
+import re
 import socket
 import statistics
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address, ip_network
@@ -81,6 +82,7 @@ __all__ = [
     "ResolveReport",
     "ResponseObject",
     "ReverseDnsReport",
+    "RoundTrip",
     "RouteInfo",
     "ScanMethod",
     "SubnetInfo",
@@ -307,8 +309,98 @@ Timeout = Annotated[float, AfterValidator(require_timeout)]
 
 #: One measured round trip in milliseconds. A clock difference, so never
 #: negative, and never infinite or ``nan``: a reply that did not come back is
-#: ``None`` in the sequence, not a number.
-_RoundTrip = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+#: ``None``, not a number. Public because a transport's own outcome record is
+#: bounded by it too, so a value no clock produces is refused where it is
+#: made rather than in the hop record built from it later.
+RoundTrip = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+
+#: The largest MTU any record carries. Every OS stores an MTU as a 32-bit
+#: count (Windows reports its loopback as ``0xFFFFFFFF``, Linux its own as
+#: 65536), so the IP length field is not the bound: an interface MTU and a
+#: loopback path MTU both legitimately exceed 65535.
+_MAX_MTU = 0xFFFFFFFF
+
+#: Bytes, never zero (an OS that does not know says nothing rather than 0).
+_Mtu = Annotated[int, Field(gt=0, le=_MAX_MTU)]
+
+#: The octets of an Ethernet address, and the most any interface's hardware
+#: address holds: Linux's ``MAX_ADDR_LEN``, the longest a kernel stores.
+_MAC_OCTETS = 6
+_MAX_HARDWARE_OCTETS = 32
+
+#: One octet as every producer writes it: two lowercase hex digits.
+_OCTET = re.compile(r"[0-9a-f]{2}")
+
+
+def _octets(text: str) -> list[str] | None:
+    """Return the octets of colon-separated lowercase hex, or None if it is not that."""
+
+    parts = text.split(":")
+    return parts if all(_OCTET.fullmatch(part) for part in parts) else None
+
+
+def _require_mac(text: str) -> str:
+    """Return ``text`` if it is an Ethernet address in canonical form, or raise.
+
+    The canonical form is the one ``ipscout.arp.normalise_mac`` writes and every
+    producer reports: six lowercase two-digit octets joined by colons. A record
+    refuses any other spelling so that two records naming one address compare
+    equal as text.
+
+    Examples:
+        >>> _require_mac("02:00:5e:10:00:00")
+        '02:00:5e:10:00:00'
+        >>> _require_mac("02-00-5E-10-00-00")
+        Traceback (most recent call last):
+        ...
+        ValueError: '02-00-5E-10-00-00' is not a hardware address in the aa:bb:cc:dd:ee:ff form
+
+    """
+
+    octets = _octets(text)
+    if octets is None or len(octets) != _MAC_OCTETS:
+        msg = f"{text!r} is not a hardware address in the aa:bb:cc:dd:ee:ff form"
+        raise ValueError(msg)
+    return text
+
+
+def _require_hardware_address(text: str) -> str:
+    """Return ``text`` if it is an interface hardware address, or raise.
+
+    Wider than :func:`_require_mac`: an interface may carry a link-layer
+    address that is not six bytes (a tunnel, an InfiniBand port), written as
+    ``ipscout.arp.format_hardware_address`` writes it. All zeros is refused,
+    as that formatter reports an all-zero address as no address at all.
+
+    Examples:
+        >>> _require_hardware_address("00:11:22:33:44:55:66:77")
+        '00:11:22:33:44:55:66:77'
+        >>> _require_hardware_address("00:00:00:00:00:00")
+        Traceback (most recent call last):
+        ...
+        ValueError: '00:00:00:00:00:00' is not a hardware address: 1-32 lowercase hex octets, not all zero
+
+    """
+
+    octets = _octets(text)
+    if octets is None or len(octets) > _MAX_HARDWARE_OCTETS or not any(int(octet, 16) for octet in octets):
+        msg = f"{text!r} is not a hardware address: 1-{_MAX_HARDWARE_OCTETS} lowercase hex octets, not all zero"
+        raise ValueError(msg)
+    return text
+
+
+def _require_literal(text: str) -> str:
+    """Return ``text`` if it is an IP address literal of either family, or raise."""
+
+    parse_address(text)
+    return text
+
+
+#: An Ethernet address in canonical ``aa:bb:cc:dd:ee:ff`` form.
+_Mac = Annotated[str, AfterValidator(_require_mac)]
+
+#: An IP address literal of either family; an IPv6 one may carry its zone.
+_IpLiteral = Annotated[str, AfterValidator(_require_literal)]
 
 
 class _Frozen(BaseModel):
@@ -592,7 +684,7 @@ class ResponseObject(_Frozen):
     #: unresolved request sends none, so this always equals ``packets_sent``.
     number_of_pings: int = Field(default=0, ge=0, le=MAX_TIMES)
     #: One entry per echo sent, ``None`` for an echo nothing answered.
-    rtts_ms: tuple[_RoundTrip | None, ...] = ()
+    rtts_ms: tuple[RoundTrip | None, ...] = ()
     packets_sent: int = Field(default=0, ge=0, le=MAX_TIMES)
     packets_received: int = Field(default=0, ge=0, le=MAX_TIMES)
     family: AddressFamily = AddressFamily.IPV4
@@ -711,15 +803,45 @@ class TraceHop(_Frozen):
     A silent hop is recorded with no address rather than dropped: a firewall
     ignoring one hop in an otherwise complete path is information, and omitting
     it would misnumber every hop after it.
+
+    A hop either answered, and then carries both who answered and how long it
+    took, or was silent and carries neither; a name is looked up only for an
+    address that answered, and only the answering target ends a walk. Any
+    other combination is refused, so a reader can test one field.
+
+    Examples:
+        >>> TraceHop(ttl=1, address="192.0.2.1", rtt_ms=1.5).reached
+        False
+        >>> TraceHop(ttl=2, reached=True)
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
     """
 
     #: The hop limit the probe carried: 1 for the first router, never past
     #: what the one-byte IP header field can hold.
     ttl: int = Field(ge=1, le=MAX_HOP_LIMIT)
-    address: str | None = None
-    rtt_ms: _RoundTrip | None = None
+    #: Who answered, as an address literal; ``None`` for a silent hop.
+    address: _IpLiteral | None = None
+    rtt_ms: RoundTrip | None = None
     reached: bool = False
-    hostname: str | None = None
+    #: The answering address's reverse-DNS name. Never empty: no name is
+    #: ``None``.
+    hostname: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _answered_or_silent(self) -> TraceHop:
+        silent = self.address is None
+        problems = (
+            ((self.rtt_ms is None) != silent, "address and rtt_ms are set together: a hop either answered or was silent"),
+            (self.reached and silent, "reached needs the address that answered"),
+            (self.hostname is not None and silent, "hostname needs the address it names"),
+        )
+        for broken, msg in problems:
+            if broken:
+                raise ValueError(msg)
+        return self
 
 
 class InterfaceAddress(_Frozen):
@@ -756,16 +878,30 @@ class Interface(_Frozen):
 
     """
 
-    name: str
+    #: Never empty: a record that names no interface names nothing a caller
+    #: can pass back.
+    name: str = Field(min_length=1)
     #: Kernel interface indexes start at 1; 0 means "no interface" everywhere.
     index: int | None = Field(default=None, ge=1)
+    #: IPv4 addresses only.
     ipv4: tuple[InterfaceAddress, ...] = ()
+    #: IPv6 addresses only.
     ipv6: tuple[InterfaceAddress, ...] = ()
-    mac: str | None = None
+    #: The link-layer address; not always six bytes (a tunnel, InfiniBand).
+    mac: Annotated[str, AfterValidator(_require_hardware_address)] | None = None
     is_up: bool = False
     is_loopback: bool = False
     #: Bytes; ``None`` where the OS did not say, never zero.
-    mtu: int | None = Field(default=None, gt=0)
+    mtu: _Mtu | None = None
+
+    @model_validator(mode="after")
+    def _addresses_sit_in_their_family(self) -> Interface:
+        for family, entries in ((AddressFamily.IPV4, self.ipv4), (AddressFamily.IPV6, self.ipv6)):
+            for entry in entries:
+                if ip_address(entry.address).version != family.ip_version:
+                    msg = f"{entry.address!r} is not an {family.value} address"
+                    raise ValueError(msg)
+        return self
 
 
 class LeaseInfo(_Frozen):
@@ -792,11 +928,21 @@ class Neighbour(_Frozen):
     force every caller to look them up again.
     """
 
+    #: A bare address literal of ``family``. Bare because the link it was
+    #: learned on is ``interface``; :attr:`scoped` joins the two.
     ip: str
-    mac: str | None = None
+    mac: _Mac | None = None
     interface: str | None = None
     state: NeighbourState = NeighbourState.OTHER
     family: AddressFamily = AddressFamily.IPV4
+
+    @model_validator(mode="after")
+    def _ip_is_a_bare_address_of_family(self) -> Neighbour:
+        if "%" in self.ip:
+            msg = f"{self.ip!r} carries a zone; the link is the interface field"
+            raise ValueError(msg)
+        require_address(self.ip, self.family)
+        return self
 
     @computed_field
     @property
@@ -811,20 +957,14 @@ class Neighbour(_Frozen):
         meaningless, which is all of them but IPv6 link-local.
 
         Examples:
-            >>> Neighbour(ip="fe80::1", interface="eth0").scoped
+            >>> Neighbour(ip="fe80::1", interface="eth0", family=AddressFamily.IPV6).scoped
             'fe80::1%eth0'
             >>> Neighbour(ip="192.168.1.1", interface="eth0").scoped
             '192.168.1.1'
 
         """
 
-        if self.interface is None:
-            return self.ip
-        try:
-            parsed = ip_address(self.ip)
-        except ValueError:  # pragma: no cover - the backends only report literals
-            return self.ip
-        if not needs_zone(parsed):
+        if self.interface is None or not needs_zone(ip_address(self.ip)):
             return self.ip
         return f"{self.ip}%{self.interface}"
 
@@ -855,13 +995,34 @@ class MacLookup(_Frozen):
         >>> far.scope is MacScope.NEXT_HOP, far.via_ip
         (True, '192.168.1.1')
 
+        The router is named exactly when the answer is the router's:
+
+        >>> MacLookup(ip="192.0.2.5", mac="aa:bb:cc:dd:ee:ff", scope=MacScope.DIRECT, via_ip="192.0.2.1")
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
     """
 
-    ip: str
-    mac: str | None = None
+    #: The address asked about, as the caller wrote it (a zone included).
+    ip: _IpLiteral
+    mac: _Mac | None = None
     scope: MacScope = MacScope.UNKNOWN
-    via_ip: str | None = None
+    #: The next-hop router, set exactly when ``scope`` is NEXT_HOP.
+    via_ip: _IpLiteral | None = None
     interface: str | None = None
+
+    @model_validator(mode="after")
+    def _fields_agree_with_scope(self) -> MacLookup:
+        problems = (
+            ((self.via_ip is not None) != (self.scope is MacScope.NEXT_HOP), "via_ip is set exactly when scope is NEXT_HOP"),
+            (self.scope is MacScope.DIRECT and self.mac is None, "a DIRECT answer carries the hardware address it found"),
+            (self.scope is MacScope.UNKNOWN and self.mac is not None, "an UNKNOWN answer carries no hardware address"),
+        )
+        for broken, msg in problems:
+            if broken:
+                raise ValueError(msg)
+        return self
 
 
 class SubnetInfo(_Frozen):
@@ -877,21 +1038,35 @@ class SubnetInfo(_Frozen):
     address: str
     #: 0-32 for IPv4, 0-128 for IPv6.
     prefix_len: int
-    network: str
+    #: The network ``address/prefix_len`` sits on, and nothing else. Parsed,
+    #: so a reader can ask it for size and membership; written to JSON as the
+    #: same CIDR text.
+    network: IPNetwork
     family: AddressFamily = AddressFamily.IPV4
-    broadcast: str | None = None
-    gateway: str | None = None
+    #: The IPv4 network's broadcast address; IPv6 has none.
+    broadcast: _IpLiteral | None = None
+    #: A router of ``family``.
+    gateway: _IpLiteral | None = None
     dns_servers: tuple[str, ...] = ()
     domain: str | None = None
     dhcp_server: str | None = None
     lease_obtained: str | None = None
     lease_expires: str | None = None
     #: Bytes; ``None`` where the OS did not say, never zero.
-    mtu: int | None = Field(default=None, gt=0)
+    mtu: _Mtu | None = None
 
     @model_validator(mode="after")
-    def _prefix_fits_the_family(self) -> SubnetInfo:
+    def _addressing_agrees(self) -> SubnetInfo:
         _require_prefix_len(self.prefix_len, require_address(self.address, self.family))
+        expected = ip_network(f"{self.address}/{self.prefix_len}", strict=False)
+        if self.network != expected:
+            msg = f"network must be {expected} for {self.address}/{self.prefix_len}, got {self.network}"
+            raise ValueError(msg)
+        if self.broadcast is not None and (not isinstance(expected, IPv4Network) or ip_address(self.broadcast) != expected.broadcast_address):
+            msg = f"broadcast must be the broadcast address of {expected}, got {self.broadcast!r}"
+            raise ValueError(msg)
+        if self.gateway is not None:
+            require_address(self.gateway, self.family)
         return self
 
 
@@ -955,7 +1130,8 @@ class MtuReport(_Frozen):
 
     target: str
     #: Bytes; ``None`` when the path MTU could not be determined, never zero.
-    mtu: int | None = Field(default=None, gt=0)
+    #: Can exceed 65535: the loopback path's is the loopback interface's.
+    mtu: _Mtu | None = None
 
 
 class RemoveNeighbourReport(_Frozen):
@@ -977,10 +1153,18 @@ class WakeReport(_Frozen):
     records only that it left this host.
     """
 
-    mac: str
+    mac: _Mac
+    #: The IPv4 address it went to; never ``0.0.0.0``, which is this host.
     broadcast: str
     port: Port
     sent: bool = True
+
+    @model_validator(mode="after")
+    def _broadcast_is_a_destination(self) -> WakeReport:
+        if require_address(self.broadcast, AddressFamily.IPV4).is_unspecified:
+            msg = f"broadcast must be an IPv4 address other than 0.0.0.0, got {self.broadcast!r}"
+            raise ValueError(msg)
+        return self
 
 
 class SweepScope(_Frozen):
@@ -1010,6 +1194,14 @@ class SweepScope(_Frozen):
     networks: tuple[IPNetwork, ...] = ()
     #: The networks left out for not fitting in what the sweep bound allows.
     skipped: tuple[IPNetwork, ...] = ()
+
+    @model_validator(mode="after")
+    def _networks_fit_the_limit(self) -> SweepScope:
+        covered = sum(network.num_addresses for network in self.networks)
+        if covered > self.limit:
+            msg = f"networks cover {covered} addresses, more than the limit of {self.limit}"
+            raise ValueError(msg)
+        return self
 
     @classmethod
     def from_networks(cls, networks: Iterable[str | IPNetwork], *, limit: int) -> SweepScope:
@@ -1052,6 +1244,11 @@ class SweepScope(_Frozen):
 
         """
 
+        # A str is an iterable of str: without this, one network written as text
+        # is split into characters and each is refused as a network of its own.
+        if isinstance(networks, (str, bytes)):
+            msg = f"networks must be a collection of networks, not one network as text; pass [{networks!r}]"
+            raise ValueError(msg)
         covered: list[IPNetwork] = []
         skipped: list[IPNetwork] = []
         room = limit
@@ -1094,10 +1291,18 @@ class FindIpReport(_Frozen):
 
     """
 
-    mac: str
+    mac: _Mac
     addresses: tuple[str, ...] = ()
+    #: Whether a sweep ran first; exactly when ``scope`` says what it covered.
     scanned: bool = False
     scope: SweepScope | None = None
+
+    @model_validator(mode="after")
+    def _scope_exactly_when_scanned(self) -> FindIpReport:
+        if self.scanned != (self.scope is not None):
+            msg = "scope is set exactly when scanned is True"
+            raise ValueError(msg)
+        return self
 
 
 class ObserveDhcpReport(_Frozen):
@@ -1114,12 +1319,13 @@ class ObserveDhcpReport(_Frozen):
 
     """
 
-    mac: str
+    mac: _Mac
     interface: str | None = None
     addresses: tuple[str, ...] = ()
-    timeout: float = Field(gt=0)
-    #: Zero is a real setting: answer on the first address seen.
-    settle: float = Field(ge=0)
+    timeout: Timeout
+    #: Zero is a real setting: answer on the first address seen. Bounded like
+    #: a timeout, since it is one: a wait in seconds.
+    settle: float = Field(ge=0, le=MAX_TIMEOUT, allow_inf_nan=False)
 
 
 class CapabilityReport(_Frozen):

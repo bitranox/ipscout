@@ -7,6 +7,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Added
 
+- `packet.max_payload_size(family)` and `packet.require_payload_size(payload_size, family)`: the
+  one per-family payload bound, which `ping` and `build_echo_request` both apply.
+- `models.RoundTrip` (a finite round trip of 0 or more milliseconds), `api.HostNames` /
+  `api.require_host_names` (a collection of host names, refusing one bare string),
+  `traceroute.TracerouteSettings` and `traceroute.DEFAULT_MAX_HOPS`, `bpf.MAX_BPF_DEVICES`, and a
+  `method` field on `portscan.PortScanSettings`.
 - `ipscout.models.require_port`, `Port`, `MIN_PORT` and `MAX_PORT`: the one port-range check
   (1-65535) every entry point and record taking a port number now applies.
 - `ipscout.packet.MAX_PAYLOAD_SIZE_IPV4` (65507) and `MAX_PAYLOAD_SIZE_IPV6` (65527): the most ICMP
@@ -85,8 +91,73 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `Banner` requires `error` exactly when the state is `UNREACHABLE` and refuses an empty one. It
   used to forbid `error` on the other states but allowed an `UNREACHABLE` banner without a reason.
 
+- More arguments are checked strictly before anything is sent, in the
+  `<operation> refused its arguments: <argument>: <reason>` shape:
+  - `ping` / `aping` / `ping_many` / `is_reachable`: `times=True` sent one echo and `timeout="1"`
+    waited a second; both are refused now (`is_reachable`, which never raises, answers `False`).
+  - `ping_many` / `aping_many` and `grab_banners` / `agrab_banners`: one string passed as the host
+    collection (`ping_many("printer.lan")`) probed each character as a host; it is refused, and so
+    is a host that is not a string (a raw pydantic error from `Banner` before). `ping_many` checks
+    `concurrency` before it takes anything from the targets; the refusal used to come after the
+    targets iterable was consumed, as `concurrency must be at least 1, got 0`.
+  - `traceroute` / `atraceroute` / `trace_path` / `atrace_path`: `max_hops=True` walked one hop and
+    `3.0` or `"5"` raised `TypeError`; a non-bool `resolve_names` (`"no"` switched lookups on) and a
+    `timeout` of the wrong type are refused. The messages change from
+    `max_hops must be 1-255, got 256` (and `max_hops must be at least 1, got 0` in 2.1.0) to
+    `traceroute refused its arguments: max_hops: Input should be less than or equal to 255`. The
+    arguments are checked before the name is resolved, so a bad `max_hops` with an unresolvable
+    name is a `ValueError`, no longer `IPScoutResolutionError`.
+  - `scan_ports` / `ascan_ports` / `syn_scan` with a port LIST: `[True]` and `[80.5]` scanned port
+    1 and 80 and keyed the result `True` / `80.5`; they are refused, and a list port out of range
+    now reads `port scan refused its arguments: ports.0: port out of range 1-65535: 0` (a
+    specification string keeps the bare `port out of range 1-65535: 0`).
+    `scan_ports(method="syn")` with a plain string silently ran a connect scan; it is refused.
+  - `observe_dhcp_first_reachable`: a `probe_timeout` of 0, negative, NaN or text, or a `tcp_port`
+    outside 1-65535, watched the whole window and returned `None` (port 0 silently dropped the TCP
+    attempt); they are refused before the capture opens.
+  - `DhcpSession` / `observe_dhcp`: a `settle` above 2147483 s is refused. A `timeout` of 0 reads
+    `timeout must be above 0 and at most 2147483 seconds, got 0` (2.1.0:
+    `timeout must be positive, got 0: a window of zero could never see anything`).
+  - `get_mac_address`, `lookup_mac` and `resolve_active`: text that is not an address literal
+    raises `ValueError`. In 2.1.0 `get_mac_address("nonsense")` returned `None`, and with
+    `active=True` raised `IPScoutUnsupportedError` (no route). `resolve_active` checks its
+    `timeout` (0 returned `None` without waiting, -1 raised a raw `Timeout value out of range`).
+  - `SweepScope.from_networks("192.0.2.0/24", ...)` (one network as text) is refused instead of
+    being split into characters.
+- `resolve_active` and `lookup_mac(active=True)` on Linux and macOS honour an RFC 4007 zone
+  (`fe80::1%eth0`, by name or index): the request goes out on that interface. The zoned text used to
+  make the backend's `inet_pton` fail, and `None` came back with nothing sent. A zone naming no
+  interface raises `IPScoutResolutionError`. On Windows the zone is still not used.
+- `build_echo_request` refuses a `payload_size` its family cannot carry with the same message
+  `ping` uses (`10**12` raised `MemoryError`, 70000 a raw pydantic error, and IPv4 65508-65527 was
+  built). `build_arp_request` / `build_neighbour_solicitation` refuse a sender address that is not
+  six bytes (`"aa:bb"` was zero-padded into the frame).
+- Records refuse more values no producer makes: `EchoResult.rtt_ms` NaN, infinite or negative, a
+  round trip without a source (or the reverse), `ttl_expired` without an answer; `TraceHop` reached
+  or named without an address, a round trip without an address, an empty `hostname`;
+  `Interface` with an empty name, an address filed under the other family, a hardware address not
+  in lowercase colon form or all zero, an MTU above 0xFFFFFFFF; `Neighbour` whose `ip` is not a
+  bare literal of its `family` or whose `mac` is not `aa:bb:cc:dd:ee:ff`; `MacLookup` whose
+  `via_ip` and `NEXT_HOP` scope disagree, `DIRECT` without a MAC or `UNKNOWN` with one;
+  `SubnetInfo` whose network is not the one its address sits on, whose broadcast is not that
+  network's, or whose gateway is not of its family; `SweepScope` networks covering more than its
+  limit; `FindIpReport` with `scanned` and `scope` disagreeing; `ObserveDhcpReport` and
+  `WakeReport` with a non-canonical MAC, unbounded windows, or a broadcast that is not a usable
+  IPv4 address.
+- `SubnetInfo.network` is an `IPv4Network` / `IPv6Network` instead of text. JSON output is
+  unchanged; Python callers reading it as a string need `str(...)`.
+- CLI: `wake`, `find-ip` and `observe-dhcp` report the MAC as `aa:bb:cc:dd:ee:ff` whatever spelling
+  was typed (they echoed the input).
+
 ### Fixed
 
+- Windows `local_interfaces()`: an adapter with no friendly name was named `b'{GUID}'` (the repr
+  of the bytes) and one with no name at all `''`; it is now `{GUID}`, or `ifindex-<n>` /
+  `adapter-<position>` when even that is missing.
+- macOS `dhcp_capture_available()`: a busy `/dev/bpf0` answered `False` although a capture would
+  claim the next free device; it now tries the same pool a capture does.
+- `reverse_dns` answers `None` for an empty PTR name, which a traceroute with `resolve_names=True`
+  would otherwise have failed on.
 - `aping`, `aping_many`, `ais_reachable` and `atraceroute` resolve their target in a worker
   thread, and `atrace_path(resolve_names=True)` looks up each hop's name there too. They called
   `getaddrinfo` / `gethostbyaddr` on the event-loop thread, so one slow name server stalled every

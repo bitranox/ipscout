@@ -29,14 +29,18 @@ Note:
 from __future__ import annotations
 
 import ipaddress
+import socket
 import sys
-from typing import NamedTuple
+from ipaddress import IPv4Address, IPv6Address
+from typing import Annotated, NamedTuple
+
+from pydantic import BaseModel, BeforeValidator, ConfigDict, ValidationError
 
 from .arp import normalise_mac
-from .errors import IPScoutUnsupportedError
+from .errors import IPScoutResolutionError, IPScoutUnsupportedError, refused_arguments
 from .interfaces import local_interfaces
-from .models import DEFAULT_TIMEOUT, AddressFamily, MacLookup, MacScope, Neighbour, parse_address
-from .resolve import split_zone
+from .models import DEFAULT_TIMEOUT, AddressFamily, MacLookup, MacScope, Neighbour, Timeout, parse_address
+from .resolve import split_zone, zone_index
 from .routes import query_route
 
 __all__ = ["get_mac_address", "lookup_mac", "neighbours", "normalise_mac", "resolve_active"]
@@ -67,9 +71,9 @@ def of_family(entries: tuple[Neighbour, ...], family: AddressFamily | None) -> t
     guessed at; that cannot happen from a real cache, and a caller asking for one family has
     said they will not handle the other.
 
-    Read from the ADDRESS, not from ``entry.family``: that field is stored and defaults to
-    IPv4, so a record built without it claims IPv4 while holding an IPv6 address. The backends
-    do set it, but deriving here cannot disagree with ``scoped``, which is also derived.
+    Read from the ADDRESS rather than ``entry.family``. A ``Neighbour`` refuses a family that
+    disagrees with its address, so the two cannot differ; deriving keeps this filter and
+    ``scoped`` reading the same thing.
     """
     if family is None:
         return entries
@@ -139,7 +143,65 @@ class SendingInterface(NamedTuple):
     source_mac: str
 
 
-def _sending_interface(ip: str, family: AddressFamily) -> SendingInterface:
+def _address_literal(value: object) -> IPv4Address | IPv6Address:
+    """Parse the text a caller named an address with, refusing anything that is not text.
+
+    A ``BeforeValidator`` because the field holds the parsed address, which
+    strict mode only accepts as an instance: the text is parsed here, once,
+    and the parsed value is what every later step reads. ``ip_address`` alone
+    would also take an ``int`` and quietly turn ``5`` into ``0.0.0.5``.
+    """
+
+    if not isinstance(value, str):
+        msg = f"must be an address literal as text, not {type(value).__name__}"
+        # ValueError, not TypeError: pydantic turns only a ValueError into the
+        # field's refusal; a TypeError would escape validation unreported.
+        raise ValueError(msg)
+    return parse_address(value)
+
+
+class _ActiveResolution(BaseModel):
+    """The arguments of one active resolution, checked before anything is sent.
+
+    Strict, so ``True`` is not a timeout and ``"5"`` is not a number, and the
+    timeout is the library's one ``Timeout``: zero would hand the backend a
+    non-blocking socket that waits for nothing, and a negative one would reach
+    ``settimeout`` and fail there in words that name no argument.
+
+    Examples:
+        >>> _ActiveResolution(ip="fe80::1%eth0").ip.scope_id
+        'eth0'
+        >>> _ActiveResolution(ip="192.0.2.1", timeout=0)
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    #: The address to resolve, an RFC 4007 zone included when the caller gave one.
+    ip: Annotated[IPv4Address | IPv6Address, BeforeValidator(_address_literal)]
+    #: Seconds to wait for an answer.
+    timeout: Timeout = DEFAULT_TIMEOUT
+
+
+def _zone_interface(zone: str) -> str:
+    """Return the name of the interface an RFC 4007 zone names, by name or by index.
+
+    Raises:
+        IPScoutResolutionError: No interface here goes by that name or index.
+    """
+
+    index = zone_index(zone)
+    try:
+        return socket.if_indextoname(index)
+    except OSError as exc:
+        msg = f"no interface with index {index} to send on: name one this host has, or use its index"
+        raise IPScoutResolutionError(msg) from exc
+
+
+def _sending_interface(ip: str, family: AddressFamily, *, zone: str | None = None) -> SendingInterface:
     """Return the interface, source address and hardware address to send from.
 
     An ARP request is answered to the address it came from, so a source on the
@@ -147,8 +209,12 @@ def _sending_interface(ip: str, family: AddressFamily) -> SendingInterface:
     and its own addresses supply the rest.
 
     Args:
-        ip: The address the request will ask about.
+        ip: The address the request will ask about, without a zone.
         family: The family of ``ip``; only IPv4 needs a source address.
+        zone: The RFC 4007 zone the caller wrote, which names the interface
+            outright. A link-local address is unique on one link only, so the
+            routing table cannot say which link was meant, and the caller's
+            zone wins over whatever it would pick.
 
     Returns:
         A :class:`SendingInterface` naming each of the three.
@@ -156,11 +222,13 @@ def _sending_interface(ip: str, family: AddressFamily) -> SendingInterface:
     Raises:
         IPScoutUnsupportedError: No interface on this host can reach that
             address, or the one that can has no hardware address (loopback and
-            tunnels have none, and there is nothing to ARP over).
+            tunnels have none, and there is nothing to ARP over) or one that is
+            not a six-byte Ethernet address.
+        IPScoutResolutionError: ``zone`` names no interface this host has.
     """
 
-    route = query_route(ip, family)
-    name = route.interface if route else None
+    route = None if zone is not None else query_route(ip, family)
+    name = _zone_interface(zone) if zone is not None else (route.interface if route else None)
     if name is None:
         msg = f"no route to {ip}, so no interface to send a resolution request on"
         raise IPScoutUnsupportedError(msg)
@@ -170,6 +238,12 @@ def _sending_interface(ip: str, family: AddressFamily) -> SendingInterface:
             continue
         if not candidate.mac:
             msg = f"{name} has no hardware address, so it cannot carry an address-resolution request"
+            raise IPScoutUnsupportedError(msg)
+        if normalise_mac(candidate.mac) is None:
+            # ARP and neighbour discovery as built here carry a six-byte
+            # Ethernet sender; an InfiniBand or other longer address cannot be
+            # written into either, and the codec refuses it.
+            msg = f"{name} has a non-Ethernet hardware address ({candidate.mac}), so it cannot carry this address-resolution request"
             raise IPScoutUnsupportedError(msg)
         source = route.source if route and route.source else next((entry.address for entry in candidate.ipv4), None)
         if family is AddressFamily.IPV4 and source is None:
@@ -194,16 +268,26 @@ def resolve_active(ip: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
         The hardware address, or ``None`` when nothing answered in time.
 
     Raises:
+        ValueError: ``ip`` is not an IP address literal given as text, or
+            ``timeout`` is not a number above zero and at most
+            ``MAX_TIMEOUT``. Refused before anything is sent.
         IPScoutPermissionError: The process lacks the privilege the send
             needs - root or ``CAP_NET_RAW`` on Linux, root on macOS. The
             message names the remedy, including the unprivileged alternative.
         IPScoutUnsupportedError: There is no interface that can carry the
             request, or the platform has no active path for that family.
+        IPScoutResolutionError: The address carries a zone that names no
+            interface this host has.
 
     Note:
         Windows IPv4 is the one case that needs no elevation, through
         ``SendARP``. Everywhere else this sends a real ARP request or ICMPv6
         neighbour solicitation over a raw socket, which needs privilege.
+
+        A zone (``fe80::1%eth0``) names the interface to send on, overriding
+        the routing table, which cannot tell one link's ``fe80::1`` from
+        another's. Windows does not yet honour it: the address is resolved
+        without the zone there.
 
         It never falls back to the cache. A caller who asked to resolve
         actively gets a fresh answer or an error, never a stale entry dressed
@@ -220,14 +304,24 @@ def resolve_active(ip: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
 
     """
 
-    family = AddressFamily.IPV6 if ":" in ip else AddressFamily.IPV4
+    try:
+        # model_validate, not the constructor: the field holds the parsed
+        # address while the caller hands text, which only validation converts.
+        request = _ActiveResolution.model_validate({"ip": ip, "timeout": timeout})
+    except ValidationError as refused:
+        raise refused_arguments("active resolution", refused) from refused
+    family = AddressFamily.of_version(request.ip.version)
+    # Every backend packs the address into bytes, and inet_pton refuses a
+    # zone, so the backends get the bare address and the zone picks the
+    # interface instead of travelling with it.
+    bare, zone = split_zone(str(request.ip))
 
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
         from .neighbours_windows import resolve_active as _windows_resolve  # noqa: PLC0415 - Windows-only import
 
-        return _windows_resolve(ip, family)
+        return _windows_resolve(bare, family)
 
-    sender = _sending_interface(ip, family)
+    sender = _sending_interface(bare, family, zone=zone)
 
     if IS_MACOS:  # pragma: no cover - exercised on macOS CI only
         from .neighbours_macos import resolve_active_ipv4, resolve_active_ipv6  # noqa: PLC0415 - macOS-only import
@@ -235,13 +329,13 @@ def resolve_active(ip: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
         from .neighbours_linux import resolve_active_ipv4, resolve_active_ipv6  # noqa: PLC0415 - Linux-only import
 
     if family is AddressFamily.IPV6:
-        return resolve_active_ipv6(ip, interface=sender.interface, source_mac=sender.source_mac, timeout=timeout)
+        return resolve_active_ipv6(bare, interface=sender.interface, source_mac=sender.source_mac, timeout=request.timeout)
     return resolve_active_ipv4(
-        ip,
+        bare,
         interface=sender.interface,
         source_ip=sender.source_ip,
         source_mac=sender.source_mac,
-        timeout=timeout,
+        timeout=request.timeout,
     )
 
 
@@ -323,7 +417,9 @@ def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
         if route is not None and route.gateway:
             found = resolve_active(ip=route.gateway)
             return MacLookup(ip=ip, mac=found, scope=MacScope.NEXT_HOP, via_ip=route.gateway, interface=route.interface)
-        found = resolve_active(ip=bare)
+        # The zoned text, not the bare address: the zone is the caller naming
+        # the link, and resolve_active sends on it.
+        found = resolve_active(ip=ip)
         scope = MacScope.DIRECT if found else MacScope.UNKNOWN
         return MacLookup(ip=ip, mac=found, scope=scope, interface=on_interface)
 

@@ -47,15 +47,12 @@ import struct
 import sys
 from collections import deque
 
-from .bpf import BIOCGDLT, DLT_EN10MB, iter_bpf_frames, open_bpf_device
+from .bpf import BIOCGDLT, DLT_EN10MB, MAX_BPF_DEVICES, iter_bpf_frames, open_bpf_device
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .ports import MIN_CAPTURE_WAIT
 from .unixio import fcntl_module
 
 __all__ = ["BpfCapture", "capture_available", "open_capture"]
-
-#: The first device to try when only asking whether one may be opened at all.
-_PROBE_DEVICE = "/dev/bpf0"
 
 
 def _require_bpf() -> None:
@@ -92,7 +89,10 @@ def capture_available() -> bool:
         Whether the privilege is present. Opens and immediately closes a
         device, which is the only honest way to ask: access to ``/dev/bpf*``
         is a filesystem permission that varies per machine, not something the
-        platform name settles.
+        platform name settles. Devices are tried the way a capture claims
+        one: a busy or missing device moves on to the next, while a refused
+        one (EACCES, EPERM) answers False at once, because every device in
+        the pool carries the same permission.
 
     Examples:
         >>> isinstance(capture_available(), bool)
@@ -100,12 +100,20 @@ def capture_available() -> bool:
 
     """
 
-    try:
-        descriptor = os.open(_PROBE_DEVICE, os.O_RDWR)
-    except OSError:
-        return False
-    os.close(descriptor)
-    return True
+    # The same fixed pool, in the same order, that open_bpf_device walks when it
+    # claims one, so the answer here is the one a real capture would get. A busy
+    # device belongs to another process and says nothing about this one's privilege.
+    for number in range(MAX_BPF_DEVICES):
+        try:
+            descriptor = os.open(f"/dev/bpf{number}", os.O_RDWR)
+        except PermissionError:
+            return False
+        except OSError:
+            # EBUSY: another process holds this one, so try the next.
+            continue
+        os.close(descriptor)
+        return True
+    return False
 
 
 class BpfCapture:

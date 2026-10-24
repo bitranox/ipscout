@@ -23,7 +23,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from .models import RoundTrip
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -50,22 +52,39 @@ class EchoResult(BaseModel):
         rtt_ms: Round trip in milliseconds, or ``None`` if nothing answered.
         source: Who answered. For a normal reply this is the target; for a
             TTL-expired response it is the router that dropped the packet.
+            Set exactly when ``rtt_ms`` is: an answer always comes from
+            someone, and nobody answers a probe that timed out.
         ttl_expired: True when a router reported Time Exceeded rather than the
             target replying. Traceroute needs this; ping treats it as no answer.
+            Only an answer can be one.
 
     Examples:
         >>> EchoResult(rtt_ms=1.5, source="127.0.0.1").answered
         True
         >>> EchoResult().answered
         False
+        >>> EchoResult(rtt_ms=float("nan"), source="127.0.0.1")
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
 
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    rtt_ms: float | None = None
+    rtt_ms: RoundTrip | None = None
     source: str | None = None
     ttl_expired: bool = False
+
+    @model_validator(mode="after")
+    def _an_answer_has_a_time_and_a_source(self) -> EchoResult:
+        if (self.rtt_ms is None) != (self.source is None):
+            msg = "rtt_ms and source are set together: an answer comes from someone, a timeout from no one"
+            raise ValueError(msg)
+        if self.ttl_expired and self.rtt_ms is None:
+            msg = "ttl_expired needs the router's answer: rtt_ms and source"
+            raise ValueError(msg)
+        return self
 
     @property
     def answered(self) -> bool:

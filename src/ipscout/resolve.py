@@ -461,6 +461,7 @@ def reverse_dns(ip: str) -> str | None:
     """
 
     try:
-        return socket.gethostbyaddr(ip)[0]
+        # An empty PTR answer names nothing, the same as no record at all.
+        return socket.gethostbyaddr(ip)[0] or None
     except (OSError, UnicodeError):
         return None

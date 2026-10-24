@@ -36,11 +36,12 @@ import secrets
 import socket
 import sys
 import time
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Strict, ValidationError
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError, refused_arguments
-from .models import DISCARD_PORT, MAX_PORT, AddressFamily, PortState, ScanMethod, Timeout, require_port
+from .models import DISCARD_PORT, MAX_PORT, AddressFamily, Port, PortState, ScanMethod, Timeout, require_port
 from .packet import MAX_IP_LENGTH
 from .pool import Concurrency, gather_bounded
 from .resolve import ResolvedTarget, resolve_one
@@ -76,11 +77,12 @@ _EPHEMERAL_HIGH = 60999
 
 
 class PortScanSettings(BaseModel):
-    """How long a scan waits and how many connects it keeps in flight, checked once.
+    """How a scan probes, how long it waits and how many connects it keeps in flight, checked once.
 
     The bounds are declared on the fields, so the check and its documentation
     cannot drift apart, and the command line reads these same declarations for
-    its options. Strict: ``"1"`` is not a timeout.
+    its options. Strict: ``"1"`` is not a timeout and ``"syn"`` is not a
+    :class:`ScanMethod`.
 
     Examples:
         >>> PortScanSettings().concurrency == DEFAULT_CONCURRENCY
@@ -100,15 +102,33 @@ class PortScanSettings(BaseModel):
     timeout: Timeout = DEFAULT_TIMEOUT
     #: Connects in flight at once, under the pool's one concurrency rule.
     concurrency: Concurrency = DEFAULT_CONCURRENCY
+    #: Full connect or half-open SYN. A member, never its value: a string that
+    #: merely equals one would otherwise fail the identity test and run the
+    #: other method under the name the caller asked for.
+    method: ScanMethod = ScanMethod.CONNECT
 
 
-def _settings(*, timeout: float, concurrency: int = DEFAULT_CONCURRENCY) -> PortScanSettings:
+def _settings(*, timeout: float, concurrency: int = DEFAULT_CONCURRENCY, method: ScanMethod = ScanMethod.CONNECT) -> PortScanSettings:
     """Return the checked settings, or raise one ``ValueError`` naming every bad argument."""
 
     try:
-        return PortScanSettings(timeout=timeout, concurrency=concurrency)
+        return PortScanSettings(timeout=timeout, concurrency=concurrency, method=method)
     except ValidationError as exc:
         raise refused_arguments("port scan", exc) from exc
+
+
+class _PortList(BaseModel):
+    """A list of port numbers, each an ``int`` in range, checked before anything is sent.
+
+    The container is lax, so a tuple or a set of ports reads as meant, while
+    every entry is strict: ``True`` and ``80.5`` are not port numbers, and
+    letting them through would report a result keyed by something no host
+    can listen on.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ports: list[Annotated[Port, Strict()]]
 
 
 def parse_ports(specification: str) -> list[int]:
@@ -164,6 +184,21 @@ def _port(text: str) -> int:
     return require_port(value)
 
 
+def _listed(ports: list[int]) -> list[int]:
+    """Return a list of ports checked entry by entry, in the order given.
+
+    Raises:
+        ValueError: An entry is not an ``int`` (``True`` included) or is outside
+            ``MIN_PORT``-``MAX_PORT``, as
+            ``port scan refused its arguments: ports.<index>: <reason>``.
+    """
+
+    try:
+        return _PortList(ports=ports).ports
+    except ValidationError as refused:
+        raise refused_arguments("port scan", refused) from refused
+
+
 def _wanted(ports: str | list[int]) -> list[int]:
     """Return the ports to scan, however they were specified.
 
@@ -171,7 +206,7 @@ def _wanted(ports: str | list[int]) -> list[int]:
     can listen on is refused before any connect or SYN is attempted.
     """
 
-    return parse_ports(ports) if isinstance(ports, str) else sorted({require_port(port) for port in ports})
+    return parse_ports(ports) if isinstance(ports, str) else sorted(set(_listed(ports)))
 
 
 def choose_source_port() -> int:
@@ -238,9 +273,10 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
         IPScoutUnsupportedError: Windows, which has blocked raw TCP sends
             since XP SP2, or no route to the target.
         IPScoutResolutionError: ``host`` has no IPv4 address.
-        ValueError: A port is outside ``MIN_PORT``-``MAX_PORT``, or
-            ``timeout`` is not above 0 and at most ``MAX_TIMEOUT``. Checked first, so a
-            bad argument is reported as such whatever the privileges.
+        ValueError: A port is not an ``int`` or is outside
+            ``MIN_PORT``-``MAX_PORT``, or ``timeout`` is not above 0 and at
+            most ``MAX_TIMEOUT``. Checked first, so a bad argument is reported
+            as such whatever the privileges.
 
     Note:
         Never falls back to a connect scan. The two measure different things,
@@ -249,9 +285,8 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
 
     """
 
-    for port in ports:
-        require_port(port)
-    return _half_open(host, ports, _settings(timeout=timeout))
+    wanted = _listed(ports)
+    return _half_open(host, wanted, _settings(timeout=timeout))
 
 
 def _half_open(host: str, ports: list[int], settings: PortScanSettings) -> dict[int, PortState]:
@@ -366,8 +401,10 @@ def scan_ports(
 
     Raises:
         ValueError: The port specification is malformed, a listed port is
-            outside ``MIN_PORT``-``MAX_PORT``, ``timeout`` is not above 0
-            and at most ``MAX_TIMEOUT``, or ``concurrency`` is below 1.
+            not an ``int`` (``True`` included) or is outside
+            ``MIN_PORT``-``MAX_PORT``, ``timeout`` is not above 0 and at most
+            ``MAX_TIMEOUT``, ``concurrency`` is below 1, or ``method`` is not
+            a :class:`ScanMethod` member.
         IPScoutResolutionError: ``host`` does not resolve. Raised rather than
             reporting every port FILTERED, which would read as a firewall.
         IPScoutPermissionError: A SYN scan without the privilege it needs.
@@ -383,8 +420,8 @@ def scan_ports(
     """
 
     wanted = _wanted(ports)
-    settings = _settings(timeout=timeout, concurrency=concurrency)
-    if method is ScanMethod.SYN:
+    settings = _settings(timeout=timeout, concurrency=concurrency, method=method)
+    if settings.method is ScanMethod.SYN:
         return _half_open(host, wanted, settings)
 
     try:
@@ -414,8 +451,9 @@ async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = DEF
 
     Raises:
         ValueError: The port specification is malformed, a listed port is
-            outside ``MIN_PORT``-``MAX_PORT``, ``timeout`` is not above 0
-            and at most ``MAX_TIMEOUT``, or ``concurrency`` is below 1.
+            not an ``int`` (``True`` included) or is outside
+            ``MIN_PORT``-``MAX_PORT``, ``timeout`` is not above 0 and at most
+            ``MAX_TIMEOUT``, or ``concurrency`` is below 1.
         IPScoutResolutionError: ``host`` does not resolve.
 
     """

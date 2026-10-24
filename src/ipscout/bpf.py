@@ -35,6 +35,7 @@ __all__ = [
     "BIOCSETIF",
     "BIOCSHDRCMPLT",
     "DLT_EN10MB",
+    "MAX_BPF_DEVICES",
     "BpfDevice",
     "iter_bpf_frames",
     "open_bpf_device",
@@ -59,7 +60,7 @@ _BPF_HDR = struct.Struct("=iiIIH")
 
 #: How many /dev/bpf devices to try before giving up. They are a fixed pool
 #: and a busy one simply belongs to another process.
-_MAX_BPF_DEVICES = 64
+MAX_BPF_DEVICES = 64
 
 #: The link type that yields Ethernet frames. Anything else - loopback's
 #: DLT_NULL, for one - frames its packets differently, so a codec written for
@@ -186,7 +187,7 @@ def open_bpf_device(interface: str, *, promiscuous: bool = False, complete_heade
 
     fcntl = fcntl_module()
     last: OSError | None = None
-    for number in range(_MAX_BPF_DEVICES):
+    for number in range(MAX_BPF_DEVICES):
         try:
             descriptor = os.open(f"/dev/bpf{number}", os.O_RDWR)
         except PermissionError:

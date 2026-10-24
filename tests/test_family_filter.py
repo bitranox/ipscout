@@ -19,7 +19,7 @@ from ipscout.models import AddressFamily, Neighbour
 
 BOTH_FAMILIES = (
     Neighbour(ip="192.0.2.10", mac="aa:bb:cc:dd:ee:ff", interface="eth0"),
-    Neighbour(ip="fe80::1", mac="aa:bb:cc:dd:ee:ff", interface="eth0"),
+    Neighbour(ip="fe80::1", mac="aa:bb:cc:dd:ee:ff", interface="eth0", family=AddressFamily.IPV6),
     Neighbour(ip="192.0.2.11", mac="11:22:33:44:55:66", interface="eth0"),
 )
 

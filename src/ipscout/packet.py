@@ -8,6 +8,8 @@ Contents:
     EchoPayload: The token-bearing payload carried in every request we send.
     build_echo_request: Assemble a complete ICMP or ICMPv6 echo request.
     EchoRequest: The ``(datagram, token)`` record build_echo_request returns.
+    max_payload_size: The most payload one echo of a family can carry.
+    require_payload_size: Refuse a payload one echo of a family cannot carry.
     parse_echo_reply: Decode a datagram back into its identifying fields.
     checksum: The RFC 1071 one's-complement sum.
 
@@ -63,7 +65,9 @@ __all__ = [
     "checksum",
     "is_echo_reply",
     "is_time_exceeded",
+    "max_payload_size",
     "parse_echo_reply",
+    "require_payload_size",
     "strip_ip_header",
 ]
 
@@ -265,6 +269,45 @@ class EchoRequest(NamedTuple):
     token: bytes
 
 
+def max_payload_size(family: AddressFamily) -> int:
+    """Return the most ICMP payload one echo of ``family`` can carry.
+
+    Examples:
+        >>> max_payload_size(AddressFamily.IPV4), max_payload_size(AddressFamily.IPV6)
+        (65507, 65527)
+
+    """
+
+    return MAX_PAYLOAD_SIZE_IPV6 if family is AddressFamily.IPV6 else MAX_PAYLOAD_SIZE_IPV4
+
+
+def require_payload_size(payload_size: int, family: AddressFamily) -> int:
+    """Return ``payload_size`` if one echo of ``family`` can carry it, or raise saying why not.
+
+    The one upper-bound check for an echo payload, so a ping request and the
+    packet builder refuse the same size in the same words. A size below the
+    minimum is not refused: the builder raises it to the minimum.
+
+    Raises:
+        ValueError: ``payload_size`` is above the family's maximum.
+
+    Examples:
+        >>> require_payload_size(56, AddressFamily.IPV4)
+        56
+        >>> require_payload_size(70000, AddressFamily.IPV4)
+        Traceback (most recent call last):
+        ...
+        ValueError: payload_size above the ipv4 maximum of 65507 bytes: 70000
+
+    """
+
+    limit = max_payload_size(family)
+    if payload_size > limit:
+        msg = f"payload_size above the {family.value} maximum of {limit} bytes: {payload_size}"
+        raise ValueError(msg)
+    return payload_size
+
+
 def _require_uint16(name: str, value: int) -> None:
     """Refuse a value that does not fit a two-byte header field, naming it."""
 
@@ -287,7 +330,8 @@ def build_echo_request(
         sequence: Sequence number for this request, 0-65535. This, together
             with the token, is what identifies the reply.
         payload_size: Total payload length in bytes. Raised to the minimum
-            needed to hold magic plus token when a smaller value is asked for.
+            needed to hold magic plus token when a smaller value is asked for;
+            at most :func:`max_payload_size` for ``family``.
         family: Which protocol to build for: ``AddressFamily.IPV6`` builds an
             ICMPv6 request, ``AddressFamily.IPV4`` an ICMPv4 one.
         identifier: Value for the identifier field, 0-65535. Cosmetic on
@@ -303,7 +347,9 @@ def build_echo_request(
 
     Raises:
         ValueError: ``sequence`` or ``identifier`` does not fit its 16-bit
-            field, or ``token`` is not ``TOKEN_SIZE`` bytes long. A token of
+            field, ``payload_size`` is above the family's maximum (refused
+            before any filler is allocated, so a huge value cannot exhaust
+            memory), or ``token`` is not ``TOKEN_SIZE`` bytes long. A token of
             another length would be read back as a different one, so the reply
             could never be matched.
 
@@ -337,6 +383,7 @@ def build_echo_request(
 
     _require_uint16("sequence", sequence)
     _require_uint16("identifier", identifier)
+    require_payload_size(payload_size, family)
     if token is not None and len(token) != TOKEN_SIZE:
         msg = f"token must be exactly {TOKEN_SIZE} bytes, got {len(token)}"
         raise ValueError(msg)

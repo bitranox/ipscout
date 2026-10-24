@@ -147,10 +147,31 @@ def format_mac(raw: bytes) -> str | None:
 
 
 def _packed_mac(mac: str) -> bytes:
-    """Return a written hardware address as its six bytes."""
+    """Return a written hardware address as its six bytes, or refuse it.
 
-    digits = mac.replace(":", "").replace("-", "").replace(".", "")
-    return bytes.fromhex(digits)
+    Read through :func:`normalise_mac`, the one parser of written addresses,
+    so a frame is never built from a short or long one: two bytes would be
+    zero-padded by the frame layout into an address nobody holds, and a
+    seventh byte would be kept and dropped silently by ``struct``.
+
+    Raises:
+        ValueError: ``mac`` is not a six-byte Ethernet address.
+
+    Examples:
+        >>> _packed_mac("02-00-5E-10-00-00").hex()
+        '02005e100000'
+        >>> _packed_mac("aa:bb")
+        Traceback (most recent call last):
+        ...
+        ValueError: 'aa:bb' is not a 6-byte Ethernet hardware address
+
+    """
+
+    canonical = normalise_mac(mac)
+    if canonical is None:
+        msg = f"{mac!r} is not a {MAC_LENGTH}-byte Ethernet hardware address"
+        raise ValueError(msg)
+    return bytes.fromhex(canonical.replace(":", ""))
 
 
 def build_arp_request(*, sender_mac: str, sender_ip: str, target_ip: str) -> bytes:
@@ -164,6 +185,9 @@ def build_arp_request(*, sender_mac: str, sender_ip: str, target_ip: str) -> byt
 
     Returns:
         A complete frame, ready to write to a link-layer socket.
+
+    Raises:
+        ValueError: ``sender_mac`` is not a six-byte Ethernet address.
 
     Examples:
         >>> frame = build_arp_request(sender_mac="aa:bb:cc:dd:ee:ff",
@@ -254,6 +278,9 @@ def build_neighbour_solicitation(*, sender_mac: str, target_ip: str) -> bytes:
         The ICMPv6 message. The checksum is left zero: a raw ICMPv6 socket
         computes it in the kernel, because it covers a pseudo-header the
         sender does not otherwise know.
+
+    Raises:
+        ValueError: ``sender_mac`` is not a six-byte Ethernet address.
 
     Examples:
         >>> message = build_neighbour_solicitation(sender_mac="aa:bb:cc:dd:ee:ff",

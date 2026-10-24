@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .api import require_host_names
 from .errors import IPScoutError, refused_arguments
 from .models import AddressFamily, Banner, BannerState, Port, Timeout
 from .pool import Concurrency, gather_bounded
@@ -215,8 +216,10 @@ async def agrab_banners(  # noqa: PLR0913 - public API: every knob is keyword-on
 
     Args:
         hosts: Hostnames or address literals; a link-local IPv6 address needs
-            its ``%zone``. Duplicates are collapsed, since the result is keyed
-            by host and a repeat could only overwrite itself.
+            its ``%zone``. Any collection or iterator of ``str``, never one
+            bare string: ``"printer.lan"`` is itself an iterable of one-letter
+            names. Duplicates are collapsed, since the result is keyed by host
+            and a repeat could only overwrite itself.
         port: The TCP port to connect to on every host.
         timeout: Seconds allowed per host for resolving, connecting and
             reading together. A host that connects but has not finished its
@@ -241,6 +244,9 @@ async def agrab_banners(  # noqa: PLR0913 - public API: every knob is keyword-on
             at most ``MAX_TIMEOUT``, ``max_line_bytes`` or ``concurrency`` is below 1, or
             ``farewell`` is empty. One message names every bad argument, as
             ``<argument>: <reason>``, and it is raised before anything connects.
+            ``hosts`` being one bare string or holding a non-``str`` entry is
+            refused the same way, checked after the other arguments so a bad
+            one is reported before any host is taken from ``hosts``.
 
     Examples:
         >>> import asyncio
@@ -254,7 +260,7 @@ async def agrab_banners(  # noqa: PLR0913 - public API: every knob is keyword-on
         settings = BannerSettings(port=port, timeout=timeout, max_line_bytes=max_line_bytes, farewell=farewell, concurrency=concurrency, family=family)
     except ValidationError as refused:
         raise refused_arguments("banner grab", refused) from refused
-    unique = list(dict.fromkeys(hosts))
+    unique = require_host_names(hosts, operation="banner grab", argument="hosts")
 
     async def one(host: str) -> tuple[str, Banner]:
         # Paired with its host: the pool completes out of order.

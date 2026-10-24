@@ -35,9 +35,11 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from .errors import IPScoutUnsupportedError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .errors import IPScoutUnsupportedError, refused_arguments
 from .factory import make_async_transport, make_transport
-from .models import MAX_HOP_LIMIT, TraceHop, require_timeout
+from .models import MAX_HOP_LIMIT, Timeout, TraceHop
 from .resolve import resolve_one, reverse_dns
 from .service import DEFAULT_TIMEOUT
 
@@ -45,7 +47,7 @@ if TYPE_CHECKING:
     from .models import AddressFamily
     from .ports import AsyncEchoTransport, EchoResult, EchoTransport
 
-__all__ = ["atrace_path", "atraceroute", "trace_path", "traceroute"]
+__all__ = ["DEFAULT_MAX_HOPS", "TracerouteSettings", "atrace_path", "atraceroute", "trace_path", "traceroute"]
 
 #: Hop limit beyond which a path is treated as not terminating. Matches the
 #: conventional traceroute default.
@@ -58,26 +60,57 @@ _UNSUPPORTED = (
 )
 
 
-def _require_walkable(max_hops: int, timeout: float, *, supports_ttl_discovery: bool) -> None:
-    """Refuse a walk that could never report a hop, before any probe is sent.
+class TracerouteSettings(BaseModel):
+    """The arguments of one walk, checked once so the sync and async walks refuse alike.
+
+    The bounds are declared on the fields, so the check and its documentation
+    cannot drift apart. Strict: ``3.0`` and ``"5"`` are not hop limits, and
+    ``True`` is neither a hop limit nor a timeout.
+
+    Examples:
+        >>> TracerouteSettings().max_hops == DEFAULT_MAX_HOPS
+        True
+        >>> TracerouteSettings(max_hops=0)
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    #: Highest hop limit to try: at most ``MAX_HOP_LIMIT``, the most a one-byte
+    #: TTL or hop-limit field can carry, and at least one, below which no hop
+    #: is ever probed.
+    max_hops: int = Field(default=DEFAULT_MAX_HOPS, ge=1, le=MAX_HOP_LIMIT)
+    #: Seconds to wait at each hop, under the library's one timeout rule. A
+    #: wait of zero or less would walk every hop without listening and report
+    #: a path of silent routers, which reads as a network fault.
+    timeout: Timeout = DEFAULT_TIMEOUT
+    #: Look up a reverse-DNS name per responding hop.
+    resolve_names: bool = False
+
+
+def _settings(*, max_hops: int, timeout: float, resolve_names: bool) -> TracerouteSettings:
+    """Return the checked settings, or raise one ``ValueError`` naming every bad argument."""
+
+    try:
+        return TracerouteSettings(max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)
+    except ValidationError as refused:
+        raise refused_arguments("traceroute", refused) from refused
+
+
+def _require_walkable(*, supports_ttl_discovery: bool) -> None:
+    """Refuse a walk over a transport that could never report a hop, before any probe is sent.
 
     One check for both walks, so the sync and async entry points cannot drift
     apart on what they refuse or how they word it.
 
     Raises:
-        ValueError: ``max_hops`` is outside 1-``MAX_HOP_LIMIT``, the most a
-            one-byte TTL or hop-limit field can carry, or ``timeout`` is
-            refused by :func:`~ipscout.models.require_timeout`. A timeout of
-            zero or less used to walk every hop without waiting and report a
-            path of silent routers, which reads as a network fault.
         IPScoutUnsupportedError: Expired hops cannot be observed on this
             transport.
     """
 
-    if not 1 <= max_hops <= MAX_HOP_LIMIT:
-        msg = f"max_hops must be 1-{MAX_HOP_LIMIT}, got {max_hops}"
-        raise ValueError(msg)
-    require_timeout(timeout)
     if not supports_ttl_discovery:
         raise IPScoutUnsupportedError(_UNSUPPORTED)
 
@@ -132,8 +165,11 @@ def trace_path(
 
     Raises:
         IPScoutUnsupportedError: This transport cannot observe expired hops.
-        ValueError: ``max_hops`` is outside 1-``MAX_HOP_LIMIT``, or
-            ``timeout`` is not above 0 or is above ``MAX_TIMEOUT``.
+        ValueError: ``max_hops`` is not an ``int`` or is outside
+            1-``MAX_HOP_LIMIT``, ``timeout`` is not a number or is not above 0
+            or is above ``MAX_TIMEOUT``, or ``resolve_names`` is not a
+            ``bool``. The message reads
+            ``traceroute refused its arguments: <argument>: <reason>``.
 
     Examples:
         >>> from ipscout.ports import EchoResult
@@ -151,12 +187,18 @@ def trace_path(
 
     """
 
-    _require_walkable(max_hops, timeout, supports_ttl_discovery=transport.supports_ttl_discovery)
+    return _walk(transport, _settings(max_hops=max_hops, timeout=timeout, resolve_names=resolve_names))
+
+
+def _walk(transport: EchoTransport, settings: TracerouteSettings) -> list[TraceHop]:
+    """Walk ``transport`` under settings already checked by the caller."""
+
+    _require_walkable(supports_ttl_discovery=transport.supports_ttl_discovery)
 
     hops: list[TraceHop] = []
-    for ttl in range(1, max_hops + 1):
-        result = transport.probe(sequence=ttl, timeout=timeout, ttl=ttl)
-        source = _name_to_look_up(result, resolve_names=resolve_names)
+    for ttl in range(1, settings.max_hops + 1):
+        result = transport.probe(sequence=ttl, timeout=settings.timeout, ttl=ttl)
+        source = _name_to_look_up(result, resolve_names=settings.resolve_names)
         hop = _to_hop(ttl, result, hostname=reverse_dns(source) if source else None)
         hops.append(hop)
         if hop.reached:
@@ -188,17 +230,26 @@ async def atrace_path(
 
     Raises:
         IPScoutUnsupportedError: This transport cannot observe expired hops.
-        ValueError: ``max_hops`` is outside 1-``MAX_HOP_LIMIT``, or
-            ``timeout`` is not above 0 or is above ``MAX_TIMEOUT``.
+        ValueError: ``max_hops`` is not an ``int`` or is outside
+            1-``MAX_HOP_LIMIT``, ``timeout`` is not a number or is not above 0
+            or is above ``MAX_TIMEOUT``, or ``resolve_names`` is not a
+            ``bool``. The message reads
+            ``traceroute refused its arguments: <argument>: <reason>``.
 
     """
 
-    _require_walkable(max_hops, timeout, supports_ttl_discovery=transport.supports_ttl_discovery)
+    return await _awalk(transport, _settings(max_hops=max_hops, timeout=timeout, resolve_names=resolve_names))
+
+
+async def _awalk(transport: AsyncEchoTransport, settings: TracerouteSettings) -> list[TraceHop]:
+    """Walk an async ``transport`` under settings already checked by the caller."""
+
+    _require_walkable(supports_ttl_discovery=transport.supports_ttl_discovery)
 
     hops: list[TraceHop] = []
-    for ttl in range(1, max_hops + 1):
-        result = await transport.probe(sequence=ttl, timeout=timeout, ttl=ttl)
-        source = _name_to_look_up(result, resolve_names=resolve_names)
+    for ttl in range(1, settings.max_hops + 1):
+        result = await transport.probe(sequence=ttl, timeout=settings.timeout, ttl=ttl)
+        source = _name_to_look_up(result, resolve_names=settings.resolve_names)
         # gethostbyaddr blocks for as long as the name server takes, once per
         # hop; on the loop thread that stalls every other task for the walk.
         hostname = await asyncio.to_thread(reverse_dns, source) if source else None
@@ -233,14 +284,20 @@ def traceroute(
         IPScoutResolutionError: The target does not resolve.
         IPScoutPermissionError: ICMP is unavailable to this process.
         IPScoutUnsupportedError: This platform cannot observe expired hops.
-        ValueError: ``max_hops`` is outside 1-``MAX_HOP_LIMIT``, or
-            ``timeout`` is not above 0 or is above ``MAX_TIMEOUT``.
+        ValueError: ``max_hops`` is not an ``int`` or is outside
+            1-``MAX_HOP_LIMIT``, ``timeout`` is not a number or is not above 0
+            or is above ``MAX_TIMEOUT``, or ``resolve_names`` is not a
+            ``bool``. The message reads
+            ``traceroute refused its arguments: <argument>: <reason>``.
 
     """
 
+    # Checked before the name is resolved: a bad argument is the caller's
+    # mistake whether or not the name resolves, and must read as one.
+    settings = _settings(max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)
     resolved = resolve_one(target, family=family)
     with make_transport(resolved.address, resolved.family) as transport:
-        return trace_path(transport, max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)
+        return _walk(transport, settings)
 
 
 async def atraceroute(
@@ -258,9 +315,13 @@ async def atraceroute(
     Returns:
         One hop record per hop, in order.
 
+    Raises:
+        ValueError: As :func:`traceroute`, before the name is resolved.
+
     """
 
+    settings = _settings(max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)
     resolved = await asyncio.to_thread(resolve_one, target, family=family)
     transport = make_async_transport(resolved.address, resolved.family)
     async with transport:
-        return await atrace_path(transport, max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)
+        return await _awalk(transport, settings)

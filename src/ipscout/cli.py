@@ -37,6 +37,7 @@ from rich.table import Table
 from . import __init__conf__
 from .api import DEFAULT_CONCURRENCY as DEFAULT_PING_CONCURRENCY
 from .api import is_reachable, ping, ping_many
+from .arp import normalise_mac
 from .banner import DEFAULT_CONCURRENCY as DEFAULT_BANNER_CONCURRENCY
 from .banner import DEFAULT_MAX_LINE_BYTES, BannerSettings, grab_banners
 from .banner import DEFAULT_TIMEOUT as DEFAULT_BANNER_TIMEOUT
@@ -407,6 +408,25 @@ def _json_error(exc: BaseException) -> JsonError:
     return JsonError(type=type(exc).__name__, message=_message(exc) or type(exc).__name__)
 
 
+def _canonical_mac(mac: str) -> str:
+    """Return a hardware address the library already accepted, as every report writes it.
+
+    A report echoing the caller's own spelling (``AABB.CCDD.EEFF``) would name
+    the same address differently from every other command's output, so a
+    reader matching on it would miss. Called only after the library call
+    succeeded, and each of those refuses a string ``normalise_mac`` cannot
+    read; were that ever not so, the raw text falls through to the report's
+    own check, which refuses it rather than printing it.
+
+    Examples:
+        >>> _canonical_mac("AABB.CCDD.EEFF")
+        'aa:bb:cc:dd:ee:ff'
+
+    """
+
+    return normalise_mac(mac) or mac
+
+
 def _family(*, ipv4: bool, ipv6: bool) -> AddressFamily | None:
     """Return the family the -4/-6 flags select, or None for either."""
 
@@ -751,7 +771,7 @@ def cli_find_ip(  # noqa: PLR0913 - one parameter per documented CLI option; col
         _fail(ctx, CommandName.FIND_IP, exc, skipped=scope.skipped if scope else ())
         return
 
-    payload = FindIpReport(mac=mac, addresses=tuple(addresses), scanned=scan, scope=scope)
+    payload = FindIpReport(mac=_canonical_mac(mac), addresses=tuple(addresses), scanned=scan, scope=scope)
     _emit(
         ctx,
         CommandName.FIND_IP,
@@ -835,7 +855,7 @@ def cli_subnet(ctx: click.Context, *, interface: str | None) -> None:
             table.add_row(
                 item.interface,
                 f"{item.address}/{item.prefix_len}",
-                item.network,
+                str(item.network),
                 item.broadcast or "-",
                 item.gateway or "-",
                 ", ".join(item.dns_servers) or "-",
@@ -1050,7 +1070,7 @@ def cli_wake(ctx: click.Context, mac: str, *, broadcast: str, port: int) -> None
 
     # Nothing acknowledges a magic packet, so this reports only that it was
     # sent. Whether the host woke is a separate question, for `reachable`.
-    payload = WakeReport(mac=mac, broadcast=broadcast, port=port)
+    payload = WakeReport(mac=_canonical_mac(mac), broadcast=broadcast, port=port)
     _emit(ctx, CommandName.WAKE, payload, lambda: console.print(f"magic packet sent to {broadcast}:{port}", highlight=False))
 
 
@@ -1069,7 +1089,7 @@ def cli_observe_dhcp(ctx: click.Context, mac: str, *, interface: str | None, tim
         _fail(ctx, CommandName.OBSERVE_DHCP, exc)
         return
 
-    payload = ObserveDhcpReport(mac=mac, interface=interface, addresses=tuple(addresses), timeout=timeout, settle=settle)
+    payload = ObserveDhcpReport(mac=_canonical_mac(mac), interface=interface, addresses=tuple(addresses), timeout=timeout, settle=settle)
     # Printed in arrival order, and the last line is the address the machine
     # most likely settled on rather than the first. Said in the docs rather
     # than here, where it would print on every run.
