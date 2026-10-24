@@ -155,7 +155,7 @@ ipscout ping-many 127.0.0.1 ::1 -c 1
 ipscout reachable example.com
 ipscout traceroute 1.1.1.1 --max-hops 10
 ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
-ipscout banners 192.168.1.0/24 --port 21 --farewell 'QUIT\r\n'   # what each host says first
+ipscout banners 192.0.2.0/24 --port 21 --farewell 'QUIT\r\n'   # what each host says first
 ipscout mac 8.8.8.8                     # the gateway's, labelled NEXT_HOP
 ipscout find-ip dc:b2:2f:44:34:59 --scan
 ipscout arp-scan --network 192.168.1.0/24

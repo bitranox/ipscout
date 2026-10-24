@@ -496,9 +496,11 @@ which is how a device is identified by what it says rather than by which port it
 ```python
 results = ipscout.grab_banners(["192.0.2.10", "192.0.2.11"], 21, farewell=b"QUIT\r\n")
 for host, banner in results.items():
-    if banner.line is not None and banner.line.startswith("220"):
+    if banner.line is not None and banner.line.startswith("220 Print Server"):
         print(host, banner.line)  # 192.0.2.10 220 Print Server Ready.
 ```
+
+Match the part of the greeting that names the device: every FTP server sends a `220` line.
 
 Each `Banner` carries one of four states. `GREETED` holds the decoded first line in `line`, and only
 a `GREETED` result has one, so `banner.line is not None` is the same test and narrows the type; `SILENT`
@@ -606,7 +608,7 @@ ipscout find-ip dc:b2:2f:44:34:59 --scan  # which addresses hold a MAC
 ipscout arp-scan --network 192.168.1.0/24 # sweep, then read what was learned
 ipscout subnet                            # addressing, gateway, stored DHCP facts
 ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
-ipscout banners 192.168.1.0/24 --port 21 --farewell 'QUIT\r\n'   # each host's greeting; networks expand
+ipscout banners 192.0.2.0/24 --port 21 --farewell 'QUIT\r\n'   # each host's greeting; networks expand
 ipscout mtu 8.8.8.8
 ipscout wake aa:bb:cc:dd:ee:ff --broadcast 192.168.1.255
 ipscout observe-dhcp 02:00:5e:10:00:00 --interface br0   # needs root; last line is the bound address
