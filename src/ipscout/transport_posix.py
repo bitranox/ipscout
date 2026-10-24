@@ -513,7 +513,7 @@ class PosixEchoTransport:
                 return self._expired_or_silent(started, ttl)
             self._socket.settimeout(remaining)
             try:
-                raw, peer = self._socket.recvfrom(65535)
+                raw, peer = self._socket.recvfrom(packet.MAX_IP_LENGTH)
             except (TimeoutError, OSError):
                 # A hop limit that expired arrives as an error, not as data.
                 return self._expired_or_silent(started, ttl)
@@ -611,7 +611,7 @@ class AsyncPosixEchoTransport:
 
         while True:
             try:
-                raw, peer = self._socket.recvfrom(65535)
+                raw, peer = self._socket.recvfrom(packet.MAX_IP_LENGTH)
             except (BlockingIOError, InterruptedError):
                 return
             except OSError:

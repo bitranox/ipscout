@@ -162,10 +162,10 @@ def test_an_ipv6_address_decodes_from_the_word_array(address: str) -> None:
 
 
 def test_every_status_code_renders_as_text() -> None:
-    assert winapi.status_message(winapi.IP_SUCCESS) == "success"
-    assert winapi.status_message(winapi.IP_TTL_EXPIRED_TRANSIT) == "TTL expired in transit"
-    assert winapi.status_message(winapi.IP_REQ_TIMED_OUT) == "request timed out"
-    assert "12345" in winapi.status_message(12345)
+    assert winapi.status_message(0) == "success"
+    assert winapi.status_message(11013) == "TTL expired in transit"
+    assert winapi.status_message(11010) == "request timed out"
+    assert winapi.status_message(12345) == "IP_STATUS 12345"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the DLL genuinely loads on Windows")

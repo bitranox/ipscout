@@ -71,8 +71,10 @@ def test_a_family_without_a_default_route_reports_absence_rather_than_raising() 
 
 
 @pytest.mark.os_agnostic
-def test_an_unparseable_destination_is_not_a_route() -> None:
-    assert ipscout.query_route("not-an-address") is None
+def test_an_unparseable_destination_is_refused_rather_than_read_as_no_route() -> None:
+    # None is "this host has no route there"; a typo is not a fact about routing.
+    with pytest.raises(ValueError, match="'not-an-address' is not an IP address literal"):
+        ipscout.query_route("not-an-address")
 
 
 @pytest.mark.os_agnostic
@@ -111,8 +113,8 @@ def _rt_message(*, flags: int, addrs: int, payload: bytes, pid: int = 4242, seq:
 
     header = bsdroute.RT_MSGHDR.pack(
         bsdroute.RT_MSGHDR.size + len(payload),
-        macos._RTM_VERSION,
-        macos._RTM_GET,
+        bsdroute.RTM_VERSION,
+        bsdroute.RTM_GET,
         index,
         flags,
         addrs,

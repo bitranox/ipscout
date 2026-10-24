@@ -25,9 +25,13 @@ import struct
 __all__ = [
     "ETHERNET",
     "ETHERNET_HEADER_SIZE",
+    "FRAME_RECEIVE_SIZE",
+    "HTYPE_ETHERNET",
     "build_arp_request",
     "build_neighbour_solicitation",
+    "format_hardware_address",
     "format_mac",
+    "normalise_mac",
     "parse_arp_reply",
     "parse_neighbour_advertisement",
     "solicited_node_multicast",
@@ -44,7 +48,7 @@ BROADCAST = b"\xff" * 6
 
 #: ARP: hardware type, protocol type, lengths, operation, then the addresses.
 _ARP = struct.Struct("!HHBBH6s4s6s4s")
-_HTYPE_ETHERNET = 1
+HTYPE_ETHERNET = 1
 _PTYPE_IPV4 = 0x0800
 _HLEN = 6
 _PLEN = 4
@@ -60,9 +64,70 @@ _ND_OPT_TARGET_LINK_ADDRESS = 2
 #: An Ethernet hardware address is six bytes.
 MAC_LENGTH = 6
 
+#: Bytes read for one link-layer frame (an ARP reply, a neighbour
+#: advertisement, a captured DHCP reply). A standard Ethernet frame fits
+#: whole; anything longer is cut, which loses nothing the parsers read.
+FRAME_RECEIVE_SIZE = 2048
+
 #: Header sizes used when bounds-checking a received message.
 _NA_HEADER = 24
 _OPTION_UNIT = 8
+
+
+#: Separators seen in written hardware addresses: colons, hyphens, and the
+#: dotted form Cisco equipment uses.
+_SEPARATORS = str.maketrans("", "", ":-.")
+
+
+def normalise_mac(mac: str) -> str | None:
+    """Return a hardware address in one canonical form for comparison.
+
+    Args:
+        mac: An address in any common written form - ``aa:bb:cc:dd:ee:ff``,
+            ``AA-BB-CC-DD-EE-FF`` or ``aabb.ccdd.eeff``.
+
+    Returns:
+        The lowercase colon-separated form, or ``None`` when the input is not
+        an Ethernet address at all.
+
+    Examples:
+        >>> normalise_mac("AA-BB-CC-DD-EE-FF")
+        'aa:bb:cc:dd:ee:ff'
+        >>> normalise_mac("aabb.ccdd.eeff")
+        'aa:bb:cc:dd:ee:ff'
+        >>> normalise_mac("nonsense") is None
+        True
+
+    """
+
+    digits = mac.translate(_SEPARATORS).lower()
+    if len(digits) != 2 * MAC_LENGTH or any(character not in "0123456789abcdef" for character in digits):
+        return None
+    return ":".join(digits[index : index + 2] for index in range(0, 2 * MAC_LENGTH, 2))
+
+
+def format_hardware_address(raw: bytes) -> str | None:
+    """Return a hardware address of any length as colon-separated lowercase hex.
+
+    Interfaces report addresses other than six-byte Ethernet ones (a Windows
+    adapter up to eight bytes, an InfiniBand port twenty), so only the
+    rendering is shared here; :func:`format_mac` adds the Ethernet length.
+
+    Returns:
+        The text form, or None for an empty or all-zero address, which no
+        interface reports for a real one.
+
+    Examples:
+        >>> format_hardware_address(bytes.fromhex("0011223344556677"))
+        '00:11:22:33:44:55:66:77'
+        >>> format_hardware_address(bytes(8)) is None
+        True
+
+    """
+
+    if not any(raw):
+        return None
+    return ":".join(f"{octet:02x}" for octet in raw)
 
 
 def format_mac(raw: bytes) -> str | None:
@@ -76,9 +141,9 @@ def format_mac(raw: bytes) -> str | None:
 
     """
 
-    if len(raw) != MAC_LENGTH or not any(raw):
+    if len(raw) != MAC_LENGTH:
         return None
-    return ":".join(f"{octet:02x}" for octet in raw)
+    return format_hardware_address(raw)
 
 
 def _packed_mac(mac: str) -> bytes:
@@ -110,7 +175,7 @@ def build_arp_request(*, sender_mac: str, sender_ip: str, target_ip: str) -> byt
 
     sender = _packed_mac(sender_mac)
     body = _ARP.pack(
-        _HTYPE_ETHERNET,
+        HTYPE_ETHERNET,
         _PTYPE_IPV4,
         _HLEN,
         _PLEN,
@@ -151,7 +216,7 @@ def parse_arp_reply(frame: bytes, target_ip: str) -> str | None:
         return None
 
     htype, ptype, hlen, plen, operation, sender_mac, sender_ip, _tha, _tpa = _ARP.unpack(frame[ETHERNET.size : ETHERNET.size + _ARP.size])
-    if (htype, ptype, hlen, plen, operation) != (_HTYPE_ETHERNET, _PTYPE_IPV4, _HLEN, _PLEN, ARP_REPLY):
+    if (htype, ptype, hlen, plen, operation) != (HTYPE_ETHERNET, _PTYPE_IPV4, _HLEN, _PLEN, ARP_REPLY):
         return None
     # struct "4s" always yields four bytes, so this conversion cannot fail.
     if socket.inet_ntoa(sender_ip) != target_ip:

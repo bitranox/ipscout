@@ -28,10 +28,10 @@ import socket
 from typing import TYPE_CHECKING, NamedTuple
 
 from .errors import IPScoutResolutionError
-from .models import AddressFamily
+from .models import AddressFamily, needs_zone
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 __all__ = [
     "ResolvedTarget",
@@ -49,6 +49,9 @@ __all__ = [
 #: ``(protocol, address)``, is in the signature for families this never asks
 #: for, and is carried here so the union matches rather than being cast away.
 _SockAddr = tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes]
+
+#: One ``getaddrinfo`` result: family, socket kind, protocol, canonical name, sockaddr.
+_AddrInfo = tuple[socket.AddressFamily, socket.SocketKind, int, str, _SockAddr]
 
 #: An ``AF_INET6`` sockaddr is four fields to an ``AF_INET`` one's two, so its
 #: length is also what tells the two families apart.
@@ -208,7 +211,33 @@ def _with_zone(sockaddr: _SockAddr, written_zone: str | None) -> str:
         return f"{address}%{scope}"
 
 
-def _refuse_a_link_local_address_with_no_zone(target: str, address: str) -> None:
+class ResolvedTarget(NamedTuple):
+    """The single address a probe should use, and the family it belongs to.
+
+    A ``NamedTuple`` rather than a pydantic model on purpose: it was a plain
+    ``(address, family)`` tuple first, and callers unpack it, index it and
+    compare it with tuples. A NamedTuple keeps every one of those working while
+    letting new code name the fields instead of remembering their order.
+
+    Attributes:
+        address: The address literal, with its ``%zone`` suffix when it has one.
+        family: The family of ``address``, decided once here so no later stage
+            has to infer it.
+
+    Examples:
+        >>> target = ResolvedTarget("127.0.0.1", AddressFamily.IPV4)
+        >>> target.address, target.family is AddressFamily.IPV4
+        ('127.0.0.1', True)
+        >>> target == ("127.0.0.1", AddressFamily.IPV4)
+        True
+
+    """
+
+    address: str
+    family: AddressFamily
+
+
+def _refuse_a_link_local_address_with_no_zone(target: str, resolved: ResolvedTarget) -> None:
     """Raise when an address cannot be sent anywhere for want of an interface.
 
     A link-local address is only unique on one link, so without a zone the
@@ -217,14 +246,11 @@ def _refuse_a_link_local_address_with_no_zone(target: str, address: str) -> None
     thing this library refuses to let a setup problem look like.
     """
 
-    bare, zone = split_zone(address)
-    if zone is not None:
+    if resolved.family is not AddressFamily.IPV6:
         return
-    try:
-        parsed = ipaddress.ip_address(bare)
-    except ValueError:  # pragma: no cover - the address came from getaddrinfo
-        return
-    if parsed.version != AddressFamily.IPV6.ip_version or not parsed.is_link_local:
+    bare, zone = split_zone(resolved.address)
+    # The text came from getaddrinfo as an AF_INET6 result, so it parses.
+    if zone is not None or not needs_zone(ipaddress.IPv6Address(bare)):
         return
     msg = f"{target!r} is a link-local address, which needs the interface to send on: write it as {bare}%<interface>"
     raise IPScoutResolutionError(msg)
@@ -268,16 +294,26 @@ def _refuse_a_malformed_zone(target: str) -> None:
         raise IPScoutResolutionError(msg) from exc
 
 
-def _dedupe(items: Iterable[str]) -> list[str]:
-    """Return items with duplicates removed, first occurrence order kept."""
+def _dedupe(items: Iterable[ResolvedTarget]) -> list[ResolvedTarget]:
+    """Return items with repeated addresses removed, first occurrence order kept."""
 
     seen: set[str] = set()
-    ordered: list[str] = []
+    ordered: list[ResolvedTarget] = []
     for item in items:
-        if item not in seen:
-            seen.add(item)
+        if item.address not in seen:
+            seen.add(item.address)
             ordered.append(item)
     return ordered
+
+
+def _resolved_targets(infos: Iterable[_AddrInfo], written_zone: str | None) -> Iterator[ResolvedTarget]:
+    """Yield each ``getaddrinfo`` result as its address text and the family it came with."""
+
+    # Only AF_INET and AF_INET6 are ever asked for, so a result that is not
+    # the one is the other.
+    for socket_family, _kind, _proto, _canonname, sockaddr in infos:
+        family = AddressFamily.IPV6 if socket_family == AddressFamily.IPV6.socket_family else AddressFamily.IPV4
+        yield ResolvedTarget(_with_zone(sockaddr, written_zone), family)
 
 
 def _no_address_of_family(target: str, family: AddressFamily) -> IPScoutResolutionError:
@@ -323,6 +359,16 @@ def resolve(target: str, *, family: AddressFamily | None = None) -> list[str]:
 
     """
 
+    return [resolved.address for resolved in _resolve(target, family=family)]
+
+
+def _resolve(target: str, *, family: AddressFamily | None) -> list[ResolvedTarget]:
+    """Return each address ``target`` resolves to, with the family the resolver gave it.
+
+    The family is the one ``getaddrinfo`` reports beside each address, so no
+    later stage parses the text again to rediscover it.
+    """
+
     # A blank target is a caller mistake, but resolvers disagree about it:
     # Windows happily resolves "" to the local host, so is_reachable("") would
     # answer True. Reject it here so every platform agrees.
@@ -360,37 +406,11 @@ def resolve(target: str, *, family: AddressFamily | None = None) -> list[str]:
         msg = f"cannot resolve {target!r}: {exc.strerror or exc}"
         raise IPScoutResolutionError(msg) from exc
 
-    addresses = _dedupe(_with_zone(info[4], written_zone) for info in infos)
+    addresses = _dedupe(_resolved_targets(infos, written_zone))
     if not addresses:
         msg = f"{target!r} resolved to no usable address"
         raise IPScoutResolutionError(msg)
     return addresses
-
-
-class ResolvedTarget(NamedTuple):
-    """The single address a probe should use, and the family it belongs to.
-
-    A ``NamedTuple`` rather than a pydantic model on purpose: it was a plain
-    ``(address, family)`` tuple first, and callers unpack it, index it and
-    compare it with tuples. A NamedTuple keeps every one of those working while
-    letting new code name the fields instead of remembering their order.
-
-    Attributes:
-        address: The address literal, with its ``%zone`` suffix when it has one.
-        family: The family of ``address``, decided once here so no later stage
-            has to infer it.
-
-    Examples:
-        >>> target = ResolvedTarget("127.0.0.1", AddressFamily.IPV4)
-        >>> target.address, target.family is AddressFamily.IPV4
-        ('127.0.0.1', True)
-        >>> target == ("127.0.0.1", AddressFamily.IPV4)
-        True
-
-    """
-
-    address: str
-    family: AddressFamily
 
 
 def resolve_one(target: str, *, family: AddressFamily | None = None) -> ResolvedTarget:
@@ -416,20 +436,9 @@ def resolve_one(target: str, *, family: AddressFamily | None = None) -> Resolved
 
     """
 
-    address = resolve(target, family=family)[0]
-    _refuse_a_link_local_address_with_no_zone(target, address)
-    resolved = family_of(address)
-    if resolved is None:  # pragma: no cover - every way of getting here is refused by name in resolve()
-        # A backstop, not a diagnosis. Every known way to produce an address
-        # this cannot classify is a malformed zone, and each of those is
-        # refused in resolve() with a message naming the specific mistake; the
-        # comment here used to claim the case was impossible, which was how
-        # four real inputs came to share one useless message. If this ever
-        # fires, the input that reached it belongs in _refuse_a_malformed_zone
-        # with a message of its own.
-        msg = f"{target!r} resolved to {address!r}, which is not an address this host can use, and no more specific reason was recognised - please report it"
-        raise IPScoutResolutionError(msg)
-    return ResolvedTarget(address, resolved)
+    resolved = _resolve(target, family=family)[0]
+    _refuse_a_link_local_address_with_no_zone(target, resolved)
+    return resolved
 
 
 def reverse_dns(ip: str) -> str | None:

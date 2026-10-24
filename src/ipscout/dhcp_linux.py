@@ -39,8 +39,9 @@ import contextlib
 import socket
 import struct
 
-from .arp import ETH_P_IP
+from .arp import ETH_P_IP, FRAME_RECEIVE_SIZE
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
+from .ports import CAPTURE_RECEIVE_BUFFER, MIN_CAPTURE_WAIT
 
 __all__ = ["PACKET_MREQ", "PacketSocketCapture", "capture_available", "open_capture"]
 
@@ -55,15 +56,6 @@ PACKET_MREQ = struct.Struct("=iHH8s")
 SOL_PACKET = 263
 PACKET_ADD_MEMBERSHIP = 1
 PACKET_MR_PROMISC = 1
-
-#: Large enough for any Ethernet frame, so nothing is ever read in halves.
-_RECEIVE_SIZE = 2048
-
-#: Asked for, not required. The kernel doubles it for bookkeeping and clamps it
-#: to net.core.rmem_max, so the value that sticks is frequently smaller. It is
-#: a cushion against a burst arriving between two reads, never a correctness
-#: dependency, so failing to set it is not a failure to capture.
-_RECEIVE_BUFFER = 1 << 20
 
 
 def _af_packet() -> int:
@@ -136,9 +128,9 @@ class PacketSocketCapture:
     def receive(self, *, timeout: float) -> bytes | None:
         """Return the next frame, or None when none arrived in ``timeout``."""
 
-        self._socket.settimeout(max(0.001, timeout))
+        self._socket.settimeout(max(MIN_CAPTURE_WAIT, timeout))
         try:
-            return self._socket.recv(_RECEIVE_SIZE)
+            return self._socket.recv(FRAME_RECEIVE_SIZE)
         except TimeoutError:
             return None
         except OSError:
@@ -203,7 +195,7 @@ def open_capture(interface: str, *, promiscuous: bool = True) -> PacketSocketCap
     # Best effort, never fatal: the kernel clamps this and a smaller buffer
     # still captures, it just tolerates a shorter burst between reads.
     with contextlib.suppress(OSError):
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _RECEIVE_BUFFER)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, CAPTURE_RECEIVE_BUFFER)
 
     if promiscuous:
         try:

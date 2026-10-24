@@ -28,7 +28,19 @@ from pydantic import BaseModel, ConfigDict
 if TYPE_CHECKING:
     from types import TracebackType
 
-__all__ = ["AsyncEchoTransport", "EchoResult", "EchoTransport", "PacketCapture"]
+__all__ = ["CAPTURE_RECEIVE_BUFFER", "MIN_CAPTURE_WAIT", "AsyncEchoTransport", "EchoResult", "EchoTransport", "PacketCapture"]
+
+#: The socket receive buffer a capture asks for. Asked for, not required: the
+#: kernel may double it for bookkeeping and clamp it (Linux: net.core.rmem_max),
+#: so the value that sticks is often smaller. It is a cushion against a burst
+#: arriving between two reads, never a correctness dependency, so failing to set
+#: it is not a failure to capture.
+CAPTURE_RECEIVE_BUFFER = 1 << 20
+
+#: The shortest wait one capture read makes. A zero timeout would turn a
+#: blocking socket non-blocking (or make select return at once), so a caller's
+#: "no time left" still waits this long rather than changing the socket's mode.
+MIN_CAPTURE_WAIT = 0.001
 
 
 class EchoResult(BaseModel):

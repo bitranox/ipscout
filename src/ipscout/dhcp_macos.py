@@ -49,6 +49,7 @@ from collections import deque
 
 from .bpf import BIOCGDLT, DLT_EN10MB, iter_bpf_frames, open_bpf_device
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
+from .ports import MIN_CAPTURE_WAIT
 from .unixio import fcntl_module
 
 __all__ = ["BpfCapture", "capture_available", "open_capture"]
@@ -132,7 +133,7 @@ class BpfCapture:
         if self._pending:
             return self._pending.popleft()
         try:
-            readable, _writable, _failed = select.select([self._descriptor], [], [], max(0.001, timeout))
+            readable, _writable, _failed = select.select([self._descriptor], [], [], max(MIN_CAPTURE_WAIT, timeout))
             if not readable:
                 return None
             # The read size must be exactly the kernel's buffer length; a

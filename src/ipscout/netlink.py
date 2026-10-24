@@ -2,6 +2,7 @@
 
 Contents:
     open_socket: A NETLINK_ROUTE socket, or None where there is none.
+    RECEIVE_SIZE: The read size that holds any one reply chunk whole.
     build_message: Wrap a request body in an ``nlmsghdr``.
     iter_messages: Walk the messages in one received chunk.
     iter_attributes: Walk the ``rtattr`` list trailing a message body.
@@ -35,6 +36,7 @@ __all__ = [
     "NLM_F_DUMP",
     "NLM_F_REPLACE",
     "NLM_F_REQUEST",
+    "RECEIVE_SIZE",
     "aligned",
     "build_attribute",
     "build_message",
@@ -59,6 +61,14 @@ NLM_F_CREATE = 0x400
 
 NLMSG_ERROR = 0x02
 NLMSG_DONE = 0x03
+
+#: Bytes asked for on every read from a netlink socket. The kernel fills one
+#: dump chunk up to 32 KiB (``netlink_dump`` caps its buffer there) and an
+#: acknowledgement or single reply is far smaller, so this holds any one chunk
+#: whole; a smaller buffer would truncate a chunk and drop the entries cut off.
+#: It equals ``packet.MAX_IP_LENGTH`` by value only: a netlink chunk is not an
+#: IP datagram, and neither bound would follow if the other changed.
+RECEIVE_SIZE = 65535
 
 #: struct nlmsghdr: length, type, flags, sequence, port id.
 NLMSGHDR = struct.Struct("=IHHII")

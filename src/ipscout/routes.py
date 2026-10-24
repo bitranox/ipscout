@@ -20,7 +20,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, Protocol
 
-from .models import AddressFamily
+from .models import AddressFamily, require_address
 from .resolve import split_zone
 
 if TYPE_CHECKING:
@@ -66,20 +66,34 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
     Args:
         destination: The address to look up. A literal, not a name: routing is
             a per-address question and resolving here would hide which of a
-            name's addresses the answer describes.
+            name's addresses the answer describes. An IPv6 literal may carry
+            its ``%zone``; the lookup itself is made for the bare address.
         family: Which address family the destination belongs to.
 
     Returns:
         The route, or ``None`` when this host has none to that destination, or
         when the platform cannot answer.
 
+    Raises:
+        ValueError: ``destination`` is not an address literal, or is one of
+            the other family. Each backend would read either as "no route",
+            the same ``None`` an unrouted address gets, so a typo or a missing
+            ``-6`` would look like a network fact.
+
     Examples:
         >>> route = query_route("127.0.0.1")
         >>> route is None or route.gateway is None
         True
+        >>> query_route("::1", AddressFamily.IPV4)
+        Traceback (most recent call last):
+        ...
+        ValueError: '::1' is not an ipv4 address
 
     """
 
+    # Checked whole, zone included, so a zone on an IPv4 literal or an empty
+    # one after the % is refused rather than stripped into something valid.
+    require_address(destination, family)
     # The routing table is asked about an address, not about an address on an
     # interface, and every backend packs the destination with inet_pton, which
     # refuses scoped text. Left in, the refusal is indistinguishable from an

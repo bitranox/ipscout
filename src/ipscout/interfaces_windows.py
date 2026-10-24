@@ -24,17 +24,15 @@ import ctypes
 import socket
 from typing import NamedTuple
 
+from .arp import format_hardware_address
 from .models import AddressFamily, Interface, InterfaceAddress
-from .winapi import family_from_win, iphlpapi
+from .winapi import MAX_ADAPTER_ADDRESS_LENGTH, MS_LAYOUT, NO_ERROR, WIN_AF_UNSPEC, family_from_win, iphlpapi
 
 __all__ = ["list_interfaces"]
 
-#: Return codes from GetAdaptersAddresses.
-_ERROR_SUCCESS = 0
+#: The return code GetAdaptersAddresses gives when the buffer was too small,
+#: having written the size it wants.
 _ERROR_BUFFER_OVERFLOW = 111
-
-#: AF_UNSPEC asks for both families in one pass.
-_AF_UNSPEC = 0
 
 #: Skip the parts of the result this library never reads, which keeps the
 #: buffer small and the call fast.
@@ -48,13 +46,8 @@ _IF_TYPE_LOOPBACK = 24
 #: IfOperStatusUp.
 _OPER_STATUS_UP = 1
 
-#: MAX_ADAPTER_ADDRESS_LENGTH.
-_MAX_ADAPTER_ADDRESS = 8
-
 #: Starting buffer. The API reports the size it wants if this is too small.
 _INITIAL_BUFFER = 15 * 1024
-
-_MS_LAYOUT = "ms"
 
 #: Where each piece of a raw sockaddr ends, read straight off the wire layout:
 #: the two-byte family every sockaddr opens with, then the address field of a
@@ -67,7 +60,7 @@ _IPV6_ADDR = slice(8, 24)
 class _SocketAddress(ctypes.Structure):
     """``SOCKET_ADDRESS``: a pointer to a sockaddr plus its length."""
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("lpSockaddr", ctypes.c_void_p),
         ("iSockaddrLength", ctypes.c_int32),
@@ -77,7 +70,7 @@ class _SocketAddress(ctypes.Structure):
 class _IpAdapterUnicastAddress(ctypes.Structure):
     """``IP_ADAPTER_UNICAST_ADDRESS``, to the prefix-length field."""
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
 
 
 # Only the fields are deferred: a struct that points at itself cannot name its
@@ -100,7 +93,7 @@ _IpAdapterUnicastAddress._fields_ = (
 class _IpAdapterAddresses(ctypes.Structure):
     """``IP_ADAPTER_ADDRESSES``, declared as far as the fields used here."""
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
 
 
 _IpAdapterAddresses._fields_ = (
@@ -117,7 +110,7 @@ _IpAdapterAddresses._fields_ = (
     ("DnsSuffix", ctypes.c_wchar_p),
     ("Description", ctypes.c_wchar_p),
     ("FriendlyName", ctypes.c_wchar_p),
-    ("PhysicalAddress", ctypes.c_uint8 * _MAX_ADAPTER_ADDRESS),
+    ("PhysicalAddress", ctypes.c_uint8 * MAX_ADAPTER_ADDRESS_LENGTH),
     ("PhysicalAddressLength", ctypes.c_uint32),
     ("Flags", ctypes.c_uint32),
     ("Mtu", ctypes.c_uint32),
@@ -174,15 +167,18 @@ def _sockaddr_text(address: _SocketAddress) -> _IpAddress | None:
 
 
 def _mac_text(adapter: _IpAdapterAddresses) -> str | None:
-    """Return the adapter's hardware address, or None when it has none."""
+    """Return the adapter's hardware address, or None when it has none.
 
+    An adapter with no link layer (loopback, most tunnels) reports a zero
+    length or an all-zero address; both read as None.
+    """
+
+    # The declared length is the API's word; a value past the buffer is not
+    # an address, and slicing to it would silently report the buffer's eight.
     length = int(adapter.PhysicalAddressLength)
-    if not 1 <= length <= _MAX_ADAPTER_ADDRESS:
+    if length > MAX_ADAPTER_ADDRESS_LENGTH:
         return None
-    octets = bytes(adapter.PhysicalAddress[:length])
-    if not any(octets):
-        return None
-    return ":".join(f"{byte:02x}" for byte in octets)
+    return format_hardware_address(bytes(adapter.PhysicalAddress[:length]))
 
 
 def list_interfaces() -> list[Interface]:  # pragma: no cover - Windows only
@@ -208,7 +204,7 @@ def list_interfaces() -> list[Interface]:  # pragma: no cover - Windows only
     flags = _GAA_FLAG_SKIP_ANYCAST | _GAA_FLAG_SKIP_MULTICAST | _GAA_FLAG_INCLUDE_PREFIX
     buffer = ctypes.create_string_buffer(size.value)
     result = library.GetAdaptersAddresses(
-        ctypes.c_uint32(_AF_UNSPEC),
+        ctypes.c_uint32(WIN_AF_UNSPEC),
         ctypes.c_uint32(flags),
         None,
         ctypes.cast(buffer, ctypes.c_void_p),
@@ -217,13 +213,13 @@ def list_interfaces() -> list[Interface]:  # pragma: no cover - Windows only
     if result == _ERROR_BUFFER_OVERFLOW:
         buffer = ctypes.create_string_buffer(size.value)
         result = library.GetAdaptersAddresses(
-            ctypes.c_uint32(_AF_UNSPEC),
+            ctypes.c_uint32(WIN_AF_UNSPEC),
             ctypes.c_uint32(flags),
             None,
             ctypes.cast(buffer, ctypes.c_void_p),
             ctypes.byref(size),
         )
-    if result != _ERROR_SUCCESS:
+    if result != NO_ERROR:
         return []
 
     interfaces: list[Interface] = []

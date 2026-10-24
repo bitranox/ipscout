@@ -33,20 +33,33 @@ Note:
 from __future__ import annotations
 
 import ipaddress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from .api import ping_many
-from .errors import IPScoutSweepIncompleteError, IPScoutSweepTooWideError
+from .errors import IPScoutSweepIncompleteError, IPScoutSweepTooWideError, refused_arguments
 from .interfaces import local_interfaces
-from .models import AddressFamily, SweepScope
+from .models import AddressFamily, SweepScope, Timeout
 from .neighbours import neighbours, normalise_mac, of_family
+from .pool import Concurrency
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from .models import Interface, IPNetwork, Neighbour
 
-__all__ = ["DEFAULT_CONCURRENCY", "arp_scan", "find_ip_by_mac", "local_networks", "sweep_scope"]
+__all__ = [
+    "DEFAULT_CONCURRENCY",
+    "MAX_SWEEP_HOSTS",
+    "SweepSettings",
+    "arp_scan",
+    "find_ip_by_mac",
+    "local_networks",
+    "refuse_a_partial_scope",
+    "sweep_argument_refusal",
+    "sweep_scope",
+]
 
 #: The most addresses one sweep covers, counted across every network in it.
 #: A sweep wider than this is a scan of somebody else's network, not of a
@@ -66,6 +79,55 @@ DEFAULT_SWEEP_TIMEOUT = 1.0
 #: Prefix length at which a network stops holding anybody but this host and,
 #: on a /31, its single point-to-point peer.
 POINT_TO_POINT_PREFIX = 31
+
+#: A sweep's address budget: below one it could cover nothing, and every
+#: network would be reported as skipped for being too wide.
+_LIMIT: TypeAdapter[int] = TypeAdapter(Annotated[int, Field(ge=1, strict=True)])
+
+
+class SweepSettings(BaseModel):
+    """How long a sweep waits per probe and how many it keeps in flight, checked once.
+
+    The bounds are declared on the fields, so the check and its documentation
+    cannot drift apart, and the command line reads these same declarations for
+    its options. Strict: ``"1"`` is not a timeout.
+
+    Examples:
+        >>> SweepSettings().concurrency == DEFAULT_CONCURRENCY
+        True
+        >>> SweepSettings(timeout=0)
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    #: Seconds to wait for each probe, under the library's one timeout rule.
+    #: Zero would refuse every probe, and the cache as it already stood would
+    #: come back as though it were the sweep's.
+    timeout: Timeout = DEFAULT_SWEEP_TIMEOUT
+    #: Probes in flight at once, under the pool's one concurrency rule.
+    concurrency: Concurrency = DEFAULT_CONCURRENCY
+
+
+def _settings(*, timeout: float, concurrency: int) -> SweepSettings:
+    """Return the checked settings, or raise one ``ValueError`` naming every bad argument."""
+
+    try:
+        return SweepSettings(timeout=timeout, concurrency=concurrency)
+    except ValidationError as exc:
+        raise refused_arguments("sweep", exc) from exc
+
+
+def _limit(limit: int) -> int:
+    """Return ``limit`` if a sweep can be bounded by it, or raise saying why not."""
+
+    try:
+        return _LIMIT.validate_python(limit)
+    except ValidationError as exc:
+        raise refused_arguments("sweep", exc, field="limit") from exc
 
 
 def local_networks(interfaces: Sequence[Interface] | None = None) -> tuple[ipaddress.IPv4Network, ...]:
@@ -127,7 +189,7 @@ def sweep_scope(network: str | None = None, *, limit: int = MAX_SWEEP_HOSTS, int
     Args:
         network: The CIDR that would be swept. Defaults to the subnets this
             host is attached to, as :func:`local_networks` reports them.
-        limit: The most addresses the sweep may cover in total.
+        limit: The most addresses the sweep may cover in total. At least 1.
         interfaces: The interfaces the default set comes from. Ignored when
             ``network`` names one.
 
@@ -136,6 +198,9 @@ def sweep_scope(network: str | None = None, *, limit: int = MAX_SWEEP_HOSTS, int
         ones reported first. Asking before sweeping is what lets a caller
         decide with the same facts the sweep will use, rather than inferring
         coverage from the result.
+
+    Raises:
+        ValueError: ``limit`` is below 1, or ``network`` is not a network.
 
     Note:
         The result is what :func:`arp_scan` and :func:`find_ip_by_mac` accept as
@@ -150,7 +215,7 @@ def sweep_scope(network: str | None = None, *, limit: int = MAX_SWEEP_HOSTS, int
 
     """
 
-    return SweepScope.from_networks(_targets(network, interfaces), limit=limit)
+    return SweepScope.from_networks(_targets(network, interfaces), limit=_limit(limit))
 
 
 def _plan(network: str | None, scope: SweepScope | None) -> SweepScope:
@@ -169,20 +234,46 @@ def _plan(network: str | None, scope: SweepScope | None) -> SweepScope:
     return scope
 
 
-def _refuse_a_sweep_argument_without_a_sweep(*, scan: bool, network: str | None, scope: SweepScope | None) -> None:
-    """Raise when ground to sweep was named but no sweep was asked for.
+def sweep_argument_refusal(*, scan: bool, named: str | None, scan_flag: str = "scan=True") -> str | None:
+    """Return why ground to sweep was named without a sweep, or None when that is not the case.
 
     Ignoring the argument would answer from the cache alone while the caller
     believes that ground was covered - the same wrong confidence this module
     refuses everywhere else, and harder to notice, because nothing conflicts
-    and nothing is printed.
+    and nothing is printed. One rule and one wording for every surface; each
+    names the argument and the flag in its own vocabulary.
+
+    Args:
+        scan: Whether a sweep was asked for.
+        named: The name of the argument that names ground to sweep, as the
+            caller spelled it, or None when no such argument was given.
+        scan_flag: How the caller asks for a sweep.
+
+    Returns:
+        The refusal to raise, or None when the call is fine.
+
+    Examples:
+        >>> sweep_argument_refusal(scan=False, named="--network", scan_flag="--scan")
+        '--network applies only with --scan; without it only the existing neighbour cache is searched'
+        >>> sweep_argument_refusal(scan=True, named="network") is None
+        True
+
     """
 
-    if scan or (network is None and scope is None):
-        return
-    named = "network" if scope is None else "scope"
-    msg = f"{named} applies only with scan=True; without it only the existing neighbour cache is searched"
-    raise ValueError(msg)
+    if scan or named is None:
+        return None
+    return f"{named} applies only with {scan_flag}; without it only the existing neighbour cache is searched"
+
+
+def _too_wide(candidates: Sequence[IPNetwork], limit: int) -> IPScoutSweepTooWideError:
+    """Return the refusal naming each network and its size against the budget.
+
+    The sizes are named because passing a narrower network is the remedy and
+    it cannot be chosen blind.
+    """
+
+    sizes = ", ".join(f"{item} holds {item.num_addresses} addresses" for item in candidates)
+    return IPScoutSweepTooWideError(f"{sizes}, more than the {limit} this will sweep; pass a narrower network")
 
 
 def _refuse_an_empty_scope(scope: SweepScope) -> None:
@@ -190,15 +281,41 @@ def _refuse_an_empty_scope(scope: SweepScope) -> None:
 
     Every candidate being too wide is not a partial sweep, it is no sweep, and
     silently reading the cache instead would answer a question nobody asked.
-    The message names each refused network and its size, because passing a
-    narrower one is the remedy and it cannot be chosen blind.
     """
 
     if scope.networks or not scope.skipped:
         return
-    sizes = ", ".join(f"{item} holds {item.num_addresses} addresses" for item in scope.skipped)
-    msg = f"{sizes}, more than the {scope.limit} this will sweep; pass a narrower network"
-    raise IPScoutSweepTooWideError(msg)
+    raise _too_wide(scope.skipped, scope.limit)
+
+
+def refuse_a_partial_scope(scope: SweepScope) -> None:
+    """Raise unless ``scope`` covers every network it was built from.
+
+    For a caller that cannot use part of what was asked for - one that probes
+    each named network's hosts directly rather than reporting coverage - a
+    skipped network is not a gap to note but a request it cannot carry out.
+
+    Args:
+        scope: The plan, as :meth:`SweepScope.from_networks` or
+            :func:`sweep_scope` built it.
+
+    Raises:
+        IPScoutSweepTooWideError: A network was left out. The message names
+            every network and its size, with the budget, in the same words a
+            sweep with nothing left to cover uses.
+
+    Examples:
+        >>> refuse_a_partial_scope(SweepScope.from_networks(["192.0.2.0/24"], limit=4096))
+        >>> refuse_a_partial_scope(SweepScope.from_networks(["198.18.0.0/15"], limit=4096))
+        Traceback (most recent call last):
+        ...
+        ipscout.errors.IPScoutSweepTooWideError: 198.18.0.0/15 holds 131072 addresses, more than the 4096 this will sweep; pass a narrower network
+
+    """
+
+    if not scope.skipped:
+        return
+    raise _too_wide((*scope.networks, *scope.skipped), scope.limit)
 
 
 def _refuse_a_partial_miss(mac: str, scope: SweepScope) -> None:
@@ -299,7 +416,9 @@ def arp_scan(
             this will sweep, so there is nothing left to probe. Also a
             ``ValueError``, as this has always raised.
         ValueError: Both ``network`` and ``scope`` were given, which would
-            leave a silent precedence rule deciding what got swept.
+            leave a silent precedence rule deciding what got swept, or
+            ``timeout`` is not above 0 and at most ``MAX_TIMEOUT``, or ``concurrency`` is
+            below 1. The arguments are checked before anything is probed.
 
     Note:
         The sweep is what makes this different from :func:`neighbours`, which
@@ -311,9 +430,10 @@ def arp_scan(
 
     """
 
+    settings = _settings(timeout=timeout, concurrency=concurrency)
     plan = _plan(network, scope)
     _refuse_an_empty_scope(plan)
-    return of_family(_sweep(plan, concurrency=concurrency, timeout=timeout), family)
+    return of_family(_sweep(plan, concurrency=settings.concurrency, timeout=settings.timeout), family)
 
 
 def find_ip_by_mac(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful
@@ -356,8 +476,8 @@ def find_ip_by_mac(  # noqa: PLR0913 - public API: every knob is keyword-only an
 
     Raises:
         ValueError: The hardware address is not one, both ``network`` and
-            ``scope`` were given, or one of them was given without ``scan``,
-            where it would have been ignored.
+            ``scope`` were given, one of them was given without ``scan``,
+            where it would have been ignored, or ``concurrency`` is below 1.
         IPScoutSweepTooWideError: Nothing was left to sweep at all.
         IPScoutSweepIncompleteError: The sweep skipped a network and matched
             nothing in what it did cover, so no answer can be given: "not
@@ -375,13 +495,17 @@ def find_ip_by_mac(  # noqa: PLR0913 - public API: every knob is keyword-only an
         msg = f"not a hardware address: {mac!r}"
         raise ValueError(msg)
 
-    _refuse_a_sweep_argument_without_a_sweep(scan=scan, network=network, scope=scope)
+    settings = _settings(timeout=DEFAULT_SWEEP_TIMEOUT, concurrency=concurrency)
+    named = None if network is None and scope is None else "network" if scope is None else "scope"
+    refusal = sweep_argument_refusal(scan=scan, named=named)
+    if refusal is not None:
+        raise ValueError(refusal)
     if not scan:
         return _matching(of_family(neighbours(), family), wanted)
 
     plan = _plan(network, scope)
     _refuse_an_empty_scope(plan)
-    swept = of_family(_sweep(plan, concurrency=concurrency, timeout=DEFAULT_SWEEP_TIMEOUT), family)
+    swept = of_family(_sweep(plan, concurrency=settings.concurrency, timeout=settings.timeout), family)
     found = _matching(swept, wanted)
     if not found:
         _refuse_a_partial_miss(mac, plan)

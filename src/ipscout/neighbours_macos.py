@@ -35,6 +35,7 @@ import socket
 import time
 
 from .arp import (
+    FRAME_RECEIVE_SIZE,
     build_arp_request,
     build_neighbour_solicitation,
     parse_arp_reply,
@@ -45,6 +46,7 @@ from .bpf import BpfDevice, iter_bpf_frames, open_bpf_device
 from .bsdroute import (
     CTL_NET,
     NET_RT_FLAGS,
+    NO_METRICS,
     PF_ROUTE,
     RT_MSGHDR,
     RTA_DST,
@@ -58,6 +60,7 @@ from .bsdroute import (
     RTV_EXPIRE,
     address_of,
     link_address_of,
+    open_route_socket,
     pack_sockaddr_dl,
     pack_sockaddr_in,
     roundup,
@@ -65,7 +68,7 @@ from .bsdroute import (
     sysctl,
 )
 from .errors import IPScoutError, IPScoutPermissionError
-from .models import AddressFamily, Neighbour, NeighbourChange, NeighbourState
+from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState
 
 __all__ = [
     "build_add_message",
@@ -187,7 +190,7 @@ def _permission_error(exc: OSError) -> IPScoutPermissionError:
 
 
 def resolve_active_ipv4(
-    target_ip: str, *, interface: str, source_ip: str, source_mac: str, timeout: float = 2.0
+    target_ip: str, *, interface: str, source_ip: str, source_mac: str, timeout: float = DEFAULT_TIMEOUT
 ) -> str | None:  # pragma: no cover - macOS only
     """Send a real ARP request over BPF and return what answers.
 
@@ -233,7 +236,7 @@ def resolve_active_ipv4(
             os.close(descriptor)
 
 
-def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, timeout: float = 2.0) -> str | None:  # pragma: no cover - macOS only
+def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, timeout: float = DEFAULT_TIMEOUT) -> str | None:  # pragma: no cover - macOS only
     """Send an ICMPv6 neighbour solicitation and return what answers.
 
     Args:
@@ -251,13 +254,13 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
     """
 
     try:
-        sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
+        sock = socket.socket(AddressFamily.IPV6.socket_family, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
     except OSError as exc:
         raise IPScoutPermissionError(f"active neighbour discovery needs a raw ICMPv6 socket, which is root-only here: {exc}. {_UNPRIVILEGED_ADVICE}") from exc
 
     try:
         index = socket.if_nametoindex(interface)
-        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, index)
+        sock.setsockopt(AddressFamily.IPV6.ip_option_level, socket.IPV6_MULTICAST_IF, index)
         sock.settimeout(timeout)
         group = solicited_node_multicast(target_ip)
         sock.sendto(build_neighbour_solicitation(sender_mac=source_mac, target_ip=target_ip), (group, 0, 0, index))
@@ -266,7 +269,7 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
         while time.monotonic() < deadline:
             sock.settimeout(max(0.01, deadline - time.monotonic()))
             try:
-                found = parse_neighbour_advertisement(sock.recv(2048), target_ip)
+                found = parse_neighbour_advertisement(sock.recv(FRAME_RECEIVE_SIZE), target_ip)
             except TimeoutError:
                 return None
             if found is not None:
@@ -286,10 +289,6 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
 #: The flags ``arp -s`` sends for a permanent entry, plus RTF_LLINFO, which the
 #: kernel would set on the new entry anyway and which says what it is.
 _STATIC_FLAGS = RTF_HOST | RTF_STATIC | RTF_LLINFO
-
-#: rt_metrics, all zero: with RTV_EXPIRE in rtm_inits that is an expiry of
-#: "never".
-_NO_METRICS = bytes(56)
 
 
 def build_add_message(ip: str, mac: bytes, ifindex: int, *, pid: int, seq: int) -> bytes:
@@ -359,7 +358,7 @@ def _header(message_type: int, addrs: int, payload_length: int, *, pid: int, seq
         0,
         0,
         RTV_EXPIRE,
-        _NO_METRICS,
+        NO_METRICS,
     )
 
 
@@ -424,9 +423,8 @@ def _route_write(message: bytes) -> int:  # pragma: no cover - macOS only
     no reply to read for the verdict.
     """
 
-    af_route = getattr(socket, "AF_ROUTE", PF_ROUTE)
     try:
-        sock = socket.socket(af_route, socket.SOCK_RAW, 0)
+        sock = open_route_socket()
     except OSError as exc:
         return exc.errno or errno.EIO
     try:

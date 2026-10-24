@@ -24,12 +24,14 @@ import contextlib
 import socket
 import struct
 
-from .models import AddressFamily, RouteInfo
+from .models import DEFAULT_TIMEOUT, AddressFamily, RouteInfo
 from .netlink import (
     NLM_F_DUMP,
     NLM_F_REQUEST,
     NLMSG_DONE,
     NLMSG_ERROR,
+    RECEIVE_SIZE,
+    build_attribute,
     build_message,
     iter_attributes,
     iter_messages,
@@ -69,8 +71,7 @@ def _build_query(packed_destination: bytes, family: AddressFamily) -> bytes:
     """Build the RTM_GETROUTE message asking about one destination."""
 
     body = _RTMSG.pack(family.socket_family, len(packed_destination) * 8, 0, 0, 0, 0, 0, 0, 0)
-    attribute = struct.pack("=HH", 4 + len(packed_destination), _RTA_DST) + packed_destination
-    return build_message(_RTM_GETROUTE, NLM_F_REQUEST, body + attribute)
+    return build_message(_RTM_GETROUTE, NLM_F_REQUEST, body + build_attribute(_RTA_DST, packed_destination))
 
 
 def _build_dump(family: AddressFamily) -> bytes:
@@ -143,9 +144,9 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
         return None
 
     try:
-        sock.settimeout(2.0)
+        sock.settimeout(DEFAULT_TIMEOUT)
         sock.send(_build_query(packed, family))
-        data = sock.recv(65535)
+        data = sock.recv(RECEIVE_SIZE)
     except OSError:
         return None
     finally:
@@ -201,12 +202,12 @@ def default_gateway(family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | N
         return None
 
     try:
-        sock.settimeout(2.0)
+        sock.settimeout(DEFAULT_TIMEOUT)
         sock.send(_build_dump(family))
         # A dump arrives as several multipart messages; read until the default
         # route turns up or the kernel says it is done.
         for _ in range(_MAX_DUMP_CHUNKS):
-            route = _default_route_in(sock.recv(65535), family)
+            route = _default_route_in(sock.recv(RECEIVE_SIZE), family)
             if route is not None:
                 return route
     except OSError:

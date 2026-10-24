@@ -9,6 +9,7 @@ Contents:
     WindowsEchoTransport: Synchronous transport.
     AsyncWindowsEchoTransport: Executor-backed asyncio transport.
     ipv6_destination: The ``SOCKADDR_IN6`` an IPv6 echo is sent to.
+    echo_outcome: An ``IP_STATUS`` plus timings, as a transport result.
 
 Two honest limitations, stated rather than hidden:
 
@@ -49,7 +50,7 @@ from .resolve import split_zone, zone_index
 if TYPE_CHECKING:
     from types import TracebackType
 
-__all__ = ["AsyncWindowsEchoTransport", "WindowsEchoTransport", "ipv6_destination", "windows_icmp_available"]
+__all__ = ["AsyncWindowsEchoTransport", "WindowsEchoTransport", "echo_outcome", "ipv6_destination", "windows_icmp_available"]
 
 #: Threads serving the async variant. Bounded, because each in-flight probe
 #: occupies one for the duration of its timeout.
@@ -99,6 +100,42 @@ def ipv6_destination(address: str) -> winapi.SOCKADDR_IN6:
     return winapi.sockaddr_in6(packed, scope_id=zone_index(zone) if zone is not None else 0)
 
 
+def echo_outcome(status: winapi.IpStatus | None, *, elapsed_ms: float, api_rtt_ms: int, source: str) -> EchoResult:
+    """Turn a decoded ``IP_STATUS`` plus timings into a transport-level result.
+
+    Prefers the measured elapsed time over the API's own figure, which is
+    quantised to whole milliseconds and so reports 0 for anything on a LAN.
+
+    Args:
+        status: The reply's status as :meth:`~ipscout.winapi.IpStatus.parse`
+            decoded it; ``None`` for a code with no member.
+        elapsed_ms: Wall time measured around the call.
+        api_rtt_ms: The round-trip time the API reported.
+        source: The address the reply came from.
+
+    Returns:
+        An answered result for ``SUCCESS``, an expired-hop result for
+        ``TTL_EXPIRED_TRANSIT``, and an unanswered one for every other status,
+        an unlisted code included.
+
+    Examples:
+        >>> echo_outcome(winapi.IpStatus.SUCCESS, elapsed_ms=1.5, api_rtt_ms=1, source="192.0.2.1").rtt_ms
+        1.5
+        >>> echo_outcome(None, elapsed_ms=1.5, api_rtt_ms=1, source="192.0.2.1").rtt_ms is None
+        True
+
+    """
+
+    measured = elapsed_ms if elapsed_ms > 0 else float(api_rtt_ms)
+    if status is winapi.IpStatus.SUCCESS:
+        return EchoResult(rtt_ms=measured, source=source)
+    if status is winapi.IpStatus.TTL_EXPIRED_TRANSIT:
+        # A router answered. Not a reply to ping, but exactly what
+        # traceroute needs, so it is reported rather than discarded.
+        return EchoResult(rtt_ms=measured, source=source, ttl_expired=True)
+    return EchoResult()
+
+
 class WindowsEchoTransport:
     """Send ICMP echoes through ``iphlpapi.dll``.
 
@@ -141,7 +178,7 @@ class WindowsEchoTransport:
 
     @property
     def supports_ttl_discovery(self) -> bool:
-        """Return True: the API reports IP_TTL_EXPIRED_TRANSIT with the router."""
+        """Return True: the API reports ``IpStatus.TTL_EXPIRED_TRANSIT`` with the router."""
 
         return True
 
@@ -209,7 +246,8 @@ class WindowsEchoTransport:
 
         reply = ctypes.cast(reply_buffer, ctypes.POINTER(winapi.ICMP_ECHO_REPLY)).contents
         source = winapi.ipv4_to_string(reply.Address)
-        return self._interpret(reply.Status, elapsed_ms, reply.RoundTripTime, source)
+        status = winapi.IpStatus.parse(int(reply.Status))
+        return echo_outcome(status, elapsed_ms=elapsed_ms, api_rtt_ms=int(reply.RoundTripTime), source=source)
 
     def _probe_v6(self, payload: bytes, timeout_ms: int, ttl: int | None) -> EchoResult:  # pragma: no cover - Windows only
         """Issue an IPv6 echo through ``Icmp6SendEcho2``."""
@@ -243,24 +281,8 @@ class WindowsEchoTransport:
 
         reply = ctypes.cast(reply_buffer, ctypes.POINTER(winapi.ICMPV6_ECHO_REPLY)).contents
         source = winapi.ipv6_words_to_string(reply.Address.sin6_addr)
-        return self._interpret(reply.Status, elapsed_ms, reply.RoundTripTime, source)
-
-    @staticmethod
-    def _interpret(status: int, elapsed_ms: float, api_rtt_ms: int, source: str) -> EchoResult:  # pragma: no cover - Windows only
-        """Turn an ``IP_STATUS`` plus timings into a transport-level result.
-
-        Prefers the measured elapsed time over the API's own figure, which is
-        quantised to whole milliseconds and so reports 0 for anything on a LAN.
-        """
-
-        measured = elapsed_ms if elapsed_ms > 0 else float(api_rtt_ms)
-        if status == winapi.IP_SUCCESS:
-            return EchoResult(rtt_ms=measured, source=source)
-        if status == winapi.IP_TTL_EXPIRED_TRANSIT:
-            # A router answered. Not a reply to ping, but exactly what
-            # traceroute needs, so it is reported rather than discarded.
-            return EchoResult(rtt_ms=measured, source=source, ttl_expired=True)
-        return EchoResult()
+        status = winapi.IpStatus.parse(int(reply.Status))
+        return echo_outcome(status, elapsed_ms=elapsed_ms, api_rtt_ms=int(reply.RoundTripTime), source=source)
 
     def close(self) -> None:
         """Release the ICMP handle."""

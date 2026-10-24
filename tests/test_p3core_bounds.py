@@ -77,7 +77,7 @@ def test_every_port_carrier_accepts_the_edges_of_the_range(build: Callable[[int]
 
 
 def test_ping_names_the_field_and_the_range_when_it_refuses_a_port() -> None:
-    with pytest.raises(ValueError, match=r"tcp_port\n.*port out of range 1-65535: 0"):
+    with pytest.raises(ValueError, match=r"tcp_port: port out of range 1-65535: 0"):
         ipscout.ping("127.0.0.1", 1, interval=0, tcp_port=0)
 
 
@@ -109,9 +109,8 @@ def test_the_awaitable_ping_refuses_the_same_payload(target: str, size: int) -> 
         (AddressFamily.IPV6, MAX_PAYLOAD_SIZE_IPV6),
         # The bound is per family: a size only IPv4 cannot carry is fine for IPv6.
         (AddressFamily.IPV6, MAX_PAYLOAD_SIZE_IPV4 + 1),
-        # Small and negative sizes are raised to the minimum by the packet builder.
+        # Small sizes are raised to the minimum by the packet builder.
         (AddressFamily.IPV4, 0),
-        (AddressFamily.IPV4, -5),
     ],
 )
 def test_a_sendable_payload_still_passes_validation(family: AddressFamily, size: int) -> None:

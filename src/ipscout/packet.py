@@ -35,9 +35,9 @@ from __future__ import annotations
 
 import secrets
 import struct
-from typing import NamedTuple
+from typing import Annotated, NamedTuple
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .models import AddressFamily
 
@@ -50,9 +50,12 @@ __all__ = [
     "HEADER_SIZE",
     "IPV4_MIN_HEADER_SIZE",
     "MAGIC",
+    "MAX_IP_LENGTH",
     "MAX_PAYLOAD_SIZE_IPV4",
     "MAX_PAYLOAD_SIZE_IPV6",
+    "MIN_PAYLOAD_SIZE",
     "TOKEN_SIZE",
+    "UDP_HEADER_SIZE",
     "EchoPayload",
     "EchoRequest",
     "ParsedReply",
@@ -91,16 +94,29 @@ DEFAULT_PAYLOAD_SIZE = 56
 #: header that some platforms prepend to a received ICMP datagram.
 IPV4_MIN_HEADER_SIZE = 20
 
-#: The largest datagram an IP length field can describe.
-_MAX_IP_LENGTH = 65535
+#: The largest datagram an IP length field can describe, and so the receive
+#: buffer that holds any one datagram whole.
+MAX_IP_LENGTH = 65535
+
+#: A UDP header, which has no options.
+UDP_HEADER_SIZE = 8
 
 #: The most ICMP payload one echo can carry, per family: what the length field
 #: leaves after the headers it counts. IPv4's length counts its own header;
 #: IPv6's payload length does not count IPv6's fixed header, so only IPv4 pays
 #: it. A larger payload cannot be sent at all, and the failed send would read
 #: as a host that never answered.
-MAX_PAYLOAD_SIZE_IPV4 = _MAX_IP_LENGTH - IPV4_MIN_HEADER_SIZE - HEADER_SIZE
-MAX_PAYLOAD_SIZE_IPV6 = _MAX_IP_LENGTH - HEADER_SIZE
+MAX_PAYLOAD_SIZE_IPV4 = MAX_IP_LENGTH - IPV4_MIN_HEADER_SIZE - HEADER_SIZE
+MAX_PAYLOAD_SIZE_IPV6 = MAX_IP_LENGTH - HEADER_SIZE
+
+#: The most filler one payload can carry: the larger family's limit, less
+#: the magic and token every payload starts with.
+_MAX_FILLER_SIZE = MAX_PAYLOAD_SIZE_IPV6 - MIN_PAYLOAD_SIZE
+
+#: The largest values of the one-byte (type, code) and two-byte (identifier,
+#: sequence) fields of an ICMP echo header.
+_MAX_UINT8 = 0xFF
+_MAX_UINT16 = 0xFFFF
 
 
 class EchoPayload(BaseModel):
@@ -114,8 +130,8 @@ class EchoPayload(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    token: bytes
-    filler: bytes = b""
+    token: Annotated[bytes, Field(min_length=TOKEN_SIZE, max_length=TOKEN_SIZE)]
+    filler: Annotated[bytes, Field(max_length=_MAX_FILLER_SIZE)] = b""
 
     def to_bytes(self) -> bytes:
         """Return the payload as it goes on the wire."""
@@ -130,9 +146,9 @@ class EchoPayload(BaseModel):
             raw: The bytes following the ICMP header.
 
         Returns:
-            The parsed payload, or ``None`` when the bytes are too short or do
-            not start with our magic - meaning the datagram belongs to some
-            other process and must be ignored.
+            The parsed payload, or ``None`` when the bytes are too short, longer
+            than any echo payload, or do not start with our magic - meaning the
+            datagram belongs to some other process and must be ignored.
 
         Examples:
             >>> original = EchoPayload(token=b"12345678", filler=b"pad")
@@ -145,7 +161,7 @@ class EchoPayload(BaseModel):
 
         """
 
-        if len(raw) < MIN_PAYLOAD_SIZE or not raw.startswith(MAGIC):
+        if not MIN_PAYLOAD_SIZE <= len(raw) <= MAX_PAYLOAD_SIZE_IPV6 or not raw.startswith(MAGIC):
             return None
         start = len(MAGIC)
         return cls(token=raw[start : start + TOKEN_SIZE], filler=raw[start + TOKEN_SIZE :])
@@ -167,10 +183,10 @@ class ParsedReply(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    icmp_type: int
-    code: int
-    identifier: int
-    sequence: int
+    icmp_type: Annotated[int, Field(ge=0, le=_MAX_UINT8)]
+    code: Annotated[int, Field(ge=0, le=_MAX_UINT8)]
+    identifier: Annotated[int, Field(ge=0, le=_MAX_UINT16)]
+    sequence: Annotated[int, Field(ge=0, le=_MAX_UINT16)]
     payload: EchoPayload | None
 
     @property
@@ -249,6 +265,14 @@ class EchoRequest(NamedTuple):
     token: bytes
 
 
+def _require_uint16(name: str, value: int) -> None:
+    """Refuse a value that does not fit a two-byte header field, naming it."""
+
+    if not 0 <= value <= _MAX_UINT16:
+        msg = f"{name} out of range 0-{_MAX_UINT16}: {value}"
+        raise ValueError(msg)
+
+
 def build_echo_request(
     *,
     sequence: int,
@@ -260,21 +284,28 @@ def build_echo_request(
     """Build one complete ICMP echo request.
 
     Args:
-        sequence: Sequence number for this request. This, together with the
-            token, is what identifies the reply.
+        sequence: Sequence number for this request, 0-65535. This, together
+            with the token, is what identifies the reply.
         payload_size: Total payload length in bytes. Raised to the minimum
             needed to hold magic plus token when a smaller value is asked for.
         family: Which protocol to build for: ``AddressFamily.IPV6`` builds an
             ICMPv6 request, ``AddressFamily.IPV4`` an ICMPv4 one.
-        identifier: Value for the identifier field. Cosmetic on unprivileged
-            sockets, where the kernel overwrites it.
-        token: Explicit token, for tests that need determinism. A fresh random
-            token is generated when this is ``None``.
+        identifier: Value for the identifier field, 0-65535. Cosmetic on
+            unprivileged sockets, where the kernel overwrites it.
+        token: Explicit token of exactly ``TOKEN_SIZE`` bytes, for tests that
+            need determinism. A fresh random token is generated when this is
+            ``None``.
 
     Returns:
         An :class:`EchoRequest`. The token is returned so the caller can
         register it before the reply can possibly arrive. It is a tuple, so
         ``datagram, token = build_echo_request(...)`` still unpacks it.
+
+    Raises:
+        ValueError: ``sequence`` or ``identifier`` does not fit its 16-bit
+            field, or ``token`` is not ``TOKEN_SIZE`` bytes long. A token of
+            another length would be read back as a different one, so the reply
+            could never be matched.
 
     Examples:
         >>> datagram, token = build_echo_request(sequence=1, token=b"abcdefgh")
@@ -295,8 +326,20 @@ def build_echo_request(
         >>> parsed.token == token
         True
 
+        A token of any other length is refused rather than sent:
+
+        >>> build_echo_request(sequence=1, token=b"short")
+        Traceback (most recent call last):
+        ...
+        ValueError: token must be exactly 8 bytes, got 5
+
     """
 
+    _require_uint16("sequence", sequence)
+    _require_uint16("identifier", identifier)
+    if token is not None and len(token) != TOKEN_SIZE:
+        msg = f"token must be exactly {TOKEN_SIZE} bytes, got {len(token)}"
+        raise ValueError(msg)
     actual_token = token if token is not None else secrets.token_bytes(TOKEN_SIZE)
     filler_len = max(0, payload_size - MIN_PAYLOAD_SIZE)
     payload = EchoPayload(token=actual_token, filler=bytes(filler_len)).to_bytes()

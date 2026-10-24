@@ -2,6 +2,7 @@
 
 Contents:
     gather_bounded: Run a coroutine over many items, N alive at a time.
+    require_concurrency: The one check on a concurrency limit.
 
 Note:
     The obvious spelling, ``asyncio.gather(*(work(i) for i in items))`` with a
@@ -19,15 +20,55 @@ Note:
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Annotated, TypeVar
+
+from pydantic import AfterValidator
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterable, Sequence
 
-__all__ = ["gather_bounded"]
+__all__ = ["Concurrency", "gather_bounded", "require_concurrency"]
 
 _Item = TypeVar("_Item")
 _Result = TypeVar("_Result")
+
+
+def require_concurrency(value: int) -> int:
+    """Return ``value`` if it is a usable concurrency limit, or raise saying why not.
+
+    Below one, no worker would ever start: the pool would return no results
+    at all, which reads as "every target answered nothing" rather than as the
+    caller's mistake. Refused rather than raised to one, so the caller learns
+    the value they passed was not the one used.
+
+    Args:
+        value: The candidate limit.
+
+    Returns:
+        ``value`` unchanged.
+
+    Raises:
+        ValueError: ``value`` is below 1.
+
+    Examples:
+        >>> require_concurrency(4)
+        4
+        >>> require_concurrency(0)
+        Traceback (most recent call last):
+        ...
+        ValueError: concurrency must be at least 1, got 0
+
+    """
+
+    if value < 1:
+        msg = f"concurrency must be at least 1, got {value}"
+        raise ValueError(msg)
+    return value
+
+
+#: A concurrency argument: at least 1. Every model and CLI option taking one
+#: uses this type, so the bound and its wording live in require_concurrency alone.
+Concurrency = Annotated[int, AfterValidator(require_concurrency)]
 
 
 async def gather_bounded(
@@ -40,13 +81,16 @@ async def gather_bounded(
     Args:
         items: The work list. Consumed once, so a generator is fine.
         work: Coroutine function applied to each item.
-        concurrency: How many may run at a time. Values below one are read as
-            one, so a caller cannot accidentally deadlock the pool.
+        concurrency: How many may run at a time; at least 1.
 
     Returns:
         Every result, in completion order rather than input order. Callers that
         need the association back should have ``work`` return it - both callers
         here return a ``(key, value)`` pair for exactly that reason.
+
+    Raises:
+        ValueError: ``concurrency`` is below 1, checked by
+            :func:`require_concurrency` before any item is taken.
 
     Note:
         Results accumulate, so this is bounded in *live tasks*, not in total
@@ -65,9 +109,9 @@ async def gather_bounded(
 
     """
 
+    workers = require_concurrency(concurrency)
     pending = iter(items)
     results: list[_Result] = []
-    workers = max(1, concurrency)
 
     async def run() -> None:
         while True:

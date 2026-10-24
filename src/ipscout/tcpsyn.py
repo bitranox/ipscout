@@ -25,13 +25,13 @@ import struct
 from typing import NamedTuple
 
 from .models import PortState
+from .packet import IPV4_MIN_HEADER_SIZE, checksum
 
-__all__ = ["TCP_HEADER_SIZE", "PortReply", "build_syn", "checksum", "parse_tcp_reply", "read_reply"]
+__all__ = ["TCP_HEADER_SIZE", "PortReply", "build_syn", "parse_tcp_reply", "read_reply"]
 
 #: IPv4 header without options, and the TCP header without options.
 _IPV4 = struct.Struct("!BBHHHBBH4s4s")
 _TCP = struct.Struct("!HHIIBBHHH")
-IPV4_HEADER_SIZE = 20
 TCP_HEADER_SIZE = 20
 
 #: TCP flag bits this module cares about.
@@ -53,34 +53,6 @@ _WINDOW = 65535
 #: The low nibble of the first byte counts 32-bit words.
 _IHL_MASK = 0x0F
 _WORD = 4
-
-
-def checksum(data: bytes) -> int:
-    """Return the one's-complement checksum used by IP and TCP.
-
-    Args:
-        data: The bytes to sum, padded internally if their length is odd.
-
-    Returns:
-        The 16-bit checksum, ready to place in a header.
-
-    Examples:
-        >>> checksum(b"\\x00\\x00")
-        65535
-        >>> checksum(b"") == 0xFFFF
-        True
-
-    """
-
-    if len(data) % 2:
-        data += b"\x00"
-    total = 0
-    for index in range(0, len(data), 2):
-        total += (data[index] << 8) + data[index + 1]
-    # Fold the carries back in, twice, since the first fold can carry again.
-    total = (total >> 16) + (total & 0xFFFF)
-    total += total >> 16
-    return ~total & 0xFFFF
 
 
 def _pseudo_header(source_ip: str, target_ip: str, length: int) -> bytes:
@@ -126,7 +98,7 @@ def build_syn(*, source_ip: str, target_ip: str, source_port: int, target_port: 
     tcp_checksum = checksum(_pseudo_header(source_ip, target_ip, len(tcp)) + tcp)
     tcp = _TCP.pack(source_port, target_port, sequence, 0, _DATA_OFFSET, SYN, _WINDOW, tcp_checksum, 0)
 
-    total = IPV4_HEADER_SIZE + len(tcp)
+    total = IPV4_MIN_HEADER_SIZE + len(tcp)
     header = _IPV4.pack(
         _VERSION_IHL,
         0,
@@ -242,7 +214,7 @@ def _ours_or_none(packet: bytes, *, source_port: int, peer_ip: str | None) -> _R
     out of it.
     """
 
-    if len(packet) < IPV4_HEADER_SIZE:
+    if len(packet) < IPV4_MIN_HEADER_SIZE:
         return None
     if peer_ip is not None and socket.inet_ntoa(packet[12:16]) != peer_ip:
         return None
@@ -250,7 +222,7 @@ def _ours_or_none(packet: bytes, *, source_port: int, peer_ip: str | None) -> _R
     header_length = (packet[0] & _IHL_MASK) * _WORD
     # Options make the header longer; assuming 20 bytes would read the TCP
     # header from the middle of them.
-    if header_length < IPV4_HEADER_SIZE or len(packet) < header_length + TCP_HEADER_SIZE:
+    if header_length < IPV4_MIN_HEADER_SIZE or len(packet) < header_length + TCP_HEADER_SIZE:
         return None
 
     fields = _TCP.unpack(packet[header_length : header_length + TCP_HEADER_SIZE])

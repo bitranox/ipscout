@@ -26,14 +26,15 @@ import sys
 from typing import NamedTuple
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
-from .models import AddressFamily
+from .models import DEFAULT_TIMEOUT, DISCARD_PORT, AddressFamily
+from .packet import HEADER_SIZE, IPV4_MIN_HEADER_SIZE, UDP_HEADER_SIZE
 from .resolve import resolve_one
-from .service import DEFAULT_TIMEOUT
 from .winapi import (
     DEFAULT_TTL,
     ICMP_ECHO_REPLY,
     INVALID_HANDLE_VALUE,
     IP_OPTION_INFORMATION,
+    IpStatus,
     iphlpapi,
     last_error,
     reply_buffer_size,
@@ -79,8 +80,6 @@ _LINUX_MTU_OPTIONS: dict[AddressFamily, _LinuxMtuOptions] = {
 #: IP_FLAG_DF, in the Windows echo options.
 _IP_FLAG_DF = 0x02
 
-#: IP_PACKET_TOO_BIG: the reply saying the probe would have to fragment.
-_IP_PACKET_TOO_BIG = 11009
 
 #: How long each Windows probe waits for its reply, in the whole milliseconds
 #: IcmpSendEcho takes: the same per-echo wait a ping uses by default.
@@ -91,9 +90,10 @@ _PROBE_TIMEOUT_MS = round(DEFAULT_TIMEOUT * 1000)
 _MIN_MTU = 68
 _MAX_MTU = 9000
 
-#: Bytes of header in front of the payload, which is what the probe varies.
-_IPV4_ICMP_OVERHEAD = 28
-_IPV4_UDP_OVERHEAD = 28
+#: Bytes of header in front of the payload, which is what the probe varies:
+#: an option-less IPv4 header, then the ICMP echo or the UDP header.
+_IPV4_ICMP_OVERHEAD = IPV4_MIN_HEADER_SIZE + HEADER_SIZE
+_IPV4_UDP_OVERHEAD = IPV4_MIN_HEADER_SIZE + UDP_HEADER_SIZE
 
 #: IP_DONTFRAG, the BSD option that refuses to fragment rather than doing it.
 _IP_DONTFRAG = 28
@@ -111,9 +111,9 @@ def _linux_mtu(address: str, family: AddressFamily) -> int | None:
     try:
         with socket.socket(family.socket_family, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(level, options.discover, _IP_PMTUDISC_DO)
-            # Port 9 is the discard service; nothing is sent, so it only has
-            # to be a valid port for connect() to pick a route.
-            sock.connect((address, 9))
+            # Nothing is sent, so the port only has to be a valid one for
+            # connect() to pick a route.
+            sock.connect((address, DISCARD_PORT))
             value = sock.getsockopt(level, options.mtu)
     except OSError:
         return None
@@ -143,7 +143,7 @@ def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
         count = library.IcmpSendEcho(handle, string_to_ipv4(address), request, payload, ctypes.byref(options), reply, len(reply), _PROBE_TIMEOUT_MS)
         if count:
             return True
-        return last_error() != _IP_PACKET_TOO_BIG
+        return IpStatus.parse(last_error()) is not IpStatus.PACKET_TOO_BIG
 
     try:
         low, high = _MIN_MTU - _IPV4_ICMP_OVERHEAD, _MAX_MTU - _IPV4_ICMP_OVERHEAD
@@ -175,13 +175,13 @@ def _bsd_mtu(address: str) -> int | None:  # pragma: no cover - macOS and the BS
     """
 
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock = socket.socket(AddressFamily.IPV4.socket_family, socket.SOCK_DGRAM)
     except OSError as exc:  # pragma: no cover - no IPv4 stack at all
         msg = f"path MTU discovery could not open a socket: {exc}"
         raise IPScoutPermissionError(msg) from exc
 
     try:
-        sock.setsockopt(socket.IPPROTO_IP, _IP_DONTFRAG, 1)
+        sock.setsockopt(AddressFamily.IPV4.ip_option_level, _IP_DONTFRAG, 1)
     except OSError as exc:
         # No IP_DONTFRAG means there is no way to ask the question at all.
         sock.close()
@@ -194,7 +194,7 @@ def _bsd_mtu(address: str) -> int | None:  # pragma: no cover - macOS and the BS
 
     try:
         sock.settimeout(1.0)
-        sock.connect((address, 9))
+        sock.connect((address, DISCARD_PORT))
         low, high = _MIN_MTU - _IPV4_UDP_OVERHEAD, _MAX_MTU - _IPV4_UDP_OVERHEAD
 
         def fits(payload: int) -> bool:

@@ -33,14 +33,16 @@ from typing import NamedTuple
 
 from .arp import (
     ETH_P_ARP,
+    FRAME_RECEIVE_SIZE,
     build_arp_request,
     build_neighbour_solicitation,
+    format_mac,
     parse_arp_reply,
     parse_neighbour_advertisement,
     solicited_node_multicast,
 )
 from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
-from .models import AddressFamily, Neighbour, NeighbourChange, NeighbourState
+from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState
 from .netlink import (
     NLM_F_ACK,
     NLM_F_CREATE,
@@ -49,6 +51,7 @@ from .netlink import (
     NLM_F_REQUEST,
     NLMSG_DONE,
     NLMSG_ERROR,
+    RECEIVE_SIZE,
     build_attribute,
     build_message,
     iter_attributes,
@@ -61,7 +64,6 @@ __all__ = [
     "NeighbourDumpChunk",
     "build_remove_request",
     "build_set_request",
-    "format_mac",
     "list_neighbours",
     "parse_neighbour_dump",
     "raise_for_ack",
@@ -101,38 +103,6 @@ _STATE_NAMES = {
 #: A cache larger than this would be pathological; the bound stops a truncated
 #: or hostile stream from looping forever.
 _MAX_DUMP_CHUNKS = 256
-
-#: An Ethernet hardware address is six bytes.
-_MAC_LENGTH = 6
-
-
-def format_mac(raw: bytes) -> str | None:
-    """Return the canonical ``aa:bb:cc:dd:ee:ff`` form of a link address.
-
-    Args:
-        raw: The hardware address as the kernel reported it.
-
-    Returns:
-        The lowercase colon-separated form, or ``None`` when this is not a
-        learned Ethernet address. Loopback and tunnel interfaces report
-        zero-length or oversized link addresses, and point-to-point interfaces
-        report all zeros, which means no address was learned rather than an
-        address of zero. Inventing a MAC for any of them would be worse than
-        saying nothing.
-
-    Examples:
-        >>> format_mac(bytes.fromhex("aabbccddeeff"))
-        'aa:bb:cc:dd:ee:ff'
-        >>> format_mac(b"") is None
-        True
-        >>> format_mac(bytes(6)) is None
-        True
-
-    """
-
-    if len(raw) != _MAC_LENGTH or not any(raw):
-        return None
-    return ":".join(f"{octet:02x}" for octet in raw)
 
 
 def _state_of(state: int) -> NeighbourState:
@@ -204,6 +174,9 @@ def _read_address_attributes(payload: bytes, family: int) -> _EntryAddresses:
             with contextlib.suppress(OSError, ValueError):
                 ip = socket.inet_ntop(family, value)
         elif attribute == _NDA_LLADDR:
+            # Loopback and tunnels report a zero-length or oversized link
+            # address and point-to-point links all zeros: none is a learned
+            # Ethernet address, and format_mac answers None for each.
             mac = format_mac(value)
     return _EntryAddresses(ip=ip, mac=mac)
 
@@ -328,11 +301,11 @@ def list_neighbours() -> tuple[Neighbour, ...]:
 
     found: list[Neighbour] = []
     try:
-        sock.settimeout(2.0)
+        sock.settimeout(DEFAULT_TIMEOUT)
         # AF_UNSPEC asks for every family in one dump.
         sock.send(build_message(_RTM_GETNEIGH, NLM_F_REQUEST | NLM_F_DUMP, _NDMSG.pack(socket.AF_UNSPEC, 0, 0, 0, 0, 0, 0)))
         for _ in range(_MAX_DUMP_CHUNKS):
-            chunk = parse_neighbour_dump(sock.recv(65535))
+            chunk = parse_neighbour_dump(sock.recv(RECEIVE_SIZE))
             found.extend(chunk.entries)
             if chunk.done:
                 break
@@ -381,7 +354,7 @@ def _permission_error(exc: OSError, what: _Solicitation) -> IPScoutPermissionErr
     )
 
 
-def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, source_mac: str, timeout: float = 2.0) -> str | None:
+def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, source_mac: str, timeout: float = DEFAULT_TIMEOUT) -> str | None:
     """Send a real ARP request and return what answers.
 
     Args:
@@ -427,7 +400,7 @@ def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, sourc
         while time.monotonic() < deadline:
             sock.settimeout(max(0.01, deadline - time.monotonic()))
             try:
-                found = parse_arp_reply(sock.recv(2048), target_ip)
+                found = parse_arp_reply(sock.recv(FRAME_RECEIVE_SIZE), target_ip)
             except TimeoutError:
                 return None
             if found is not None:
@@ -442,7 +415,7 @@ def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, sourc
             sock.close()
 
 
-def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, timeout: float = 2.0) -> str | None:
+def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, timeout: float = DEFAULT_TIMEOUT) -> str | None:
     """Send an ICMPv6 neighbour solicitation and return what answers.
 
     Args:
@@ -465,7 +438,7 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
     """
 
     try:
-        sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
+        sock = socket.socket(AddressFamily.IPV6.socket_family, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
     except PermissionError as exc:
         raise _permission_error(exc, _Solicitation.NEIGHBOUR_DISCOVERY) from exc
     except OSError as exc:  # pragma: no cover - no IPv6 stack
@@ -473,7 +446,7 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
 
     try:
         index = socket.if_nametoindex(interface)
-        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, index)
+        sock.setsockopt(AddressFamily.IPV6.ip_option_level, socket.IPV6_MULTICAST_IF, index)
         sock.settimeout(timeout)
         group = solicited_node_multicast(target_ip)
         sock.sendto(build_neighbour_solicitation(sender_mac=source_mac, target_ip=target_ip), (group, 0, 0, index))
@@ -482,7 +455,7 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
         while time.monotonic() < deadline:
             sock.settimeout(max(0.01, deadline - time.monotonic()))
             try:
-                found = parse_neighbour_advertisement(sock.recv(2048), target_ip)
+                found = parse_neighbour_advertisement(sock.recv(FRAME_RECEIVE_SIZE), target_ip)
             except TimeoutError:
                 return None
             if found is not None:
@@ -628,10 +601,10 @@ def _exchange(message: bytes) -> int | None:
         msg = "no netlink socket on this host, so the neighbour table cannot be changed"
         raise IPScoutUnsupportedError(msg)
     try:
-        sock.settimeout(2.0)
+        sock.settimeout(DEFAULT_TIMEOUT)
         sock.send(message)
         for _ in range(_MAX_ACK_READS):
-            error = parse_ack(sock.recv(65535))
+            error = parse_ack(sock.recv(RECEIVE_SIZE))
             if error is not None:
                 return error
         return None  # pragma: no cover - the kernel always acknowledges

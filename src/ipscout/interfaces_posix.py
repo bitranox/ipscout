@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
+from .arp import format_hardware_address
 from .models import AddressFamily, Interface, InterfaceAddress
 from .unixio import fcntl_module
 
@@ -221,9 +222,7 @@ def _mac_of(sockaddr: _SockAddr) -> str | None:
     else:
         return None
 
-    if len(chunk) < 1 or not any(chunk):
-        return None
-    return ":".join(f"{byte:02x}" for byte in chunk)
+    return format_hardware_address(chunk)
 
 
 def _libc() -> ctypes.CDLL:
@@ -271,7 +270,9 @@ def _mtu_of(name: str) -> int | None:
 
     if sys.platform.startswith("linux"):
         try:
-            return int(Path(f"/sys/class/net/{name}/mtu").read_text(encoding="ascii").strip())
+            # Zero means "no MTU reported", as in the ioctl path: an Interface
+            # refuses mtu=0, so passing it on would fail the whole listing.
+            return int(Path(f"/sys/class/net/{name}/mtu").read_text(encoding="ascii").strip()) or None
         except (OSError, ValueError):
             return None
     return _mtu_by_ioctl(name)

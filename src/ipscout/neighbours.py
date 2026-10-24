@@ -32,9 +32,10 @@ import ipaddress
 import sys
 from typing import NamedTuple
 
+from .arp import normalise_mac
 from .errors import IPScoutUnsupportedError
 from .interfaces import local_interfaces
-from .models import AddressFamily, MacLookup, MacScope, Neighbour
+from .models import DEFAULT_TIMEOUT, AddressFamily, MacLookup, MacScope, Neighbour, parse_address
 from .resolve import split_zone
 from .routes import query_route
 
@@ -43,44 +44,10 @@ __all__ = ["get_mac_address", "lookup_mac", "neighbours", "normalise_mac", "reso
 IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 
-#: Separators seen in written hardware addresses: colons, hyphens, and the
-#: dotted form Cisco equipment uses.
-_SEPARATORS = str.maketrans("", "", ":-.")
-
-#: An Ethernet address is six octets, so twelve hex digits once stripped.
-_MAC_DIGITS = 12
-
 #: The source handed on when an interface has no IPv4 address. Only an IPv6
 #: solicitation reaches that case, and it never reads the IPv4 source, so
 #: this fills the field rather than naming an address anything sends from.
 _NO_IPV4_SOURCE = str(ipaddress.IPv4Address(0))
-
-
-def normalise_mac(mac: str) -> str | None:
-    """Return a hardware address in one canonical form for comparison.
-
-    Args:
-        mac: An address in any common written form - ``aa:bb:cc:dd:ee:ff``,
-            ``AA-BB-CC-DD-EE-FF`` or ``aabb.ccdd.eeff``.
-
-    Returns:
-        The lowercase colon-separated form, or ``None`` when the input is not
-        an Ethernet address at all.
-
-    Examples:
-        >>> normalise_mac("AA-BB-CC-DD-EE-FF")
-        'aa:bb:cc:dd:ee:ff'
-        >>> normalise_mac("aabb.ccdd.eeff")
-        'aa:bb:cc:dd:ee:ff'
-        >>> normalise_mac("nonsense") is None
-        True
-
-    """
-
-    digits = mac.translate(_SEPARATORS).lower()
-    if len(digits) != _MAC_DIGITS or any(character not in "0123456789abcdef" for character in digits):
-        return None
-    return ":".join(digits[index : index + 2] for index in range(0, _MAC_DIGITS, 2))
 
 
 def _version_of(ip: str) -> int | None:
@@ -214,12 +181,14 @@ def _sending_interface(ip: str, family: AddressFamily) -> SendingInterface:
     raise IPScoutUnsupportedError(msg)
 
 
-def resolve_active(ip: str, *, timeout: float = 2.0) -> str | None:
+def resolve_active(ip: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
     """Actively resolve one address, sending a real request rather than reading.
 
     Args:
         ip: The address to resolve.
-        timeout: Seconds to wait for an answer.
+        timeout: Seconds to wait for an answer. Windows ignores it: ``SendARP``
+            and ``ResolveIpNetEntry2`` take no timeout and wait as long as the
+            stack's own resolution does.
 
     Returns:
         The hardware address, or ``None`` when nothing answered in time.
@@ -256,7 +225,7 @@ def resolve_active(ip: str, *, timeout: float = 2.0) -> str | None:
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
         from .neighbours_windows import resolve_active as _windows_resolve  # noqa: PLC0415 - Windows-only import
 
-        return _windows_resolve(ip)
+        return _windows_resolve(ip, family)
 
     sender = _sending_interface(ip, family)
 
@@ -321,13 +290,14 @@ def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
         is known, ``scope=UNKNOWN`` and ``mac`` is ``None``.
 
     Raises:
+        ValueError: ``ip`` is not an IP address literal (a host name, a
+            malformed address, or a zone on an IPv4 address).
         IPScoutUnsupportedError: ``active=True`` on a platform with no
-            unprivileged active path. The passive default never raises.
+            unprivileged active path.
 
     Note:
-        Passively, this never raises: an address this host has no route to, or
-        has simply not talked to, is an ordinary outcome reported as
-        ``UNKNOWN`` rather than an error.
+        An address this host has no route to, or has simply not talked to, is
+        an ordinary outcome reported as ``UNKNOWN`` rather than an error.
 
     Examples:
         >>> answer = lookup_mac("127.0.0.1")
@@ -340,8 +310,8 @@ def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
     # rather than travelling with the address: the cache, the routing table and
     # every packed sockaddr hold bare addresses, and comparing scoped text
     # against them matches nothing and reports a known neighbour as unknown.
+    family = AddressFamily.of_version(parse_address(ip).version)
     bare, zone = split_zone(ip)
-    family = AddressFamily.IPV6 if ":" in bare else AddressFamily.IPV4
     route = query_route(bare, family)
     on_interface = zone if zone is not None else (route.interface if route else None)
 

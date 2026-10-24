@@ -146,6 +146,10 @@ convention = "google"
 # test body to exercise import-time and cache behaviour, so moving them to module top would defeat intent.
 "tests/*.py" = ["S101", "S105", "S106", "S108", "T20", "PLR2004", "PLR0913", "FBT001", "FBT003", "PLC0415"]
 
+[tool.ruff.lint.flake8-type-checking]
+# Pydantic reads field annotations at runtime, so a type used only in a model field must stay a runtime import.
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
 [tool.pyright]
 typeCheckingMode = "strict"
 # Check against the declared floor, not whatever the local venv happens to run.

@@ -23,18 +23,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
-from .errors import IPScoutError
-from .models import AddressFamily, Banner, BannerState, require_port
-from .pool import gather_bounded
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .errors import IPScoutError, refused_arguments
+from .models import AddressFamily, Banner, BannerState, Port, Timeout
+from .pool import Concurrency, gather_bounded
 from .resolve import resolve_one
 from .sockerr import is_refusal
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Iterable
 
-__all__ = ["DEFAULT_CONCURRENCY", "DEFAULT_MAX_LINE_BYTES", "DEFAULT_TIMEOUT", "agrab_banners", "grab_banners"]
+__all__ = ["DEFAULT_CONCURRENCY", "DEFAULT_MAX_LINE_BYTES", "DEFAULT_TIMEOUT", "BannerSettings", "agrab_banners", "grab_banners"]
 
 #: Connections in flight at once. Enough for a /24 in a few rounds while
 #: staying far from any per-process file-handle limit.
@@ -51,29 +53,41 @@ DEFAULT_MAX_LINE_BYTES = 512
 _T = TypeVar("_T")
 
 
-class _Settings(NamedTuple):
-    """The per-grab knobs, bundled so every host is grabbed the same way."""
+class BannerSettings(BaseModel):
+    """The arguments of one banner grab, checked once so every host is grabbed the same way.
 
-    port: int
-    timeout: float
-    max_line_bytes: int
-    farewell: bytes | None
-    family: AddressFamily | None
+    Every bound is declared on its field, so the check and the documentation
+    cannot drift apart, and the command line reads the same declarations for
+    its options instead of restating them. Strict: a caller's ``True`` is not
+    a port and ``"3"`` is not a timeout.
 
+    Examples:
+        >>> BannerSettings(port=21).timeout == DEFAULT_TIMEOUT
+        True
+        >>> BannerSettings(port=21, farewell=b"")
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
 
-def _validate(settings: _Settings, concurrency: int) -> None:
-    """Refuse an argument that could never produce a useful grab, before any connect."""
+    """
 
-    require_port(settings.port)
-    if not settings.timeout > 0:
-        msg = f"timeout must be greater than 0 seconds, got {settings.timeout}"
-        raise ValueError(msg)
-    if settings.max_line_bytes < 1:
-        msg = f"max_line_bytes must be at least 1, got {settings.max_line_bytes}"
-        raise ValueError(msg)
-    if concurrency < 1:
-        msg = f"concurrency must be at least 1, got {concurrency}"
-        raise ValueError(msg)
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    #: The TCP port to connect to on every host.
+    port: Port
+    #: Seconds per host for resolving, connecting and reading together, under
+    #: the library's one timeout rule: zero would never wait, and an unbounded
+    #: wait would let one silent host hold the grab open.
+    timeout: Timeout = DEFAULT_TIMEOUT
+    #: The most bytes of greeting kept per host.
+    max_line_bytes: int = Field(default=DEFAULT_MAX_LINE_BYTES, ge=1)
+    #: Bytes sent after a greeting, before closing. Empty would be accepted
+    #: and never sent, so it is refused rather than silently ignored.
+    farewell: bytes | None = Field(default=None, min_length=1)
+    #: Connections in flight at once, under the pool's one concurrency rule.
+    concurrency: Concurrency = DEFAULT_CONCURRENCY
+    #: Use only IPv4 or IPv6 addresses for every host.
+    family: AddressFamily | None = None
 
 
 def _reason(exc: BaseException) -> str:
@@ -149,12 +163,12 @@ async def _close(writer: asyncio.StreamWriter) -> None:
         await writer.wait_closed()
 
 
-async def _converse(host: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, settings: _Settings, deadline: float) -> Banner:
+async def _converse(host: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, settings: BannerSettings, deadline: float) -> Banner:
     """Read the greeting on an open connection, say goodbye if asked, and close it."""
 
     try:
         raw = await _read_line(reader, deadline, settings.max_line_bytes)
-        if raw and settings.farewell:
+        if raw and settings.farewell is not None:
             await _say_goodbye(writer, settings.farewell)
     finally:
         await _close(writer)
@@ -164,7 +178,7 @@ async def _converse(host: str, reader: asyncio.StreamReader, writer: asyncio.Str
     return Banner(host=host, port=settings.port, state=BannerState.GREETED, line=line)
 
 
-async def _grab_one(host: str, settings: _Settings) -> Banner:
+async def _grab_one(host: str, settings: BannerSettings) -> Banner:
     """Grab one host's banner. Every failure is a result, never a raise."""
 
     deadline = asyncio.get_running_loop().time() + settings.timeout
@@ -212,7 +226,8 @@ async def agrab_banners(  # noqa: PLR0913 - public API: every knob is keyword-on
         farewell: Bytes to send after a line was read and before closing, such
             as ``b"QUIT\\r\\n"`` for FTP or SMTP, so the server logs a clean exit
             rather than a dropped session. Sent to any host that said
-            something, and never to one that stayed silent.
+            something, and never to one that stayed silent. Must not be
+            empty: an empty farewell could only be skipped.
         concurrency: Connections in flight at once.
         family: Use only IPv4 or IPv6 addresses for every host.
 
@@ -222,9 +237,10 @@ async def agrab_banners(  # noqa: PLR0913 - public API: every knob is keyword-on
         not resolve is an UNREACHABLE result, never an exception.
 
     Raises:
-        ValueError: ``port`` is outside 1-65535, or ``timeout``,
-            ``max_line_bytes`` or ``concurrency`` is not positive. Raised
-            before anything connects.
+        ValueError: ``port`` is outside 1-65535, ``timeout`` is not above 0 and
+            at most ``MAX_TIMEOUT``, ``max_line_bytes`` or ``concurrency`` is below 1, or
+            ``farewell`` is empty. One message names every bad argument, as
+            ``<argument>: <reason>``, and it is raised before anything connects.
 
     Examples:
         >>> import asyncio
@@ -234,15 +250,17 @@ async def agrab_banners(  # noqa: PLR0913 - public API: every knob is keyword-on
 
     """
 
-    settings = _Settings(port, timeout, max_line_bytes, farewell, family)
-    _validate(settings, concurrency)
+    try:
+        settings = BannerSettings(port=port, timeout=timeout, max_line_bytes=max_line_bytes, farewell=farewell, concurrency=concurrency, family=family)
+    except ValidationError as refused:
+        raise refused_arguments("banner grab", refused) from refused
     unique = list(dict.fromkeys(hosts))
 
     async def one(host: str) -> tuple[str, Banner]:
         # Paired with its host: the pool completes out of order.
         return host, await _grab_one(host, settings)
 
-    completed = dict(await gather_bounded(unique, one, concurrency))
+    completed = dict(await gather_bounded(unique, one, settings.concurrency))
     return {host: completed[host] for host in unique}
 
 

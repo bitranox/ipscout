@@ -27,20 +27,16 @@ from .models import AddressFamily, RouteInfo
 from .winapi import (
     MIB_IPFORWARD_ROW2,
     MIB_IPFORWARD_TABLE2,
+    NO_ERROR,
     SOCKADDR_INET,
+    address_text,
     iphlpapi,
+    sockaddr_inet_address,
     sockaddr_inet_to_string,
     win_family,
 )
 
 __all__ = ["default_gateway", "query_route"]
-
-#: NO_ERROR, the only success value GetBestRoute2 returns.
-_NO_ERROR = 0
-
-#: An all-zero next hop means the destination is on-link, not that a router
-#: lives at address zero.
-_UNSPECIFIED = frozenset({"0.0.0.0", "::"})  # noqa: S104  # nosec B104
 
 
 def _destination(address: str, family: AddressFamily) -> SOCKADDR_INET | None:
@@ -69,10 +65,13 @@ def _next_hop(sockaddr: SOCKADDR_INET) -> str | None:
     reported exactly that.
     """
 
-    address = sockaddr_inet_to_string(sockaddr)
-    if address is None:
+    # The unspecified test is made on the decoded address, the same test the
+    # neighbour table applies, so an all-zero hop means "on-link" in either
+    # family however its text would be spelled.
+    address = sockaddr_inet_address(sockaddr)
+    if address is None or address.is_unspecified:
         return None
-    return None if address in _UNSPECIFIED else address
+    return address_text(address)
 
 
 def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | None:  # pragma: no cover - Windows only
@@ -100,7 +99,7 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
     row = MIB_IPFORWARD_ROW2()
     best_source = SOCKADDR_INET()
     status = library.GetBestRoute2(None, 0, None, ctypes.byref(target), 0, ctypes.byref(row), ctypes.byref(best_source))
-    if status != _NO_ERROR:
+    if status != NO_ERROR:
         return None
 
     interface: str | None = None
@@ -140,7 +139,7 @@ def default_gateway(family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | N
         return None
 
     table = ctypes.POINTER(MIB_IPFORWARD_TABLE2)()
-    if library.GetIpForwardTable2(win_family(family), ctypes.byref(table)) != _NO_ERROR:
+    if library.GetIpForwardTable2(win_family(family), ctypes.byref(table)) != NO_ERROR:
         return None
 
     try:

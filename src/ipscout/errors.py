@@ -27,6 +27,11 @@ Note:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic import ValidationError
+
 __all__ = [
     "IPScoutError",
     "IPScoutPermissionError",
@@ -35,6 +40,8 @@ __all__ = [
     "IPScoutSweepIncompleteError",
     "IPScoutSweepTooWideError",
     "IPScoutUnsupportedError",
+    "refused_arguments",
+    "validation_problems",
 ]
 
 
@@ -144,3 +151,76 @@ class IPScoutUnsupportedError(IPScoutError):
         True
 
     """
+
+
+def validation_problems(error: ValidationError) -> list[str]:
+    """Return one ``<field>: <reason>`` line per problem a model refused.
+
+    ``str(ValidationError)`` is written for the model's author: it names
+    pydantic's error types, links a docs URL carrying the pinned pydantic
+    version and echoes the caller's input back. Every refusal this library
+    shows a caller is built from these lines instead, so the field and the
+    reason are what reaches them. A validator's own ``ValueError`` keeps its
+    exact words, without pydantic's ``Value error,`` prefix, and a refusal of
+    the whole model (no field) is the reason alone.
+
+    Args:
+        error: The refusal to describe.
+
+    Returns:
+        The lines, in pydantic's order, without duplicates.
+
+    Examples:
+        >>> from pydantic import BaseModel, Field, ValidationError
+        >>> class Probe(BaseModel):
+        ...     times: int = Field(ge=1)
+        >>> try:
+        ...     Probe(times=0)
+        ... except ValidationError as refused:
+        ...     validation_problems(refused)
+        ['times: Input should be greater than or equal to 1']
+
+    """
+
+    lines: list[str] = []
+    for item in error.errors():
+        context = item.get("ctx") or {}
+        reason = str(context["error"]) if item["type"] == "value_error" and "error" in context else item["msg"]
+        where = ".".join(str(part) for part in item["loc"])
+        line = f"{where}: {reason}" if where else reason
+        if line not in lines:
+            lines.append(line)
+    return lines
+
+
+def refused_arguments(operation: str, error: ValidationError, *, field: str | None = None) -> ValueError:
+    """Return the ``ValueError`` an entry point raises when its arguments model refused them.
+
+    Every public function that checks its arguments through a model reports a
+    refusal the same way, ``<operation> refused its arguments: <field>: <reason>``
+    with one ``; ``-separated part per problem, so a caller meets one shape
+    whichever function they called. Raise it ``from error`` so a traceback
+    still reaches pydantic's full report.
+
+    Args:
+        operation: What refused, as the caller knows it (``"ping"``, ``"port scan"``).
+        error: The model's refusal.
+        field: The argument's name, when the refusal came from checking one bare
+            value (a ``TypeAdapter``), which carries no field of its own.
+
+    Examples:
+        >>> from pydantic import TypeAdapter, ValidationError
+        >>> from typing import Annotated
+        >>> from annotated_types import Ge
+        >>> try:
+        ...     TypeAdapter(Annotated[int, Ge(1)]).validate_python(0)
+        ... except ValidationError as refused:
+        ...     str(refused_arguments("sweep", refused, field="limit"))
+        'sweep refused its arguments: limit: Input should be greater than or equal to 1'
+
+    """
+
+    problems = validation_problems(error)
+    if field is not None:
+        problems = [f"{field}: {problem}" for problem in problems]
+    return ValueError(f"{operation} refused its arguments: " + "; ".join(problems))

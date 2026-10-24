@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 
 from .errors import IPScoutUnsupportedError
 from .factory import make_async_transport, make_transport
-from .models import TraceHop
+from .models import MAX_HOP_LIMIT, TraceHop, require_timeout
 from .resolve import resolve_one, reverse_dns
 from .service import DEFAULT_TIMEOUT
 
@@ -58,21 +58,26 @@ _UNSUPPORTED = (
 )
 
 
-def _require_walkable(max_hops: int, *, supports_ttl_discovery: bool) -> None:
+def _require_walkable(max_hops: int, timeout: float, *, supports_ttl_discovery: bool) -> None:
     """Refuse a walk that could never report a hop, before any probe is sent.
 
     One check for both walks, so the sync and async entry points cannot drift
     apart on what they refuse or how they word it.
 
     Raises:
-        ValueError: ``max_hops`` is below 1.
+        ValueError: ``max_hops`` is outside 1-``MAX_HOP_LIMIT``, the most a
+            one-byte TTL or hop-limit field can carry, or ``timeout`` is
+            refused by :func:`~ipscout.models.require_timeout`. A timeout of
+            zero or less used to walk every hop without waiting and report a
+            path of silent routers, which reads as a network fault.
         IPScoutUnsupportedError: Expired hops cannot be observed on this
             transport.
     """
 
-    if max_hops < 1:
-        msg = f"max_hops must be at least 1, got {max_hops}"
+    if not 1 <= max_hops <= MAX_HOP_LIMIT:
+        msg = f"max_hops must be 1-{MAX_HOP_LIMIT}, got {max_hops}"
         raise ValueError(msg)
+    require_timeout(timeout)
     if not supports_ttl_discovery:
         raise IPScoutUnsupportedError(_UNSUPPORTED)
 
@@ -127,7 +132,8 @@ def trace_path(
 
     Raises:
         IPScoutUnsupportedError: This transport cannot observe expired hops.
-        ValueError: ``max_hops`` is below 1.
+        ValueError: ``max_hops`` is outside 1-``MAX_HOP_LIMIT``, or
+            ``timeout`` is not above 0 or is above ``MAX_TIMEOUT``.
 
     Examples:
         >>> from ipscout.ports import EchoResult
@@ -145,7 +151,7 @@ def trace_path(
 
     """
 
-    _require_walkable(max_hops, supports_ttl_discovery=transport.supports_ttl_discovery)
+    _require_walkable(max_hops, timeout, supports_ttl_discovery=transport.supports_ttl_discovery)
 
     hops: list[TraceHop] = []
     for ttl in range(1, max_hops + 1):
@@ -182,11 +188,12 @@ async def atrace_path(
 
     Raises:
         IPScoutUnsupportedError: This transport cannot observe expired hops.
-        ValueError: ``max_hops`` is below 1.
+        ValueError: ``max_hops`` is outside 1-``MAX_HOP_LIMIT``, or
+            ``timeout`` is not above 0 or is above ``MAX_TIMEOUT``.
 
     """
 
-    _require_walkable(max_hops, supports_ttl_discovery=transport.supports_ttl_discovery)
+    _require_walkable(max_hops, timeout, supports_ttl_discovery=transport.supports_ttl_discovery)
 
     hops: list[TraceHop] = []
     for ttl in range(1, max_hops + 1):
@@ -226,7 +233,8 @@ def traceroute(
         IPScoutResolutionError: The target does not resolve.
         IPScoutPermissionError: ICMP is unavailable to this process.
         IPScoutUnsupportedError: This platform cannot observe expired hops.
-        ValueError: ``max_hops`` is below 1.
+        ValueError: ``max_hops`` is outside 1-``MAX_HOP_LIMIT``, or
+            ``timeout`` is not above 0 or is above ``MAX_TIMEOUT``.
 
     """
 

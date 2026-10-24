@@ -21,7 +21,8 @@ import ipscout
 from ipscout.errors import IPScoutPermissionError, IPScoutUnsupportedError
 from ipscout.leases_linux import parse_dhclient_lease, parse_networkd_lease
 from ipscout.models import PortState, ScanMethod
-from ipscout.tcpsyn import ACK, RST, SYN, PortReply, build_syn, checksum, parse_tcp_reply, read_reply
+from ipscout.packet import checksum
+from ipscout.tcpsyn import ACK, RST, SYN, PortReply, build_syn, parse_tcp_reply, read_reply
 from ipscout.wol import MAGIC_PACKET_SIZE, build_magic_packet
 
 if TYPE_CHECKING:
@@ -453,11 +454,32 @@ def test_every_port_asked_about_comes_back_from_a_wide_scan() -> None:
 
 
 @pytest.mark.os_agnostic
-def test_a_failed_wake_reports_through_the_library_hierarchy() -> None:
+def test_a_failed_wake_reports_through_the_library_hierarchy(monkeypatch: pytest.MonkeyPatch) -> None:
     # Every other public callable reports failure this way; one leaking a bare
     # OSError would make "catch IPScoutError" untrue for exactly one function.
+    # The send fails at the stdlib socket, the one edge where a real failure
+    # would need a route this host lacks or traffic leaving it; an address
+    # that is not one is refused as an argument before any socket is opened.
+    class NoRoute:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        def __enter__(self) -> NoRoute:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def setsockopt(self, *_args: object) -> None:
+            pass
+
+        def sendto(self, _data: bytes, _address: object) -> int:
+            raise OSError(101, "Network is unreachable")
+
+    monkeypatch.setattr(socket, "socket", NoRoute)
+
     with pytest.raises(ipscout.IPScoutError):
-        ipscout.wake_on_lan("aa:bb:cc:dd:ee:ff", broadcast="300.1.1.1")
+        ipscout.wake_on_lan("aa:bb:cc:dd:ee:ff", broadcast="127.0.0.1")
 
 
 # --------------------------------------------------------------------------

@@ -315,6 +315,10 @@ if scope.complete:
 `arp_scan` and `find_ip_by_mac` take either `network=` or `scope=`, never both - a silent
 precedence rule would leave you reading a result about ground you did not ask about.
 
+`limit` must be at least 1, `timeout` above 0 and at most `MAX_TIMEOUT`, and `concurrency` at least 1; anything
+else raises `ValueError` naming the argument before a probe is sent. A zero timeout would refuse
+every probe and hand back the cache as it already stood, as though the sweep had found it.
+
 `local_networks(interfaces)` and `sweep_scope(interfaces=...)` also accept the interface list to
 read, for describing a host other than this one:
 
@@ -487,6 +491,11 @@ ipscout.scan_ports(host, "1-1024", method=ipscout.ScanMethod.SYN)
 Both methods hold only `concurrency` probes alive at a time, so a full-range scan is bounded in
 memory rather than allocating a task per port.
 
+A name is resolved once, before the first probe, and every port is asked of that one address. A
+name that does not resolve raises `IPScoutResolutionError` rather than reporting every port
+`FILTERED`, which would read as a firewall. `timeout` must be above 0 and at most `MAX_TIMEOUT` and
+`concurrency` at least 1: a zero timeout reports an open port `FILTERED`, so it raises `ValueError` instead.
+
 ## Reading a banner
 
 Many services announce themselves the moment a client connects: an FTP or SMTP server sends a `220`
@@ -514,7 +523,9 @@ embedded servers refuse a new connection for a moment after each session, so sca
 ports first and connecting again to read misses exactly the devices a banner identifies.
 
 `timeout` (3.0 s by default) is one deadline per host for resolving, connecting and reading
-together. A refused connection is reported rather than retried; retry it yourself when the device is
+together. The arguments are checked before anything connects, and one `ValueError` names every bad
+one: `timeout` must be above 0 and at most `MAX_TIMEOUT`, `max_line_bytes` and `concurrency` at least 1, and
+`farewell` not empty, since an empty one could only be skipped. A refused connection is reported rather than retried; retry it yourself when the device is
 known to need it. `agrab_banners` is the same on the event loop.
 
 ## Waking a host, and the path to it
@@ -526,6 +537,11 @@ ipscout.path_mtu("8.8.8.8")  # 1500, or None where the platform cannot say
 
 `wake_on_lan` returns nothing because nothing acknowledges a magic packet: a successful send means
 only that it left this host. Poll `is_reachable` to find out whether the target woke.
+
+`broadcast` (default `ipscout.wol.DEFAULT_BROADCAST`, the limited broadcast `255.255.255.255`) must be an IPv4
+address other than `0.0.0.0`. An empty string or `0.0.0.0` would send the packet to this host and
+report it sent, and a name says nothing about which segment is meant, so each raises `ValueError`
+before anything is sent. A send that fails raises `IPScoutError`.
 
 `path_mtu` returning `None` is an answer rather than a failure. An MTU sizes packets, so a guessed
 one produces a silent black hole.
@@ -590,6 +606,11 @@ Per-command options:
 | `info`             | none beyond the global flags                                                                                     |
 
 `-4` and `-6` are mutually exclusive.
+
+An option value the library would refuse - `--times 0`, `--timeout 0`, `--concurrency 0`, a port
+outside 1-65535, `--max-hops` outside 1-255 - is a usage error: exit 2, naming the option and the
+reason, before anything is sent. The bounds are the library's own, read from the same declarations
+the library checks, so the two cannot disagree.
 
 ```bash
 ipscout ping 127.0.0.1 -c 2
@@ -715,14 +736,14 @@ a packet that times out, a link losing everything all come back as a `ResponseOb
 `reached=False`. Missing ICMP permission, an unresolvable name, or a nonsensical argument raise,
 because no amount of retrying fixes them.
 
-| Exception                     | Raised when                                                                                   | What to do about it                                     |
-|-------------------------------|-----------------------------------------------------------------------------------------------|---------------------------------------------------------|
-| `IPScoutResolutionError`      | The target does not resolve, or has no address in the demanded family.                        | Fix the name, or drop the `-4`/`-6` restriction.        |
-| `IPScoutPermissionError`      | Neither an unprivileged nor a raw ICMP socket could be opened.                                | Apply one of the fixes in the message. Root would help. |
-| `IPScoutUnsupportedError`     | No backend implements this here, such as traceroute on macOS.                                 | Use another capability. Root would not help.            |
-| `IPScoutSweepTooWideError`    | Every network a sweep was given holds more addresses than it probes.                          | Name a narrower network.                                |
-| `IPScoutSweepIncompleteError` | A sweep skipped a network and matched nothing in the rest, so "not found" would overstate it. | Name a narrower network inside the skipped one.         |
-| `ValueError`                  | `times`, `timeout`, `interval` or `max_hops` is out of range.                                 | Fix the argument.                                       |
+| Exception                     | Raised when                                                                                                                                                                                                                                                                                                                                   | What to do about it                                     |
+|-------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------|
+| `IPScoutResolutionError`      | The target does not resolve, or has no address in the demanded family.                                                                                                                                                                                                                                                                        | Fix the name, or drop the `-4`/`-6` restriction.        |
+| `IPScoutPermissionError`      | Neither an unprivileged nor a raw ICMP socket could be opened.                                                                                                                                                                                                                                                                                | Apply one of the fixes in the message. Root would help. |
+| `IPScoutUnsupportedError`     | No backend implements this here, such as traceroute on macOS.                                                                                                                                                                                                                                                                                 | Use another capability. Root would not help.            |
+| `IPScoutSweepTooWideError`    | Every network a sweep was given holds more addresses than it probes.                                                                                                                                                                                                                                                                          | Name a narrower network.                                |
+| `IPScoutSweepIncompleteError` | A sweep skipped a network and matched nothing in the rest, so "not found" would overstate it.                                                                                                                                                                                                                                                 | Name a narrower network inside the skipped one.         |
+| `ValueError`                  | An argument is out of range or not what it names: `times`, `timeout`, `interval`, `payload_size`, `tcp_port`, `concurrency`, `max_hops` or a sweep `limit`; an address argument that is not an IP literal of the asked-for family (`query_route`, `lookup_mac`). The message reads `<operation> refused its arguments: <argument>: <reason>`. | Fix the argument.                                       |
 
 Every ipscout error derives from `IPScoutError`, so one `except` catches the family without also
 catching unrelated `OSError` noise. The two sweep errors additionally derive from `ValueError`,

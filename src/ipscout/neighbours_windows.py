@@ -20,23 +20,25 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
-import ipaddress
 import socket
 
+from .arp import MAC_LENGTH, format_mac
 from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily, Neighbour, NeighbourChange, NeighbourState
 from .winapi import (
+    MAX_ADAPTER_ADDRESS_LENGTH,
     MIB_IPNET_ROW2,
     MIB_IPNET_TABLE2,
+    NO_ERROR,
     WIN_AF_UNSPEC,
-    family_from_win,
+    address_text,
     iphlpapi,
-    sockaddr_inet_to_string,
+    sockaddr_inet_address,
     win_family,
 )
 
 __all__ = [
-    "format_mac",
+    "declared_mac",
     "ipv4_neighbour_row",
     "list_neighbours",
     "raise_for_status",
@@ -46,9 +48,6 @@ __all__ = [
     "set_static_neighbour",
     "state_of",
 ]
-
-#: NO_ERROR, the only success value these calls return.
-_NO_ERROR = 0
 
 #: ERROR_ACCESS_DENIED: the elevation refusal, worth telling apart from a
 #: neighbour that simply did not answer.
@@ -60,8 +59,8 @@ _ERROR_NOT_FOUND = 1168
 #: ERROR_OBJECT_ALREADY_EXISTS: a create met an entry for that address.
 _ERROR_OBJECT_ALREADY_EXISTS = 5010
 
-#: An Ethernet hardware address is six bytes; the row's buffer is larger.
-_MAC_LENGTH = 6
+#: The largest interface index the row's ULONG field holds.
+_MAX_INTERFACE_INDEX = 0xFFFFFFFF
 
 #: NL_NEIGHBOR_STATE, in declaration order.
 _NL_NUD_UNREACHABLE = 0
@@ -108,31 +107,29 @@ def state_of(value: int) -> NeighbourState:
     return _STATES.get(value, NeighbourState.OTHER)
 
 
-def format_mac(raw: bytes, length: int) -> str | None:
-    """Return the canonical form of a link address from a row's buffer.
+def declared_mac(raw: bytes, length: int) -> str | None:
+    """Return the Ethernet address in a fixed-size buffer, read to its declared length.
 
     Args:
-        raw: The fixed-size address buffer the row carries.
-        length: How many of its bytes are meaningful.
+        raw: The address buffer a row or ``SendARP`` filled; larger than any
+            Ethernet address (32 bytes in a row, 8 for ``SendARP``).
+        length: How many of its bytes the API says are meaningful.
 
     Returns:
         The lowercase colon-separated form, or ``None`` when the entry holds
-        no learned Ethernet address.
+        no learned Ethernet address: a length other than six, or all zeros.
 
     Examples:
-        >>> format_mac(bytes.fromhex("aabbccddeeff") + bytes(26), 6)
+        >>> declared_mac(bytes.fromhex("aabbccddeeff") + bytes(26), 6)
         'aa:bb:cc:dd:ee:ff'
-        >>> format_mac(bytes(32), 6) is None
+        >>> declared_mac(bytes(32), 6) is None
         True
 
     """
 
-    if length != _MAC_LENGTH:
-        return None
-    address = raw[:_MAC_LENGTH]
-    if not any(address):
-        return None
-    return ":".join(f"{octet:02x}" for octet in address)
+    # Reading the whole buffer would append its unused tail; arp.format_mac
+    # then refuses anything not exactly six bytes long.
+    return format_mac(raw[:length])
 
 
 def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows only
@@ -151,7 +148,7 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
         return ()
 
     table = ctypes.POINTER(MIB_IPNET_TABLE2)()
-    if library.GetIpNetTable2(WIN_AF_UNSPEC, ctypes.byref(table)) != _NO_ERROR:
+    if library.GetIpNetTable2(WIN_AF_UNSPEC, ctypes.byref(table)) != NO_ERROR:
         return ()
 
     found: list[Neighbour] = []
@@ -164,16 +161,9 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
             if state in _UNUSABLE:
                 continue
 
-            ip = sockaddr_inet_to_string(row.Address)
-            family = family_from_win(int(row.Address.si_family))
-            mac = format_mac(bytes(row.PhysicalAddress), int(row.PhysicalAddressLength))
-            if ip is None or family is None or mac is None:
-                continue
-            try:
-                address = ipaddress.ip_address(ip)
-            except ValueError:
-                continue
-            if address.is_multicast or address.is_unspecified:
+            address = sockaddr_inet_address(row.Address)
+            mac = declared_mac(bytes(row.PhysicalAddress), int(row.PhysicalAddressLength))
+            if address is None or mac is None or address.is_multicast or address.is_unspecified:
                 continue
 
             interface: str | None = None
@@ -183,11 +173,11 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
 
             found.append(
                 Neighbour(
-                    ip=ip,
+                    ip=address_text(address),
                     mac=mac,
                     interface=interface,
                     state=state,
-                    family=family,
+                    family=AddressFamily.of_version(address.version),
                 )
             )
         return tuple(found)
@@ -218,16 +208,18 @@ def _resolve_ipv6(library: ctypes.CDLL, ip: str) -> str | None:  # pragma: no co
             "the same addresses unprivileged"
         )
         raise IPScoutPermissionError(msg)
-    if status != _NO_ERROR:
+    if status != NO_ERROR:
         return None
-    return format_mac(bytes(row.PhysicalAddress), int(row.PhysicalAddressLength))
+    return declared_mac(bytes(row.PhysicalAddress), int(row.PhysicalAddressLength))
 
 
-def resolve_active(ip: str) -> str | None:  # pragma: no cover - Windows only
+def resolve_active(ip: str, family: AddressFamily) -> str | None:  # pragma: no cover - Windows only
     """Actively resolve one address, sending a real ARP request.
 
     Args:
-        ip: The IPv4 address to resolve.
+        ip: The address to resolve.
+        family: The family of ``ip``, as the caller already decided it; it
+            picks ``SendARP`` or ``ResolveIpNetEntry2``.
 
     Returns:
         The hardware address, or ``None`` when nothing answered.
@@ -250,20 +242,20 @@ def resolve_active(ip: str) -> str | None:  # pragma: no cover - Windows only
     except IPScoutUnsupportedError:
         return None
 
-    if ":" in ip:
+    if family is AddressFamily.IPV6:
         return _resolve_ipv6(library, ip)
 
     try:
-        packed = socket.inet_aton(ip)
+        packed = socket.inet_pton(family.socket_family, ip)
     except OSError:
         return None
 
-    buffer = (ctypes.c_uint8 * 8)()
-    length = ctypes.c_uint32(8)
+    buffer = (ctypes.c_uint8 * MAX_ADAPTER_ADDRESS_LENGTH)()
+    length = ctypes.c_uint32(MAX_ADAPTER_ADDRESS_LENGTH)
     destination = ctypes.c_uint32.from_buffer_copy(packed).value
-    if library.SendARP(destination, 0, ctypes.byref(buffer), ctypes.byref(length)) != _NO_ERROR:
+    if library.SendARP(destination, 0, ctypes.byref(buffer), ctypes.byref(length)) != NO_ERROR:
         return None
-    return format_mac(bytes(buffer), int(length.value))
+    return declared_mac(bytes(buffer), int(length.value))
 
 
 # --------------------------------------------------------------------------
@@ -275,8 +267,9 @@ def ipv4_neighbour_row(ip: str, mac: bytes, interface_index: int) -> MIB_IPNET_R
     """Build the ``MIB_IPNET_ROW2`` for a permanent IPv4 neighbour entry.
 
     Args:
-        ip: The IPv4 address the entry maps.
-        mac: The six-byte hardware address.
+        ip: The IPv4 address the entry maps, in dotted-quad form.
+        mac: The six-byte hardware address, or no bytes at all for a delete,
+            which the stack keys on address and interface alone.
         interface_index: The interface the entry belongs to. The stack keys
             the table by address and interface, as ``netsh interface ipv4 add
             neighbors`` does with its interface argument.
@@ -287,16 +280,39 @@ def ipv4_neighbour_row(ip: str, mac: bytes, interface_index: int) -> MIB_IPNET_R
         ``NlnsPermanent``. The LUID stays zero: the index identifies the
         interface, and the API takes either.
 
+    Raises:
+        ValueError: ``ip`` is not a dotted-quad IPv4 address, ``mac`` is
+            neither six bytes nor empty, or ``interface_index`` is not one the
+            row's ULONG field can hold (1 to 4294967295). Checked here because
+            the row would otherwise store a truncated or wrapped value without
+            complaint and hand the stack an entry nobody asked for.
+
     Examples:
         >>> row = ipv4_neighbour_row("192.0.2.7", bytes.fromhex("020000000007"), 4)
         >>> bytes(row)[:8].hex(), int(row.State)
         ('02000000c0000207', 6)
+        >>> ipv4_neighbour_row("192.0.2.7", bytes(7), 4)
+        Traceback (most recent call last):
+        ...
+        ValueError: a neighbour entry's hardware address is 6 bytes (or none, to delete), not 7
 
     """
 
+    if len(mac) not in (0, MAC_LENGTH):
+        msg = f"a neighbour entry's hardware address is {MAC_LENGTH} bytes (or none, to delete), not {len(mac)}"
+        raise ValueError(msg)
+    if not 1 <= interface_index <= _MAX_INTERFACE_INDEX:
+        msg = f"interface index out of range 1-{_MAX_INTERFACE_INDEX}: {interface_index}"
+        raise ValueError(msg)
+    try:
+        packed = socket.inet_pton(AddressFamily.IPV4.socket_family, ip)
+    except OSError as exc:
+        msg = f"{ip!r} is not a dotted-quad IPv4 address"
+        raise ValueError(msg) from exc
+
     row = MIB_IPNET_ROW2()
     row.Address.Ipv4.sin_family = win_family(AddressFamily.IPV4)
-    row.Address.Ipv4.sin_addr[:] = socket.inet_aton(ip)
+    row.Address.Ipv4.sin_addr[:] = packed
     row.InterfaceIndex = interface_index
     row.PhysicalAddress[: len(mac)] = mac
     row.PhysicalAddressLength = len(mac)
@@ -325,7 +341,7 @@ def raise_for_status(status: int, *, action: NeighbourChange) -> None:
 
     """
 
-    if status == _NO_ERROR:
+    if status == NO_ERROR:
         return
     if status == _ERROR_ACCESS_DENIED:
         msg = "changing the neighbour table needs Administrator on Windows (ERROR_ACCESS_DENIED). Run elevated"

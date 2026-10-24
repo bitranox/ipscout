@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, cast
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily
+from .packet import MAX_IP_LENGTH
+from .ports import CAPTURE_RECEIVE_BUFFER, MIN_CAPTURE_WAIT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,13 +59,6 @@ SIO_RCVALL = 0x98000001
 #: its name suggests and is not supported on all stacks.
 RCVALL_OFF = 0
 RCVALL_ON = 1
-
-#: An IPv4 packet cannot exceed this, so nothing is ever read in halves.
-_RECEIVE_SIZE = 65535
-
-#: Asked for, not required, and clamped by the stack. A cushion against a
-#: burst arriving between two reads, never a correctness dependency.
-_RECEIVE_BUFFER = 1 << 20
 
 
 def _ioctl_of(sock: socket.socket) -> Callable[[int, int], object] | None:
@@ -108,7 +103,7 @@ def capture_available() -> bool:
     """
 
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
+        sock = socket.socket(AddressFamily.IPV4.socket_family, socket.SOCK_RAW, socket.IPPROTO_IP)
     except OSError:
         return False
     available = _ioctl_of(sock) is not None
@@ -161,9 +156,9 @@ class RawSocketCapture:
     def receive(self, *, timeout: float) -> bytes | None:
         """Return the next packet, or None when none arrived in ``timeout``."""
 
-        self._socket.settimeout(max(0.001, timeout))
+        self._socket.settimeout(max(MIN_CAPTURE_WAIT, timeout))
         try:
-            return self._socket.recv(_RECEIVE_SIZE)
+            return self._socket.recv(MAX_IP_LENGTH)
         except TimeoutError:
             return None
         except OSError:
@@ -219,7 +214,7 @@ def open_capture(interface: str, *, promiscuous: bool = True) -> RawSocketCaptur
 
     address = _address_for(interface)
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
+        sock = socket.socket(AddressFamily.IPV4.socket_family, socket.SOCK_RAW, socket.IPPROTO_IP)
     except OSError as exc:
         raise _permission_error(exc) from exc
 
@@ -234,7 +229,7 @@ def open_capture(interface: str, *, promiscuous: bool = True) -> RawSocketCaptur
         # to a specific address is what selects the interface to watch.
         sock.bind((address, 0))
         with contextlib.suppress(OSError):
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _RECEIVE_BUFFER)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, CAPTURE_RECEIVE_BUFFER)
         if promiscuous:
             ioctl(SIO_RCVALL, RCVALL_ON)
     except PermissionError as exc:

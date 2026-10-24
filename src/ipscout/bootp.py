@@ -34,15 +34,16 @@ Note:
 from __future__ import annotations
 
 import enum
+import ipaddress
 import socket
 import struct
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Annotated, NamedTuple
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from .arp import ETH_P_IP, ETH_P_VLAN, ETHERNET, ETHERNET_HEADER_SIZE, MAC_LENGTH, format_mac
+from .arp import ETH_P_IP, ETH_P_VLAN, ETHERNET, ETHERNET_HEADER_SIZE, HTYPE_ETHERNET, MAC_LENGTH, format_mac, normalise_mac
 from .models import AddressFamily
-from .packet import IPV4_MIN_HEADER_SIZE
+from .packet import IPV4_MIN_HEADER_SIZE, UDP_HEADER_SIZE
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -66,11 +67,6 @@ __all__ = [
 _BOOTP = struct.Struct("!BBBBIHH4s4s4s4s16s64s128s")
 BOOTP_FIXED_SIZE = _BOOTP.size
 
-#: UDP's header. Both it and the IPv4 header are read by offset rather than
-#: unpacked whole, so only their sizes are needed here.
-_UDP_HEADER_SIZE = 8
-_IPPROTO_UDP = 17
-
 #: DHCP rides on these two ports. A reply always leaves the server port; it
 #: arrives at 68 directly or at 67 through a relay, so the source is what
 #: identifies it and the destination is only sanity-checked.
@@ -92,11 +88,6 @@ class BootpOperation(enum.IntEnum):
 
     REQUEST = 1
     REPLY = 2
-
-
-#: Ethernet is hardware type 1, with six-byte addresses. Anything else means
-#: ``chaddr`` is not a MAC, so comparing it to one would be meaningless.
-_HTYPE_ETHERNET = 1
 
 
 class DhcpMessageType(enum.IntEnum):
@@ -169,7 +160,7 @@ def _looks_like_bare_ipv4(frame: bytes) -> bool:
 
     if len(frame) < IPV4_MIN_HEADER_SIZE or (frame[0] >> 4) != AddressFamily.IPV4.ip_version:
         return False
-    if frame[9] != _IPPROTO_UDP:
+    if frame[9] != socket.IPPROTO_UDP:
         return False
     header_len = (frame[0] & 0x0F) * 4
     total_len = int.from_bytes(frame[2:4], "big")
@@ -202,19 +193,20 @@ def _udp_payload(packet: bytes) -> _ServerDatagram | None:
     if len(packet) < IPV4_MIN_HEADER_SIZE or (packet[0] >> 4) != AddressFamily.IPV4.ip_version:
         return None
     header_len = (packet[0] & 0x0F) * 4
-    if header_len < IPV4_MIN_HEADER_SIZE or packet[9] != _IPPROTO_UDP:
+    if header_len < IPV4_MIN_HEADER_SIZE or packet[9] != socket.IPPROTO_UDP:
         return None
     # A non-first fragment carries no UDP header. DHCP is a few hundred bytes
     # and is never legitimately fragmented, so this is somebody else's traffic.
     if int.from_bytes(packet[6:8], "big") & 0x1FFF:
         return None
-    if len(packet) < header_len + _UDP_HEADER_SIZE:
+    # UDP's header, like the IPv4 one, is read by offset rather than unpacked whole.
+    if len(packet) < header_len + UDP_HEADER_SIZE:
         return None
 
     source_port, destination_port = struct.unpack("!HH", packet[header_len : header_len + 4])
     if source_port != DHCP_SERVER_PORT or destination_port not in (DHCP_SERVER_PORT, DHCP_CLIENT_PORT):
         return None
-    return _ServerDatagram(socket.inet_ntoa(packet[12:16]), packet[header_len + _UDP_HEADER_SIZE :])
+    return _ServerDatagram(socket.inet_ntoa(packet[12:16]), packet[header_len + UDP_HEADER_SIZE :])
 
 
 def _message_type(body: bytes) -> DhcpMessageType | None:
@@ -262,6 +254,68 @@ def _known_message_type(value: int) -> DhcpMessageType | None:
         return None
 
 
+def _canonical_mac(mac: str) -> str:
+    """Return ``mac`` if it is a hardware address in canonical form, or raise saying why not.
+
+    The canonical form is the one :func:`ipscout.arp.format_mac` renders and so
+    the one every decoded reply carries: lowercase, colon-separated, and never
+    all zeroes. A match is an exact string comparison, so any other spelling of
+    the same address would silently match nothing; it is refused instead.
+
+    Args:
+        mac: The candidate address.
+
+    Returns:
+        ``mac`` unchanged.
+
+    Raises:
+        ValueError: ``mac`` is not exactly that form. A caller holding user
+            input passes it through :func:`ipscout.arp.normalise_mac`
+            first.
+
+    Examples:
+        >>> _canonical_mac("02:00:5e:10:00:00")
+        '02:00:5e:10:00:00'
+        >>> _canonical_mac("02-00-5E-10-00-00")
+        Traceback (most recent call last):
+        ...
+        ValueError: '02-00-5E-10-00-00' is not a hardware address in canonical form ...
+
+    """
+
+    try:
+        rendered = format_mac(bytes.fromhex(mac.replace(":", "")))
+    except ValueError:
+        rendered = None
+    if rendered != mac:
+        msg = (
+            f"{mac!r} is not a hardware address in canonical form (lowercase hex, colon-separated, like 02:00:5e:00:53:00); "
+            f"pass it through ipscout.normalise_mac first"
+        )
+        raise ValueError(msg)
+    return mac
+
+
+def _ipv4_text(value: str) -> str:
+    """Return an IPv4 address in dotted-quad form, refusing anything else."""
+
+    return str(ipaddress.IPv4Address(value))
+
+
+def _offered_ipv4_text(value: str) -> str:
+    """Return an offered IPv4 address, refusing ``0.0.0.0``, which offers nothing."""
+
+    address = ipaddress.IPv4Address(value)
+    if address.is_unspecified:
+        msg = f"{value} hands out no address: a request and a DHCPNAK carry it, an offer never does"
+        raise ValueError(msg)
+    return str(address)
+
+
+#: ``xid``: a four-byte field of the fixed header.
+_MAX_TRANSACTION_ID = 0xFFFFFFFF
+
+
 class DhcpReply(BaseModel):
     """A server reply handing an address to one hardware address.
 
@@ -284,10 +338,10 @@ class DhcpReply(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    client_mac: str
-    offered_ip: str
-    server_ip: str
-    transaction_id: int
+    client_mac: Annotated[str, AfterValidator(_canonical_mac)]
+    offered_ip: Annotated[str, AfterValidator(_offered_ipv4_text)]
+    server_ip: Annotated[str, AfterValidator(_ipv4_text)]
+    transaction_id: Annotated[int, Field(ge=0, le=_MAX_TRANSACTION_ID)]
     message_type: DhcpMessageType | None = None
 
     @classmethod
@@ -326,10 +380,11 @@ class DhcpReply(BaseModel):
 
         operation, htype, hlen, _hops, xid, _secs, _flags, _ciaddr, yiaddr, _siaddr, _giaddr, chaddr, _sname, _file = _BOOTP.unpack(body[:BOOTP_FIXED_SIZE])
         # One refusal covering three ways a packet is not an offer: it is
-        # travelling the other way, its chaddr is not a MAC so comparing it to
-        # one would be meaningless, or it hands out no address at all - which
+        # travelling the other way, its chaddr is not a MAC (any hardware type
+        # but Ethernet) so comparing it to one would be meaningless, or it
+        # hands out no address at all - which
         # is what both a client request and a DHCPNAK look like.
-        if operation != BootpOperation.REPLY or (htype, hlen) != (_HTYPE_ETHERNET, MAC_LENGTH) or yiaddr == _UNSPECIFIED:
+        if operation != BootpOperation.REPLY or (htype, hlen) != (HTYPE_ETHERNET, MAC_LENGTH) or yiaddr == _UNSPECIFIED:
             return None
 
         client_mac = format_mac(chaddr[:MAC_LENGTH])
@@ -379,10 +434,9 @@ def offers_from_frames(frames: Iterable[bytes], *, mac: str, message_types: froz
 
     Args:
         frames: Captured frames, in arrival order.
-        mac: The hardware address to match, already in the canonical
-            lowercase colon-separated form. Callers coming from user input go
-            through :func:`ipscout.neighbours.normalise_mac` first, so that
-            one canonicalisation serves the whole package.
+        mac: The hardware address to match, in any form
+            :func:`ipscout.arp.normalise_mac` reads (``02-00-5E-10-00-00``
+            matches the same replies as ``02:00:5e:10:00:00``).
         message_types: DHCP message types to accept, or ``None`` to accept any
             reply handing out an address. Narrowing is available for a caller
             who has measured its own environment; it is not the default,
@@ -393,6 +447,10 @@ def offers_from_frames(frames: Iterable[bytes], *, mac: str, message_types: froz
         Each distinct address, in the order it was first seen. Empty when
         nothing was offered to that address, which is an answer rather than a
         failure.
+
+    Raises:
+        ValueError: ``mac`` is not a hardware address at all. Matching it
+            against nothing would read as "nothing was offered".
 
     Note:
         **The address a guest most likely bound is the last element, not the
@@ -406,10 +464,14 @@ def offers_from_frames(frames: Iterable[bytes], *, mac: str, message_types: froz
 
     """
 
+    wanted = normalise_mac(mac)
+    if wanted is None:
+        msg = f"{mac!r} is not a hardware address"
+        raise ValueError(msg)
     found: list[str] = []
     for frame in frames:
         reply = DhcpReply.from_frame(frame)
-        if reply is None or reply.client_mac != mac:
+        if reply is None or reply.client_mac != wanted:
             continue
         if message_types is not None and (reply.message_type is None or reply.message_type not in message_types):
             continue

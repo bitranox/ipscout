@@ -15,6 +15,7 @@ out of the bytes.
 
 from __future__ import annotations
 
+import os
 import socket
 import struct
 
@@ -119,3 +120,40 @@ def test_an_address_of_the_other_family_is_not_a_windows_route_destination(famil
     other = AddressFamily.IPV4 if family is AddressFamily.IPV6 else AddressFamily.IPV6
 
     assert windows._destination(_SAMPLE[other], family) is None
+
+
+# --------------------------------------------------------------------------
+# Shared encoders reproduce the hand-packed bytes they replaced
+# --------------------------------------------------------------------------
+# Each reference below is the literal packing the backend used before it moved
+# onto the shared encoder; a byte-identical result is what proves the move
+# changed nothing the kernel reads.
+
+
+def _hand_packed_linux_query(packed: bytes, family: AddressFamily) -> bytes:
+    body = linux._RTMSG.pack(family.socket_family, len(packed) * 8, 0, 0, 0, 0, 0, 0, 0)
+    attribute = struct.pack("=HH", 4 + len(packed), linux._RTA_DST) + packed
+    return netlink.build_message(26, netlink.NLM_F_REQUEST, body + attribute)
+
+
+def _hand_packed_macos_request(packed: bytes, family: AddressFamily, seq: int, pid: int) -> bytes:
+    if family is AddressFamily.IPV6:
+        sockaddr = struct.pack("=BBHI16sI", 28, socket.AF_INET6, 0, 0, packed, 0)
+    else:
+        sockaddr = struct.pack("=BBH4s8s", 16, socket.AF_INET, 0, packed, b"\x00" * 8)
+    header = bsdroute.RT_MSGHDR.pack(bsdroute.RT_MSGHDR.size + len(sockaddr), 5, 0x04, 0, 0, bsdroute.RTA_DST, pid, seq, 0, 0, 0, b"\x00" * 56)
+    return header + sockaddr
+
+
+@_FAMILIES
+def test_a_linux_route_query_is_byte_identical_to_the_hand_packed_form(family: AddressFamily) -> None:
+    packed = socket.inet_pton(family.socket_family, _SAMPLE[family])
+
+    assert linux._build_query(packed, family) == _hand_packed_linux_query(packed, family)
+
+
+@_FAMILIES
+def test_a_macos_route_request_is_byte_identical_to_the_hand_packed_form(family: AddressFamily) -> None:
+    packed = socket.inet_pton(family.socket_family, _SAMPLE[family])
+
+    assert macos._build_request(packed, family, 3) == _hand_packed_macos_request(packed, family, 3, os.getpid())

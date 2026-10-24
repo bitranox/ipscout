@@ -690,13 +690,13 @@ def test_a_link_sockaddr_claiming_more_than_it_holds_does_not_read_past_the_end(
 def test_a_windows_hardware_address_is_read_from_its_declared_length() -> None:
     # The row carries a fixed 32-byte buffer; only the declared length is
     # meaningful, and reading the whole buffer would append 26 zero bytes.
-    assert windows.format_mac(bytes.fromhex("aabbccddeeff") + bytes(26), 6) == "aa:bb:cc:dd:ee:ff"
+    assert windows.declared_mac(bytes.fromhex("aabbccddeeff") + bytes(26), 6) == "aa:bb:cc:dd:ee:ff"
 
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize(("raw", "length"), [(bytes(32), 6), (bytes.fromhex("aabbccddeeff") + bytes(26), 0), (bytes(32), 8)])
 def test_a_windows_row_without_a_learned_address_reports_none(raw: bytes, length: int) -> None:
-    assert windows.format_mac(raw, length) is None
+    assert windows.declared_mac(raw, length) is None
 
 
 @pytest.mark.os_agnostic

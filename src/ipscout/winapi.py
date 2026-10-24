@@ -10,7 +10,10 @@ Contents:
     Structures mirroring the C layouts in ``ipexport.h`` and ``iphlpapi.h``.
     iphlpapi: Lazily loaded, cached handle to the DLL.
     win_family / family_from_win: Windows' own ``AF_*`` numbering, both ways.
-    status_message: Human-readable text for an ``IP_STATUS`` code.
+    IpStatus: The ``IP_STATUS`` codes, each with its text; status_message
+        renders a raw one.
+    sockaddr_inet_address / address_text: Decode a ``SOCKADDR_INET`` once,
+        and render an address the way every backend does.
 
 Fixed-width integers, deliberately:
     Every field is declared with an explicit width (``c_uint32`` for ``ULONG``
@@ -33,12 +36,18 @@ Note:
 from __future__ import annotations
 
 import ctypes
+import enum
+import ipaddress
 import socket
 import struct
 import sys
+from typing import TYPE_CHECKING
 
 from .errors import IPScoutUnsupportedError
 from .models import AddressFamily
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 __all__ = [
     "DEFAULT_TTL",
@@ -48,23 +57,23 @@ __all__ = [
     "INVALID_HANDLE_VALUE",
     "IPV6_ADDRESS_EX",
     "IP_ADDRESS_PREFIX",
-    "IP_DEST_HOST_UNREACHABLE",
-    "IP_DEST_NET_UNREACHABLE",
     "IP_OPTION_INFORMATION",
-    "IP_REQ_TIMED_OUT",
-    "IP_SUCCESS",
-    "IP_TTL_EXPIRED_TRANSIT",
+    "MAX_ADAPTER_ADDRESS_LENGTH",
     "MIB_IPFORWARD_ROW2",
     "MIB_IPFORWARD_TABLE2",
     "MIB_IPNET_ROW2",
     "MIB_IPNET_TABLE2",
+    "MS_LAYOUT",
     "NET_LUID",
+    "NO_ERROR",
     "SOCKADDR_IN",
     "SOCKADDR_IN6",
     "SOCKADDR_INET",
     "WIN_AF_INET",
     "WIN_AF_INET6",
     "WIN_AF_UNSPEC",
+    "IpStatus",
+    "address_text",
     "family_from_win",
     "iphlpapi",
     "ipv4_to_string",
@@ -72,24 +81,12 @@ __all__ = [
     "last_error",
     "reply_buffer_size",
     "sockaddr_in6",
+    "sockaddr_inet_address",
     "sockaddr_inet_to_string",
     "status_message",
     "string_to_ipv4",
     "win_family",
 ]
-
-#: ``IP_STATUS`` values this library actually distinguishes.
-IP_SUCCESS = 0
-IP_BUF_TOO_SMALL = 11001
-IP_DEST_NET_UNREACHABLE = 11002
-IP_DEST_HOST_UNREACHABLE = 11003
-IP_DEST_PROT_UNREACHABLE = 11004
-IP_DEST_PORT_UNREACHABLE = 11005
-IP_NO_RESOURCES = 11006
-IP_REQ_TIMED_OUT = 11010
-#: A router discarded the packet because its hop limit ran out. Traceroute is
-#: built on this: the reply's Address field carries that router.
-IP_TTL_EXPIRED_TRANSIT = 11013
 
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
@@ -103,39 +100,99 @@ DEFAULT_TTL = 128
 #: options a router may quote back.
 ICMP_REPLY_HEADROOM = 64
 
-_STATUS_TEXT = {
-    IP_SUCCESS: "success",
-    IP_BUF_TOO_SMALL: "reply buffer too small",
-    IP_DEST_NET_UNREACHABLE: "destination network unreachable",
-    IP_DEST_HOST_UNREACHABLE: "destination host unreachable",
-    IP_DEST_PROT_UNREACHABLE: "destination protocol unreachable",
-    IP_DEST_PORT_UNREACHABLE: "destination port unreachable",
-    IP_NO_RESOURCES: "insufficient resources",
-    IP_REQ_TIMED_OUT: "request timed out",
-    IP_TTL_EXPIRED_TRANSIT: "TTL expired in transit",
-}
+
+class IpStatus(enum.IntEnum):
+    """The ``IP_STATUS`` codes an ICMP reply (or ``GetLastError``) carries.
+
+    Each member carries its readable text, so the code and what it means are
+    written down once. Only the codes this library acts on or reports are
+    listed; ``ipexport.h`` defines more (``IP_STATUS_BASE`` plus an offset),
+    and an unlisted one is decoded as ``None`` by :meth:`parse` rather than
+    raising.
+
+    Attributes:
+        text: A short human-readable description of the status.
+
+    Examples:
+        >>> IpStatus.TTL_EXPIRED_TRANSIT.text
+        'TTL expired in transit'
+        >>> int(IpStatus.REQ_TIMED_OUT)
+        11010
+
+    """
+
+    text: str
+
+    def __new__(cls, code: int, text: str) -> IpStatus:
+        member = int.__new__(cls, code)
+        member._value_ = code
+        member.text = text
+        return member
+
+    SUCCESS = (0, "success")
+    BUF_TOO_SMALL = (11001, "reply buffer too small")
+    DEST_NET_UNREACHABLE = (11002, "destination network unreachable")
+    DEST_HOST_UNREACHABLE = (11003, "destination host unreachable")
+    DEST_PROT_UNREACHABLE = (11004, "destination protocol unreachable")
+    DEST_PORT_UNREACHABLE = (11005, "destination port unreachable")
+    NO_RESOURCES = (11006, "insufficient resources")
+    #: The probe would have to be fragmented and carries don't-fragment.
+    PACKET_TOO_BIG = (11009, "packet too big")
+    REQ_TIMED_OUT = (11010, "request timed out")
+    #: A router discarded the packet because its hop limit ran out.
+    #: Traceroute is built on this: the reply's Address field carries that
+    #: router.
+    TTL_EXPIRED_TRANSIT = (11013, "TTL expired in transit")
+
+    @classmethod
+    def parse(cls, code: int) -> IpStatus | None:
+        """Decode a raw status number, or return None for one not listed.
+
+        The decode edge for every ``Status`` field and ``GetLastError`` value:
+        the API can report codes this library has no member for, and those are
+        an answer ("something else went wrong"), not a crash.
+
+        Args:
+            code: The number as the API wrote it.
+
+        Returns:
+            The member, or ``None`` for an unlisted code.
+
+        Examples:
+            >>> IpStatus.parse(11013) is IpStatus.TTL_EXPIRED_TRANSIT
+            True
+            >>> IpStatus.parse(99999) is None
+            True
+
+        """
+
+        try:
+            return cls(code)
+        except ValueError:
+            return None
 
 
-def status_message(status: int) -> str:
-    """Return readable text for an ``IP_STATUS`` code.
+def status_message(code: int) -> str:
+    """Return readable text for a raw ``IP_STATUS`` code.
 
     Args:
-        status: The numeric status from a reply structure.
+        code: The numeric status from a reply structure.
 
     Returns:
         A short description, or a generic label for codes not listed.
 
     Examples:
-        >>> status_message(IP_SUCCESS)
+        >>> status_message(IpStatus.SUCCESS)
         'success'
-        >>> status_message(IP_TTL_EXPIRED_TRANSIT)
+        >>> status_message(11013)
         'TTL expired in transit'
         >>> status_message(99999)
         'IP_STATUS 99999'
 
     """
 
-    return _STATUS_TEXT.get(status, f"IP_STATUS {status}")
+    status = IpStatus.parse(code)
+    return status.text if status is not None else f"IP_STATUS {code}"
 
 
 #: Force the MSVC structure layout rather than the host compiler's native one.
@@ -143,7 +200,16 @@ def status_message(status: int) -> str:
 #: when the layout is being computed on Linux by a test. Accepted and ignored
 #: before Python 3.14; honoured from 3.14 on, where leaving it implicit on a
 #: packed structure is deprecated and becomes an error in 3.19.
-_MS_LAYOUT = "ms"
+MS_LAYOUT = "ms"
+
+#: ``NO_ERROR`` (also spelled ``ERROR_SUCCESS``): the one success value every
+#: iphlpapi call returning a Win32 error code reports.
+NO_ERROR = 0
+
+#: ``MAX_ADAPTER_ADDRESS_LENGTH`` from ``iptypes.h``: the hardware-address
+#: buffer an adapter record and ``SendARP`` use. Longer link addresses exist
+#: (the neighbour row holds 32 bytes), but not in these two places.
+MAX_ADAPTER_ADDRESS_LENGTH = 8
 
 
 class IP_OPTION_INFORMATION(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
@@ -153,7 +219,7 @@ class IP_OPTION_INFORMATION(ctypes.Structure):  # noqa: N801 - mirrors the Windo
     this API.
     """
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("Ttl", ctypes.c_uint8),
         ("Tos", ctypes.c_uint8),
@@ -171,7 +237,7 @@ class ICMP_ECHO_REPLY(ctypes.Structure):  # noqa: N801 - mirrors the Windows C t
         order, not a string.
     """
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("Address", ctypes.c_uint32),
         ("Status", ctypes.c_uint32),
@@ -194,7 +260,7 @@ class IPV6_ADDRESS_EX(ctypes.Structure):  # noqa: N801 - mirrors the Windows C t
     """
 
     _pack_ = 1
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("sin6_port", ctypes.c_uint16),
         ("sin6_flowinfo", ctypes.c_uint32),
@@ -212,7 +278,7 @@ class ICMPV6_ECHO_REPLY(ctypes.Structure):  # noqa: N801 - mirrors the Windows C
         address.
     """
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("Address", IPV6_ADDRESS_EX),
         ("Status", ctypes.c_uint32),
@@ -223,7 +289,7 @@ class ICMPV6_ECHO_REPLY(ctypes.Structure):  # noqa: N801 - mirrors the Windows C
 class SOCKADDR_IN6(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
     """``sockaddr_in6`` as ``Icmp6SendEcho2`` expects it."""
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("sin6_family", ctypes.c_uint16),
         ("sin6_port", ctypes.c_uint16),
@@ -236,7 +302,7 @@ class SOCKADDR_IN6(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type
 class SOCKADDR_IN(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
     """``sockaddr_in``, the IPv4 arm of :class:`SOCKADDR_INET`."""
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("sin_family", ctypes.c_uint16),
         ("sin_port", ctypes.c_uint16),
@@ -268,7 +334,7 @@ class NET_LUID(ctypes.Union):  # noqa: N801 - mirrors the Windows C type name
 class IP_ADDRESS_PREFIX(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
     """``IP_ADDRESS_PREFIX``: an address plus its prefix length."""
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("Prefix", SOCKADDR_INET),
         ("PrefixLength", ctypes.c_uint8),
@@ -283,7 +349,7 @@ class MIB_IPFORWARD_ROW2(ctypes.Structure):  # noqa: N801 - mirrors the Windows 
     it was given, which corrupts memory rather than failing cleanly.
     """
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("InterfaceLuid", NET_LUID),
         ("InterfaceIndex", ctypes.c_uint32),
@@ -311,7 +377,7 @@ class MIB_IPFORWARD_TABLE2(ctypes.Structure):  # noqa: N801 - mirrors the Window
     array of that length rather than by trusting this declaration's size.
     """
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("NumEntries", ctypes.c_uint32),
         ("Table", MIB_IPFORWARD_ROW2 * 1),
@@ -326,7 +392,7 @@ class MIB_IPNET_ROW2(ctypes.Structure):  # noqa: N801 - mirrors the Windows C ty
     an approximate bitfield would only be a way to get the size wrong.
     """
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("Address", SOCKADDR_INET),
         ("InterfaceIndex", ctypes.c_uint32),
@@ -342,7 +408,7 @@ class MIB_IPNET_ROW2(ctypes.Structure):  # noqa: N801 - mirrors the Windows C ty
 class MIB_IPNET_TABLE2(ctypes.Structure):  # noqa: N801 - mirrors the Windows C type name
     """``MIB_IPNET_TABLE2``: a count followed by that many neighbour rows."""
 
-    _layout_ = _MS_LAYOUT
+    _layout_ = MS_LAYOUT
     _fields_ = (
         ("NumEntries", ctypes.c_uint32),
         ("Table", MIB_IPNET_ROW2 * 1),
@@ -475,16 +541,73 @@ def last_error() -> int:
     return value if isinstance(value, int) else 0
 
 
-def sockaddr_inet_to_string(sockaddr: SOCKADDR_INET) -> str | None:
+def sockaddr_inet_address(sockaddr: SOCKADDR_INET) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     """Return the address held in a ``SOCKADDR_INET``, or None if it holds none.
+
+    The one place the union's family tag is read: the tag picks the arm, and
+    the arm's packed bytes become the address, so nothing downstream decodes
+    the family again or re-parses a text form.
 
     Args:
         sockaddr: The union to read.
 
     Returns:
-        The printable address, or ``None`` when the family is neither IPv4 nor
-        IPv6 (an unspecified next hop reads as family zero, which is how an
-        on-link route reports having no router).
+        The address, or ``None`` when the family is neither IPv4 nor IPv6 (an
+        unspecified next hop reads as family zero, which is how an on-link
+        route reports having no router).
+
+    Examples:
+        >>> sockaddr_inet_address(SOCKADDR_INET()) is None
+        True
+        >>> tagged = SOCKADDR_INET()
+        >>> tagged.si_family = WIN_AF_INET
+        >>> tagged.Ipv4.sin_addr[:] = (192, 0, 2, 1)
+        >>> sockaddr_inet_address(tagged)
+        IPv4Address('192.0.2.1')
+
+    """
+
+    family = family_from_win(int(sockaddr.si_family))
+    if family is AddressFamily.IPV4:
+        return ipaddress.IPv4Address(bytes(sockaddr.Ipv4.sin_addr))
+    if family is AddressFamily.IPV6:
+        return ipaddress.IPv6Address(bytes(sockaddr.Ipv6.sin6_addr))
+    return None
+
+
+def address_text(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    """Return the text form of an address, as ``inet_ntop`` writes it.
+
+    ``inet_ntop`` rather than ``str()``: the two disagree on an IPv4-mapped
+    IPv6 address before Python 3.13 (``::ffff:102:304`` against
+    ``::ffff:1.2.3.4``), and every other backend reports the ``inet_ntop``
+    form.
+
+    Args:
+        address: The address to render.
+
+    Returns:
+        The address as text.
+
+    Examples:
+        >>> address_text(ipaddress.IPv6Address("::ffff:192.0.2.1"))
+        '::ffff:192.0.2.1'
+
+    """
+
+    family = AddressFamily.of_version(address.version)
+    return socket.inet_ntop(family.socket_family, address.packed)
+
+
+def sockaddr_inet_to_string(sockaddr: SOCKADDR_INET) -> str | None:
+    """Return the text form of the address in a ``SOCKADDR_INET``, or None.
+
+    Args:
+        sockaddr: The union to read.
+
+    Returns:
+        :func:`address_text` of :func:`sockaddr_inet_address`, or ``None``
+        when the union holds no address.
 
     Examples:
         >>> blank = SOCKADDR_INET()
@@ -493,12 +616,8 @@ def sockaddr_inet_to_string(sockaddr: SOCKADDR_INET) -> str | None:
 
     """
 
-    family = family_from_win(int(sockaddr.si_family))
-    if family is AddressFamily.IPV4:
-        return socket.inet_ntop(family.socket_family, bytes(sockaddr.Ipv4.sin_addr))
-    if family is AddressFamily.IPV6:
-        return socket.inet_ntop(family.socket_family, bytes(sockaddr.Ipv6.sin6_addr))
-    return None
+    address = sockaddr_inet_address(sockaddr)
+    return address_text(address) if address is not None else None
 
 
 def ipv4_to_string(address: int) -> str:
@@ -542,7 +661,7 @@ def string_to_ipv4(address: str) -> int:
     return int(struct.unpack("<I", socket.inet_aton(address))[0])
 
 
-def ipv6_words_to_string(words: object) -> str:
+def ipv6_words_to_string(words: Iterable[int]) -> str:
     """Return the text form of an ``IPV6_ADDRESS_EX`` address field.
 
     Args:
@@ -560,8 +679,8 @@ def ipv6_words_to_string(words: object) -> str:
 
     """
 
-    raw = b"".join(struct.pack("<H", int(word) & 0xFFFF) for word in words)  # type: ignore[union-attr]
-    return socket.inet_ntop(socket.AF_INET6, raw)
+    raw = b"".join(struct.pack("<H", word & 0xFFFF) for word in words)
+    return socket.inet_ntop(AddressFamily.IPV6.socket_family, raw)
 
 
 _library_cache: ctypes.CDLL | None = None
@@ -648,7 +767,7 @@ def _configure(library: ctypes.CDLL) -> None:  # pragma: no cover - Windows only
     library.SendARP.argtypes = (
         ctypes.c_uint32,  # DestIP
         ctypes.c_uint32,  # SrcIP, 0 to let the stack choose
-        ctypes.POINTER(ctypes.c_uint8 * 8),  # PhysAddr, written by the call
+        ctypes.POINTER(ctypes.c_uint8 * MAX_ADAPTER_ADDRESS_LENGTH),  # PhysAddr, written by the call
         ctypes.POINTER(ctypes.c_uint32),  # PhysAddrLen, in and out
     )
 

@@ -35,7 +35,7 @@ from __future__ import annotations
 import enum
 import socket
 import statistics
-from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address, ip_network
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field, model_validator
@@ -44,7 +44,12 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 __all__ = [
+    "DEFAULT_TIMEOUT",
+    "DISCARD_PORT",
+    "MAX_HOP_LIMIT",
     "MAX_PORT",
+    "MAX_TIMEOUT",
+    "MAX_TIMES",
     "MIN_PORT",
     "AddressFamily",
     "Banner",
@@ -80,9 +85,14 @@ __all__ = [
     "ScanMethod",
     "SubnetInfo",
     "SweepScope",
+    "Timeout",
     "TraceHop",
     "WakeReport",
+    "needs_zone",
+    "parse_address",
+    "require_address",
     "require_port",
+    "require_timeout",
 ]
 
 #: An IPv4 or IPv6 network, as the standard library models it. Carried as the
@@ -103,6 +113,32 @@ UNKNOWN_IP = "0.0.0.0"  # noqa: S104  # nosec B104
 #: the OS to pick one, so it never names a port on a remote host.
 MIN_PORT = 1
 MAX_PORT = 65535
+
+#: The largest hop limit an IP header can carry: the IPv4 TTL and the IPv6
+#: hop limit are both one byte.
+MAX_HOP_LIMIT = 255
+
+#: The discard service's port. A UDP socket ``connect()``-ed to any port makes
+#: the kernel pick a route and a source address without sending a packet;
+#: this one is used because nothing should be listening on it.
+DISCARD_PORT = 9
+
+#: Default seconds to wait for one reply, whatever asked for it: an echo, a
+#: hop, a neighbour solicitation or a kernel table query. Defined here, in the
+#: lowest layer, so every backend can share it.
+DEFAULT_TIMEOUT = 2.0
+
+#: The longest wait, in seconds, any probe accepts. Windows stores a socket
+#: timeout as a signed 32-bit count of milliseconds, and past that the
+#: interpreter's own clock type overflows on every platform: measured here,
+#: ``settimeout(1e10)`` raises ``OverflowError`` mid-probe rather than a
+#: refusal before it. The bound is the smallest of those limits.
+MAX_TIMEOUT = 2147483.0
+
+#: The most echoes one ping sends. Each echo carries its own sequence number,
+#: counting from 1, in a 16-bit ICMP header field, so one more would fail
+#: half-way through the run instead of before it.
+MAX_TIMES = 0xFFFF
 
 
 def require_port(value: int) -> int:
@@ -136,11 +172,143 @@ def require_port(value: int) -> int:
     return value
 
 
+def require_timeout(value: float) -> float:
+    """Return ``value`` if it is a usable wait in seconds, or raise saying why not.
+
+    The one check every probe taking a timeout applies, so a ping and a
+    traceroute refuse the same mistake in the same words. Zero or less would
+    never wait, and ``nan`` fails every comparison, so neither is a wait at all.
+
+    Args:
+        value: The candidate number of seconds.
+
+    Returns:
+        ``value`` unchanged.
+
+    Raises:
+        ValueError: ``value`` is not above zero, or is above ``MAX_TIMEOUT``.
+
+    Examples:
+        >>> require_timeout(2.0)
+        2.0
+        >>> require_timeout(0)
+        Traceback (most recent call last):
+        ...
+        ValueError: timeout must be above 0 and at most 2147483 seconds, got 0
+
+    """
+
+    if not 0 < value <= MAX_TIMEOUT:
+        msg = f"timeout must be above 0 and at most {MAX_TIMEOUT:.0f} seconds, got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
+def parse_address(text: str) -> IPv4Address | IPv6Address:
+    """Return ``text`` parsed as an IP address literal of either family, or raise.
+
+    An RFC 4007 ``%zone`` is accepted on an IPv6 address only.
+
+    Raises:
+        ValueError: ``text`` is not an address literal.
+
+    Examples:
+        >>> parse_address("192.0.2.1")
+        IPv4Address('192.0.2.1')
+        >>> parse_address("192.0.2.1%eth0")
+        Traceback (most recent call last):
+        ...
+        ValueError: '192.0.2.1%eth0' is not an IP address literal
+
+    """
+
+    try:
+        return ip_address(text)
+    except ValueError as exc:
+        msg = f"{text!r} is not an IP address literal"
+        raise ValueError(msg) from exc
+
+
+def require_address(text: str, family: AddressFamily) -> IPv4Address | IPv6Address:
+    """Return ``text`` parsed as an address of ``family``, or raise saying why not.
+
+    The one check for "an address literal of this family", so a request, a
+    result and a route lookup refuse a name, a malformed literal and a literal
+    of the other family alike. An RFC 4007 ``%zone`` is accepted on an IPv6
+    address, the form a link-local target is carried in.
+
+    Args:
+        text: The candidate literal.
+        family: The family it must belong to.
+
+    Returns:
+        The parsed address.
+
+    Raises:
+        ValueError: ``text`` is not an address literal, or is one of the other
+            family.
+
+    Examples:
+        >>> require_address("fe80::1%eth0", AddressFamily.IPV6)
+        IPv6Address('fe80::1%eth0')
+        >>> require_address("example.test", AddressFamily.IPV4)
+        Traceback (most recent call last):
+        ...
+        ValueError: 'example.test' is not an IP address literal
+        >>> require_address("::1", AddressFamily.IPV4)
+        Traceback (most recent call last):
+        ...
+        ValueError: '::1' is not an ipv4 address
+
+    """
+
+    parsed = parse_address(text)
+    if parsed.version != family.ip_version:
+        msg = f"{text!r} is not an {family.value} address"
+        raise ValueError(msg)
+    return parsed
+
+
+def _require_prefix_len(prefix_len: int, address: IPv4Address | IPv6Address) -> None:
+    """Raise unless ``prefix_len`` fits the address it belongs to (0-32 or 0-128)."""
+
+    if not 0 <= prefix_len <= address.max_prefixlen:
+        msg = f"prefix_len must be 0-{address.max_prefixlen} for {address}, got {prefix_len}"
+        raise ValueError(msg)
+
+
+def needs_zone(address: IPv4Address | IPv6Address) -> bool:
+    """Return whether ``address`` is only usable together with an interface (zone).
+
+    Only IPv6 link-local addresses are: they are unique on one link alone, so
+    a probe needs the RFC 4007 ``%interface`` suffix to know where to send.
+
+    Examples:
+        >>> needs_zone(ip_address("fe80::1"))
+        True
+        >>> needs_zone(ip_address("169.254.1.1"))
+        False
+
+    """
+
+    return address.version == AddressFamily.IPV6.ip_version and address.is_link_local
+
+
 #: A port number a remote host can be asked about. Every record carrying one
 #: refuses anything else, so a reader never meets a port no producer could
 #: have probed. The check is ``require_port`` itself rather than a field bound,
 #: so a record and a port list refuse the same mistake in the same words.
 Port = Annotated[int, AfterValidator(require_port)]
+
+#: Seconds to wait, bounded by ``require_timeout`` for the reason ``Port`` is
+#: bounded by ``require_port``: a request field and a plain argument refuse
+#: the same value in the same words.
+Timeout = Annotated[float, AfterValidator(require_timeout)]
+
+#: One measured round trip in milliseconds. A clock difference, so never
+#: negative, and never infinite or ``nan``: a reply that did not come back is
+#: ``None`` in the sequence, not a number.
+_RoundTrip = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
 
 class _Frozen(BaseModel):
@@ -190,6 +358,18 @@ class AddressFamily(str, enum.Enum):
         """
 
         return 6 if self is AddressFamily.IPV6 else 4
+
+    @property
+    def unspecified_address(self) -> str:
+        """Return the all-zero address of this family in its canonical text form.
+
+        Examples:
+            >>> AddressFamily.IPV6.unspecified_address
+            '::'
+
+        """
+
+        return "::" if self is AddressFamily.IPV6 else UNKNOWN_IP
 
     @classmethod
     def of_version(cls, version: int) -> AddressFamily:
@@ -387,18 +567,55 @@ class ResponseObject(_Frozen):
         >>> "time_avg_ms" in ResponseObject(target="t").model_dump()
         True
 
+        The counts must agree with each other, as every producer's do:
+
+        >>> ResponseObject(target="t", number_of_pings=1, rtts_ms=(1.0,), packets_sent=1)
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
+    Note:
+        ``target`` may be empty: it is the caller's input echoed back, and a
+        sweep with ``raise_on_error=False`` reports a blank target as a result
+        keyed by that blank rather than raising for the whole sweep.
+
     """
 
+    #: The target exactly as the caller wrote it, so results key back to the input.
     target: str
+    #: True exactly when at least one reply came back.
     reached: bool = False
+    #: The address probed, of ``family``; the family's unspecified address
+    #: (``0.0.0.0`` or ``::``) when no address was determined.
     ip: str = UNKNOWN_IP
-    number_of_pings: int = 0
-    rtts_ms: tuple[float | None, ...] = ()
-    packets_sent: int = 0
-    packets_received: int = 0
+    #: Echoes sent. A run sends every echo it asks for, and a refused or
+    #: unresolved request sends none, so this always equals ``packets_sent``.
+    number_of_pings: int = Field(default=0, ge=0, le=MAX_TIMES)
+    #: One entry per echo sent, ``None`` for an echo nothing answered.
+    rtts_ms: tuple[_RoundTrip | None, ...] = ()
+    packets_sent: int = Field(default=0, ge=0, le=MAX_TIMES)
+    packets_received: int = Field(default=0, ge=0, le=MAX_TIMES)
     family: AddressFamily = AddressFamily.IPV4
     method: ProbeMethod = ProbeMethod.ICMP
-    error: str | None = None
+    #: Why nothing was sent, set only by ``raise_on_error=False``. Never
+    #: empty: a reason that says nothing is no reason.
+    error: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _counts_agree(self) -> ResponseObject:
+        require_address(self.ip, self.family)
+        answered = sum(1 for rtt in self.rtts_ms if rtt is not None)
+        problems = (
+            (self.packets_sent != self.number_of_pings, "packets_sent must equal number_of_pings: a run sends every echo it asks for"),
+            (len(self.rtts_ms) != self.packets_sent, "rtts_ms must hold one entry per packet sent"),
+            (answered != self.packets_received, "packets_received must count the round trips in rtts_ms that came back"),
+            (self.reached != (self.packets_received > 0), "reached must be True exactly when a packet was received"),
+            (self.error is not None and self.packets_sent > 0, "error is set only on a result that sent nothing"),
+        )
+        for broken, msg in problems:
+            if broken:
+                raise ValueError(msg)
+        return self
 
     @property
     def _received(self) -> tuple[float, ...]:
@@ -472,7 +689,7 @@ class ResponseObject(_Frozen):
         parse it.
 
         Examples:
-            >>> ResponseObject(target="t", ip="1.1.1.1", number_of_pings=1,
+            >>> ResponseObject(target="t", reached=True, ip="1.1.1.1", number_of_pings=1,
             ...                rtts_ms=(2.5,), packets_sent=1,
             ...                packets_received=1).str_result
             '[1.1.1.1] pinged 1 times, min: 2.50ms, avg: 2.50ms, max: 2.50ms, 0% Packet loss'
@@ -496,9 +713,11 @@ class TraceHop(_Frozen):
     it would misnumber every hop after it.
     """
 
-    ttl: int
+    #: The hop limit the probe carried: 1 for the first router, never past
+    #: what the one-byte IP header field can hold.
+    ttl: int = Field(ge=1, le=MAX_HOP_LIMIT)
     address: str | None = None
-    rtt_ms: float | None = None
+    rtt_ms: _RoundTrip | None = None
     reached: bool = False
     hostname: str | None = None
 
@@ -511,7 +730,18 @@ class InterfaceAddress(_Frozen):
     """
 
     address: str
+    #: 0-32 for an IPv4 address, 0-128 for an IPv6 one.
     prefix_len: int
+
+    @model_validator(mode="after")
+    def _prefix_fits_the_address(self) -> InterfaceAddress:
+        try:
+            parsed = ip_address(self.address)
+        except ValueError as exc:
+            msg = f"{self.address!r} is not an IP address literal"
+            raise ValueError(msg) from exc
+        _require_prefix_len(self.prefix_len, parsed)
+        return self
 
 
 class Interface(_Frozen):
@@ -527,13 +757,15 @@ class Interface(_Frozen):
     """
 
     name: str
-    index: int | None = None
+    #: Kernel interface indexes start at 1; 0 means "no interface" everywhere.
+    index: int | None = Field(default=None, ge=1)
     ipv4: tuple[InterfaceAddress, ...] = ()
     ipv6: tuple[InterfaceAddress, ...] = ()
     mac: str | None = None
     is_up: bool = False
     is_loopback: bool = False
-    mtu: int | None = None
+    #: Bytes; ``None`` where the OS did not say, never zero.
+    mtu: int | None = Field(default=None, gt=0)
 
 
 class LeaseInfo(_Frozen):
@@ -592,7 +824,7 @@ class Neighbour(_Frozen):
             parsed = ip_address(self.ip)
         except ValueError:  # pragma: no cover - the backends only report literals
             return self.ip
-        if parsed.version != AddressFamily.IPV6.ip_version or not parsed.is_link_local:
+        if not needs_zone(parsed):
             return self.ip
         return f"{self.ip}%{self.interface}"
 
@@ -641,7 +873,9 @@ class SubnetInfo(_Frozen):
     """
 
     interface: str
+    #: An address of ``family``.
     address: str
+    #: 0-32 for IPv4, 0-128 for IPv6.
     prefix_len: int
     network: str
     family: AddressFamily = AddressFamily.IPV4
@@ -652,7 +886,13 @@ class SubnetInfo(_Frozen):
     dhcp_server: str | None = None
     lease_obtained: str | None = None
     lease_expires: str | None = None
-    mtu: int | None = None
+    #: Bytes; ``None`` where the OS did not say, never zero.
+    mtu: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _prefix_fits_the_family(self) -> SubnetInfo:
+        _require_prefix_len(self.prefix_len, require_address(self.address, self.family))
+        return self
 
 
 class PortResult(_Frozen):
@@ -714,7 +954,8 @@ class MtuReport(_Frozen):
     """The path MTU to one target, where it could be determined."""
 
     target: str
-    mtu: int | None = None
+    #: Bytes; ``None`` when the path MTU could not be determined, never zero.
+    mtu: int | None = Field(default=None, gt=0)
 
 
 class RemoveNeighbourReport(_Frozen):
@@ -764,7 +1005,7 @@ class SweepScope(_Frozen):
     #: Recorded rather than assumed, so a message or a reader can state the
     #: budget a scope was built under instead of naming a default that may not
     #: be the one that applied.
-    limit: int
+    limit: int = Field(ge=1)
     #: The networks the sweep probes.
     networks: tuple[IPNetwork, ...] = ()
     #: The networks left out for not fitting in what the sweep bound allows.
@@ -876,8 +1117,9 @@ class ObserveDhcpReport(_Frozen):
     mac: str
     interface: str | None = None
     addresses: tuple[str, ...] = ()
-    timeout: float
-    settle: float
+    timeout: float = Field(gt=0)
+    #: Zero is a real setting: answer on the first address seen.
+    settle: float = Field(ge=0)
 
 
 class CapabilityReport(_Frozen):
@@ -928,8 +1170,10 @@ class PackageInfo(_Frozen):
 class JsonError(_Frozen):
     """A failure, rendered as data rather than as a traceback."""
 
-    type: str
-    message: str
+    #: The exception class name, which a reader can branch on.
+    type: str = Field(min_length=1)
+    #: The sentence a person reads. Never empty: an empty one says nothing.
+    message: str = Field(min_length=1)
 
 
 class JsonEnvelope(_Frozen):
@@ -952,10 +1196,17 @@ class JsonEnvelope(_Frozen):
 
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
+    #: True exactly when ``error`` is None: a failure always says why, and a
+    #: success never carries a reason for failing.
     ok: bool
     command: CommandName | None = None
     data: object | None = None
     error: JsonError | None = None
     skipped: tuple[IPNetwork, ...] = ()
+
+    @model_validator(mode="after")
+    def _ok_exactly_without_error(self) -> JsonEnvelope:
+        if self.ok != (self.error is None):
+            msg = "ok is True exactly when error is None"
+            raise ValueError(msg)
+        return self

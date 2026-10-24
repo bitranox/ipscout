@@ -5,8 +5,10 @@ Contents:
     split_sockaddrs: Split the self-describing addresses trailing a message.
     address_of: Read an IP address out of one sockaddr.
     link_address_of: Read a hardware address out of a ``sockaddr_dl``.
-    pack_sockaddr_in / pack_sockaddr_dl: Encode the two addresses a static
-        neighbour entry is written with.
+    pack_sockaddr_in / pack_sockaddr_in6 / pack_sockaddr_dl: Encode the
+        addresses a route query or a static neighbour entry is written with.
+    NO_METRICS: An all-zero ``rt_metrics``, the one every request sends.
+    open_route_socket: A ``PF_ROUTE`` socket, the channel requests go out on.
     sysctl: Read a kernel MIB into bytes.
     roundup: The alignment the routing socket uses between addresses.
 
@@ -25,7 +27,10 @@ import struct
 
 from pydantic import BaseModel, ConfigDict
 
+from .arp import MAC_LENGTH, format_mac
+
 __all__ = [
+    "NO_METRICS",
     "RTA_BRD",
     "RTA_DST",
     "RTA_GATEWAY",
@@ -39,14 +44,17 @@ __all__ = [
     "RTF_UP",
     "RTM_ADD",
     "RTM_DELETE",
+    "RTM_GET",
     "RTM_VERSION",
     "RTV_EXPIRE",
     "RT_MSGHDR",
     "SockaddrSet",
     "address_of",
     "link_address_of",
+    "open_route_socket",
     "pack_sockaddr_dl",
     "pack_sockaddr_in",
+    "pack_sockaddr_in6",
     "roundup",
     "split_sockaddrs",
     "sysctl",
@@ -81,19 +89,30 @@ RTF_LLINFO = 0x0400
 RTF_HOST = 0x0004
 RTF_STATIC = 0x0800
 
-#: The routing-message types that write the table, and the version they speak.
+#: The routing-message types: two that write the table, one that asks which
+#: route the kernel would use. All speak the same version.
 RTM_ADD = 0x01
 RTM_DELETE = 0x02
+RTM_GET = 0x04
 RTM_VERSION = 5
 
 #: rtm_inits bit saying rmx_expire is set. Sent with an expiry of zero, it
 #: says "never expires", which is how ``arp -s`` makes an entry permanent.
 RTV_EXPIRE = 0x04
 
+#: sizeof(struct rt_metrics): fourteen 32-bit fields (rmx_locks through
+#: rmx_state, then rmx_filler[3]).
+RT_METRICS_SIZE = 56
+
 #: struct rt_msghdr, up to and including rtm_inits, then rt_metrics as opaque
 #: bytes. The two pad bytes after rtm_index are the alignment the C compiler
 #: inserts before the first int; naming them keeps the offsets honest.
-RT_MSGHDR = struct.Struct("=HBBH2xiiiiiiI56s")
+RT_MSGHDR = struct.Struct(f"=HBBH2xiiiiiiI{RT_METRICS_SIZE}s")
+
+#: rt_metrics with every field zero, as both a query and a write send it: no
+#: metric is being set, and with RTV_EXPIRE in rtm_inits a zero rmx_expire is
+#: how a write says "never expires".
+NO_METRICS = bytes(RT_METRICS_SIZE)
 
 #: A BSD sockaddr leads with its own length, which is what makes walking a
 #: list of them possible without knowing each type.
@@ -117,8 +136,8 @@ IFT_ETHER = 0x06
 #: struct sockaddr_in: len, family, port, address, eight bytes of zero.
 SOCKADDR_IN = struct.Struct("=BBH4s8s")
 
-#: An Ethernet hardware address is six bytes.
-MAC_LENGTH = 6
+#: struct sockaddr_in6: len, family, port, flowinfo, address, scope id.
+SOCKADDR_IN6 = struct.Struct("=BBHI16sI")
 
 
 def roundup(length: int) -> int:
@@ -193,10 +212,7 @@ def link_address_of(chunk: bytes) -> str | None:
     end = start + address_length
     if end > len(chunk):
         return None
-    raw = chunk[start:end]
-    if not any(raw):
-        return None
-    return ":".join(f"{octet:02x}" for octet in raw)
+    return format_mac(chunk[start:end])
 
 
 def pack_sockaddr_in(address: bytes) -> bytes:
@@ -216,6 +232,28 @@ def pack_sockaddr_in(address: bytes) -> bytes:
     """
 
     return SOCKADDR_IN.pack(SOCKADDR_IN.size, socket.AF_INET, 0, address, bytes(8))
+
+
+def pack_sockaddr_in6(address: bytes) -> bytes:
+    """Encode an IPv6 address as the BSD ``sockaddr_in6`` a routing message carries.
+
+    Args:
+        address: The sixteen address bytes, as ``inet_pton`` returns them.
+
+    Returns:
+        Twenty-eight bytes: no port, flow label or scope, since a route query
+        names a destination and nothing else. The family byte is this
+        platform's ``AF_INET6``, which differs between macOS and Linux, so the
+        bytes only describe an IPv6 address to the kernel they are built on.
+
+    Examples:
+        >>> encoded = pack_sockaddr_in6(socket.inet_pton(socket.AF_INET6, "2001:db8::1"))
+        >>> len(encoded), encoded[0]
+        (28, 28)
+
+    """
+
+    return SOCKADDR_IN6.pack(SOCKADDR_IN6.size, socket.AF_INET6, 0, 0, address, 0)
 
 
 def pack_sockaddr_dl(index: int, mac: bytes) -> bytes:
@@ -298,6 +336,22 @@ def split_sockaddrs(payload: bytes, addrs: int) -> SockaddrSet:
             found[field] = payload[position : position + length]
         position += roundup(length)
     return SockaddrSet(**found)
+
+
+def open_route_socket() -> socket.socket:  # pragma: no cover - macOS only
+    """Open a ``PF_ROUTE`` socket, the channel routing messages go out on.
+
+    ``AF_ROUTE`` is looked up by name with the BSD value as the fallback, so
+    the call type-checks on every platform; only a BSD kernel accepts it.
+
+    Raises:
+        OSError: The platform has no routing socket, or refused one. Each
+            caller decides what that means: a route query answers "no route",
+            a table write reports the errno.
+
+    """
+
+    return socket.socket(getattr(socket, "AF_ROUTE", PF_ROUTE), socket.SOCK_RAW, 0)
 
 
 def sysctl(mib: list[int]) -> bytes | None:  # pragma: no cover - macOS only

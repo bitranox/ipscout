@@ -18,23 +18,62 @@ Note:
 from __future__ import annotations
 
 import socket
+from typing import TYPE_CHECKING
 
+from .arp import MAC_LENGTH
 from .errors import IPScoutError
-from .models import require_port
+from .models import AddressFamily, require_address, require_port
+
+if TYPE_CHECKING:
+    from ipaddress import IPv4Address, IPv6Address
 from .neighbours import normalise_mac
 
-__all__ = ["DEFAULT_PORT", "build_magic_packet", "wake_on_lan"]
+__all__ = ["DEFAULT_BROADCAST", "DEFAULT_PORT", "MAGIC_PACKET_SIZE", "build_magic_packet", "wake_on_lan"]
 
 #: The conventional ports. Nothing listens on them in the usual sense - the
 #: NIC matches the payload regardless - so any of them works.
 DEFAULT_PORT = 9
 
+#: The limited broadcast address: it reaches the local segment without
+#: knowing its subnet, which is why it is the default.
+DEFAULT_BROADCAST = "255.255.255.255"
+
 #: The packet is six 0xFF bytes followed by the address repeated sixteen times.
 _SYNC_LENGTH = 6
 _REPEATS = 16
 
-#: 6 sync bytes plus 16 six-byte addresses.
-MAGIC_PACKET_SIZE = 102
+#: The whole packet: the sync bytes, then the hardware address repeated.
+MAGIC_PACKET_SIZE = _SYNC_LENGTH + MAC_LENGTH * _REPEATS
+
+
+def _broadcast_address(text: str) -> IPv4Address | IPv6Address:
+    """Return the IPv4 address a magic packet goes to, or raise saying why ``text`` is not one.
+
+    An empty string or ``0.0.0.0`` is refused rather than handed to the
+    socket: both mean INADDR_ANY there, so the packet would go to this host
+    and still be reported as sent. A name is refused too, because only an
+    address says which segment the broadcast is meant for.
+
+    Examples:
+        >>> _broadcast_address("192.0.2.255")
+        IPv4Address('192.0.2.255')
+        >>> _broadcast_address("0.0.0.0")
+        Traceback (most recent call last):
+        ...
+        ValueError: broadcast must be an IPv4 address other than 0.0.0.0: '0.0.0.0' is this host
+
+    """
+
+    lead = "broadcast must be an IPv4 address other than 0.0.0.0"
+    try:
+        address = require_address(text, AddressFamily.IPV4)
+    except ValueError as exc:
+        msg = f"{lead}: {exc}"
+        raise ValueError(msg) from exc
+    if address.is_unspecified:
+        msg = f"{lead}: {text!r} is this host"
+        raise ValueError(msg)
+    return address
 
 
 def build_magic_packet(mac: str) -> bytes:
@@ -67,22 +106,24 @@ def build_magic_packet(mac: str) -> bytes:
     return b"\xff" * _SYNC_LENGTH + raw * _REPEATS
 
 
-def wake_on_lan(mac: str, *, broadcast: str = "255.255.255.255", port: int = DEFAULT_PORT) -> None:
+def wake_on_lan(mac: str, *, broadcast: str = DEFAULT_BROADCAST, port: int = DEFAULT_PORT) -> None:
     """Send a magic packet, asking a sleeping host to wake.
 
     Args:
         mac: The target's hardware address, in any common written form.
-        broadcast: Where to send it. The limited broadcast address reaches the
-            local segment; a subnet's own broadcast address is often the
-            better choice, since some switches drop the limited form.
+        broadcast: Where to send it, as an IPv4 address. The limited
+            broadcast address reaches the local segment; a subnet's own
+            broadcast address is often the better choice, since some switches
+            drop the limited form.
         port: UDP port. Conventionally 9 or 7, and it makes no difference:
             the NIC matches the payload, not the port.
 
     Raises:
-        ValueError: The input is not a hardware address, or the port is
-            outside ``MIN_PORT``-``MAX_PORT``.
-        IPScoutError: The packet could not be sent - an unroutable broadcast
-            address, or no route to it.
+        ValueError: The input is not a hardware address, the port is
+            outside ``MIN_PORT``-``MAX_PORT``, or ``broadcast`` is not an IPv4
+            address or is ``0.0.0.0``. Checked before anything is sent.
+        IPScoutError: The packet could not be sent, for instance for want of a
+            route to the broadcast address.
 
     Note:
         Returns nothing, because nothing comes back. A magic packet is
@@ -96,11 +137,12 @@ def wake_on_lan(mac: str, *, broadcast: str = "255.255.255.255", port: int = DEF
     """
 
     require_port(port)
+    destination = _broadcast_address(broadcast)
     packet = build_magic_packet(mac)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.sendto(packet, (broadcast, port))
+            sock.sendto(packet, (str(destination), port))
     except OSError as exc:
         # Every other public callable reports failure through this hierarchy;
         # leaking a bare OSError from one of them would make the contract

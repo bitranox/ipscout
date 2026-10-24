@@ -43,6 +43,7 @@ Note:
 from __future__ import annotations
 
 import contextlib
+import math
 import sys
 import threading
 import time
@@ -51,6 +52,7 @@ from typing import TYPE_CHECKING
 from .api import is_reachable
 from .bootp import DhcpReply
 from .errors import IPScoutError, IPScoutUnsupportedError
+from .models import require_timeout
 from .neighbours import normalise_mac
 from .routes import default_gateway
 
@@ -168,11 +170,11 @@ class DhcpSession:
             # permission failure on the ones that cannot capture.
             msg = f"not a hardware address: {mac!r}"
             raise ValueError(msg)
-        if timeout <= 0:
-            msg = f"timeout must be positive, got {timeout!r}: a window of zero could never see anything"
-            raise ValueError(msg)
-        if settle < 0:
-            msg = f"settle cannot be negative, got {settle!r}"
+        # require_timeout also refuses a non-finite window: NaN passed the old
+        # comparisons and failed only when the report was built, after watching.
+        require_timeout(timeout)
+        if not (math.isfinite(settle) and settle >= 0):
+            msg = f"settle must be a finite number of seconds, not negative, got {settle!r}"
             raise ValueError(msg)
 
         self._mac = wanted

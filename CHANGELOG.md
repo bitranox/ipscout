@@ -14,8 +14,62 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `AddressFamily.ip_version` and `AddressFamily.of_version()`.
 - `ipscout.portscan.DEFAULT_TIMEOUT` (1.0 s per port), and `DEFAULT_CONCURRENCY` exported from
   `ipscout.api` and `ipscout.scan`; the CLI options take their defaults from these.
+- Argument models and checks every entry point shares: `banner.BannerSettings`,
+  `portscan.PortScanSettings`, `scan.SweepSettings`; `models.Timeout` / `require_timeout` (above 0,
+  at most 2147483 s, finite), `models.MAX_TIMES` (65535, the 16-bit echo sequence),
+  `models.MAX_HOP_LIMIT` (255), `models.parse_address` / `require_address`, `models.needs_zone`,
+  `pool.Concurrency` / `require_concurrency` (at least 1), and `errors.validation_problems` /
+  `refused_arguments`, which word every argument refusal the same way.
+- `models.DEFAULT_TIMEOUT` (2.0 s, re-exported by `service`), `models.DISCARD_PORT`,
+  `AddressFamily.unspecified_address`, `packet.MAX_IP_LENGTH`, `packet.UDP_HEADER_SIZE`,
+  `packet.IPV4_MIN_HEADER_SIZE`, `arp.normalise_mac` (where `neighbours.normalise_mac` now comes
+  from), `arp.format_hardware_address`, `arp.FRAME_RECEIVE_SIZE`, `ports.CAPTURE_RECEIVE_BUFFER`,
+  `ports.MIN_CAPTURE_WAIT`, `wol.DEFAULT_BROADCAST`, `scan.refuse_a_partial_scope`,
+  `scan.sweep_argument_refusal`.
+- Windows backend helpers: `winapi.IpStatus` (an `IntEnum` of the IP_STATUS codes with their text),
+  `win_family` / `family_from_win`, `sockaddr_in6`, `sockaddr_inet_address`, `address_text`,
+  `reply_buffer_size`, `DEFAULT_TTL`, `ICMP_REPLY_HEADROOM`, `MAX_ADAPTER_ADDRESS_LENGTH`,
+  `NO_ERROR`, `MS_LAYOUT`; `transport_windows.ipv6_destination` and `echo_outcome`;
+  `neighbours_windows.declared_mac`. macOS route-socket helpers in `bsdroute`: `RTM_GET`,
+  `NO_METRICS`, `pack_sockaddr_in6`, `open_route_socket`.
 
 ### Changed
+
+- Every argument refusal reads `<operation> refused its arguments: <argument>: <reason>` (one part
+  per bad argument) and is a plain `ValueError` with pydantic's report kept as `__cause__`. `ping`
+  raised the `pydantic.ValidationError` itself, and with `raise_on_error=False` its `.error` held
+  pydantic's text, error-type tags and a docs URL; the CLI printed the same text.
+- Arguments that were accepted and then misreported are refused before anything is sent:
+  `concurrency` below 1 (silently run as 1); a `timeout` of zero, below zero, infinite or above
+  2147483 s in `ping`, `traceroute`, `scan_ports`, `syn_scan`, `arp_scan` and `grab_banners` (a zero
+  timeout reported open ports as `FILTERED`, a sweep returned the cache as its result, a traceroute
+  walked 30 silent hops, and 1e12 raised `OverflowError` mid-probe); `times` above 65535; a negative
+  `payload_size`; `max_hops` above 255; a sweep `limit` below 1; an empty `farewell` (silently not
+  sent); a NaN or infinite `DhcpSession` window.
+- Address arguments are parsed at entry: `query_route` and `lookup_mac` refuse a host name, a
+  malformed literal, a literal of the other family or a zone on an IPv4 address with `ValueError`
+  (they returned `None` / `UNKNOWN`, the same as "no route"); `wake_on_lan` refuses a broadcast that
+  is empty, `0.0.0.0`, a name or not IPv4 (an empty one sent the packet to this host and reported it
+  sent); `scan_ports` resolves the host once and uses that address for every port (a name was
+  resolved per port, and the SYN path passed the name to `inet_aton`); an unresolvable host raises
+  `IPScoutResolutionError` instead of reporting every port `FILTERED`.
+- Records refuse values no producer makes: `ResponseObject` (counts 0-65535, received at most sent
+  and matching the answered round trips, `reached` exactly when something answered, `ip` of its
+  `family`, a non-empty `error`), `TraceHop.ttl` 1-255, `InterfaceAddress` / `SubnetInfo` prefix
+  length within the family, `mtu` above 0, `Interface.index` at least 1, `SweepScope.limit` at least
+  1, `ObserveDhcpReport` windows, `JsonEnvelope` (`ok` exactly when `error` is absent),
+  `ParsedReply` field widths, `EchoPayload.token` exactly 8 bytes, and `DhcpReply` (canonical MAC,
+  a non-zero IPv4 offer, a 32-bit transaction id). `build_echo_request` refuses a token of the wrong
+  length and a sequence or identifier outside 0-65535.
+- A `ping` that fails before sending reports what it knew: the resolved address and family when
+  resolution succeeded (it reported `0.0.0.0` / IPv4 for an IPv6 target), and 0 pings sent.
+- `bootp.offers_from_frames(mac=...)` accepts any written form of the address; another spelling
+  than lowercase-colon silently matched nothing.
+- CLI: a bad option value is a usage error (exit 2, naming the option) before any probe, checked
+  through the library's own argument types; `ping-many -c 0` exited 1 with every row failed.
+  `wake`, `gateway --to` and `mac` with a bad argument exit 2 naming the command (they escaped with
+  exit 1 or 22 and `command: null`). `traceroute --max-hops` is limited to 1-255. In human mode a
+  usage error shows Click's usage text instead of a traceback.
 
 - Every port number is held to 1-65535 the same way, with the message
   `port out of range 1-65535: N`. `scan_ports` / `ascan_ports` / `syn_scan` refuse a port LIST
@@ -48,6 +102,22 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   and the failed send was reported as a live host that never answered.
 - `wake_on_lan` refuses a port outside 1-65535 with `ValueError`. It raised an uncaught
   `OverflowError` from the socket layer, which the CLI printed as a traceback.
+- An interface whose sysfs MTU reads 0 is listed with no MTU instead of failing the listing.
+
+### Removed
+
+Backend-module names replaced by the shared definitions above. Nothing in the top-level `ipscout`
+namespace is removed or changed.
+
+- `winapi.IP_SUCCESS`, `IP_DEST_NET_UNREACHABLE`, `IP_DEST_HOST_UNREACHABLE`, `IP_REQ_TIMED_OUT`,
+  `IP_TTL_EXPIRED_TRANSIT`: use `winapi.IpStatus` members, which compare equal to the same numbers.
+- `neighbours_linux`, `neighbours_windows`, `bsdroute` and `tcpsyn` no longer define their own
+  `format_mac`, `MAC_LENGTH` and `checksum`; they import `arp.format_mac`, `arp.MAC_LENGTH` and
+  `packet.checksum` (the same RFC 1071 sum) and drop them from `__all__`. An old import still
+  resolves, except that `neighbours_windows.format_mac` now takes one argument: for a
+  length-prefixed buffer use `neighbours_windows.declared_mac(raw, length)`.
+- `neighbours_windows.resolve_active(ip)` takes the family as a second argument; an IPv4 address in
+  a non-dotted-quad form such as `192.0.2` resolves to nothing instead of being read as `192.0.0.2`.
 
 ## [2.1.0] 2026-10-24 17:18:42
 

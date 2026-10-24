@@ -37,14 +37,28 @@ import socket
 import sys
 import time
 
-from .errors import IPScoutPermissionError, IPScoutUnsupportedError
-from .models import MAX_PORT, PortState, ScanMethod, require_port
-from .pool import gather_bounded
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from .errors import IPScoutPermissionError, IPScoutUnsupportedError, refused_arguments
+from .models import DISCARD_PORT, MAX_PORT, AddressFamily, PortState, ScanMethod, Timeout, require_port
+from .packet import MAX_IP_LENGTH
+from .pool import Concurrency, gather_bounded
+from .resolve import ResolvedTarget, resolve_one
 from .routes import query_route
 from .sockerr import is_refusal
 from .tcpsyn import build_syn, read_reply
 
-__all__ = ["DEFAULT_CONCURRENCY", "DEFAULT_TIMEOUT", "MAX_PORT", "ascan_ports", "choose_source_port", "parse_ports", "scan_ports", "syn_scan"]
+__all__ = [
+    "DEFAULT_CONCURRENCY",
+    "DEFAULT_TIMEOUT",
+    "MAX_PORT",
+    "PortScanSettings",
+    "ascan_ports",
+    "choose_source_port",
+    "parse_ports",
+    "scan_ports",
+    "syn_scan",
+]
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -59,6 +73,42 @@ DEFAULT_TIMEOUT = 1.0
 #: process, and both then read replies meant for the other.
 _EPHEMERAL_LOW = 32768
 _EPHEMERAL_HIGH = 60999
+
+
+class PortScanSettings(BaseModel):
+    """How long a scan waits and how many connects it keeps in flight, checked once.
+
+    The bounds are declared on the fields, so the check and its documentation
+    cannot drift apart, and the command line reads these same declarations for
+    its options. Strict: ``"1"`` is not a timeout.
+
+    Examples:
+        >>> PortScanSettings().concurrency == DEFAULT_CONCURRENCY
+        True
+        >>> PortScanSettings(timeout=0)
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    #: Seconds to wait for one port, or for every SYN reply in total, under the
+    #: library's one timeout rule. Zero never waits and reports every port
+    #: FILTERED, which reads as a firewall rather than as the caller's mistake.
+    timeout: Timeout = DEFAULT_TIMEOUT
+    #: Connects in flight at once, under the pool's one concurrency rule.
+    concurrency: Concurrency = DEFAULT_CONCURRENCY
+
+
+def _settings(*, timeout: float, concurrency: int = DEFAULT_CONCURRENCY) -> PortScanSettings:
+    """Return the checked settings, or raise one ``ValueError`` naming every bad argument."""
+
+    try:
+        return PortScanSettings(timeout=timeout, concurrency=concurrency)
+    except ValidationError as exc:
+        raise refused_arguments("port scan", exc) from exc
 
 
 def parse_ports(specification: str) -> list[int]:
@@ -143,8 +193,8 @@ def choose_source_port() -> int:
     return _EPHEMERAL_LOW + secrets.randbelow(_EPHEMERAL_HIGH - _EPHEMERAL_LOW)
 
 
-def _source_for(host: str) -> str | None:
-    """Return the address this host would send to ``host`` from.
+def _source_for(address: str) -> str | None:
+    """Return the address this host would send to ``address`` from.
 
     The route lookup answers this where the kernel recorded a preferred
     source, but it often does not for on-link and loopback destinations - the
@@ -153,15 +203,15 @@ def _source_for(host: str) -> str | None:
     binds a local address without putting anything on the wire.
     """
 
-    route = query_route(host)
+    route = query_route(address)
     if route is not None and route.source:
         return route.source
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            # Port 9 is discard; nothing is sent, so this only has to be a
-            # valid destination for the kernel to choose a source for.
-            sock.connect((host, 9))
+            # Nothing is sent, so this only has to be a valid destination for
+            # the kernel to choose a source for.
+            sock.connect((address, DISCARD_PORT))
             name = sock.getsockname()
     except OSError:
         return None
@@ -172,7 +222,8 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
     """Scan ports half-open, sending a SYN and never completing the handshake.
 
     Args:
-        host: The target address.
+        host: The target, as a name or an IPv4 literal. A name is resolved
+            once, here, and every SYN goes to that one address.
         ports: The ports to ask about.
         timeout: Seconds to wait for replies, in total.
 
@@ -186,8 +237,10 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
             means root or ``CAP_NET_RAW`` on Linux and macOS.
         IPScoutUnsupportedError: Windows, which has blocked raw TCP sends
             since XP SP2, or no route to the target.
-        ValueError: A port is outside ``MIN_PORT``-``MAX_PORT``. Checked first, so a
-            bad list is reported as such whatever the privileges.
+        IPScoutResolutionError: ``host`` has no IPv4 address.
+        ValueError: A port is outside ``MIN_PORT``-``MAX_PORT``, or
+            ``timeout`` is not above 0 and at most ``MAX_TIMEOUT``. Checked first, so a
+            bad argument is reported as such whatever the privileges.
 
     Note:
         Never falls back to a connect scan. The two measure different things,
@@ -198,12 +251,21 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
 
     for port in ports:
         require_port(port)
+    return _half_open(host, ports, _settings(timeout=timeout))
+
+
+def _half_open(host: str, ports: list[int], settings: PortScanSettings) -> dict[int, PortState]:
+    """Run a SYN scan of ports and settings already checked by the caller."""
 
     if IS_WINDOWS:  # pragma: no cover - Windows only
         msg = "Windows blocks raw TCP sends, so a SYN scan is unavailable at any privilege level; use the connect method"
         raise IPScoutUnsupportedError(msg)
 
-    source_ip = _source_for(host)
+    # Resolved once: the packet builder and the reply matcher both need the
+    # address literal, and a name resolved per use could answer differently.
+    # IPv4 only, because the raw socket and the packet builder are.
+    target = resolve_one(host, family=AddressFamily.IPV4)
+    source_ip = _source_for(target.address)
     if source_ip is None:
         msg = f"no route to {host}, so no source address to send a SYN from"
         raise IPScoutUnsupportedError(msg)
@@ -223,7 +285,7 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
         msg = f"a SYN scan needs a raw socket, which this host refused: {exc}"
         raise IPScoutPermissionError(msg) from exc
 
-    return _syn_exchange(sender, receiver, host, ports, source_ip=source_ip, timeout=timeout)
+    return _syn_exchange(sender, receiver, target.address, ports, source_ip=source_ip, timeout=settings.timeout)
 
 
 def _syn_exchange(  # noqa: PLR0913 - one parameter per piece of the exchange, all required
@@ -257,7 +319,7 @@ def _syn_exchange(  # noqa: PLR0913 - one parameter per piece of the exchange, a
         while outstanding and time.monotonic() < deadline:
             receiver.settimeout(max(0.01, deadline - time.monotonic()))
             try:
-                packet = receiver.recv(65535)
+                packet = receiver.recv(MAX_IP_LENGTH)
             except (TimeoutError, OSError):
                 break
             # The packet names its own port, so it is read once and looked
@@ -285,14 +347,17 @@ def scan_ports(
     """Return the state of each of a set of ports.
 
     Args:
-        host: The target, as a name or a literal address.
+        host: The target, as a name or a literal address. A name is resolved
+            once, before the first probe, and every port is asked of that one
+            address.
         ports: Either a specification like ``"22,80,8000-8100"`` or a list of
             port numbers.
         method: ``CONNECT`` completes the handshake and needs no privileges.
             ``SYN`` is half-open and needs a raw socket.
         timeout: Seconds to wait per port.
         concurrency: How many connects are in flight at once. Ignored by the
-            SYN method, which sends everything and then listens once.
+            SYN method, which sends everything and then listens once, but
+            checked for it too.
 
     Returns:
         Every port asked about, mapped to its state. Ports not asked about do
@@ -300,8 +365,11 @@ def scan_ports(
         range.
 
     Raises:
-        ValueError: The port specification is malformed, or a listed port
-            is outside ``MIN_PORT``-``MAX_PORT``.
+        ValueError: The port specification is malformed, a listed port is
+            outside ``MIN_PORT``-``MAX_PORT``, ``timeout`` is not above 0
+            and at most ``MAX_TIMEOUT``, or ``concurrency`` is below 1.
+        IPScoutResolutionError: ``host`` does not resolve. Raised rather than
+            reporting every port FILTERED, which would read as a firewall.
         IPScoutPermissionError: A SYN scan without the privilege it needs.
         IPScoutUnsupportedError: A SYN scan where the platform has none.
         RuntimeError: The connect method called from inside a running event
@@ -315,13 +383,14 @@ def scan_ports(
     """
 
     wanted = _wanted(ports)
+    settings = _settings(timeout=timeout, concurrency=concurrency)
     if method is ScanMethod.SYN:
-        return syn_scan(host, wanted, timeout=timeout)
+        return _half_open(host, wanted, settings)
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(_connect_scan(host, wanted, timeout=timeout, concurrency=concurrency))
+        return asyncio.run(_connect_scan(resolve_one(host), wanted, settings))
     msg = "scan_ports() cannot run inside an event loop; await ascan_ports() instead"
     raise RuntimeError(msg)
 
@@ -330,7 +399,9 @@ async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = DEF
     """Return the state of each of a set of ports, by full connect.
 
     Args:
-        host: The target, as a name or a literal address.
+        host: The target, as a name or a literal address. A name is resolved
+            once, in a thread so the event loop keeps running, and every port
+            is asked of that one address.
         ports: Either a specification like ``"22,80,8000-8100"`` or a list of
             port numbers.
         timeout: Seconds to wait per port.
@@ -342,31 +413,35 @@ async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = DEF
         the two would hide a firewall.
 
     Raises:
-        ValueError: The port specification is malformed, or a listed port
-            is outside ``MIN_PORT``-``MAX_PORT``.
+        ValueError: The port specification is malformed, a listed port is
+            outside ``MIN_PORT``-``MAX_PORT``, ``timeout`` is not above 0
+            and at most ``MAX_TIMEOUT``, or ``concurrency`` is below 1.
+        IPScoutResolutionError: ``host`` does not resolve.
 
     """
 
-    return await _connect_scan(host, _wanted(ports), timeout=timeout, concurrency=concurrency)
+    wanted = _wanted(ports)
+    settings = _settings(timeout=timeout, concurrency=concurrency)
+    target = await asyncio.to_thread(resolve_one, host)
+    return await _connect_scan(target, wanted, settings)
 
 
-async def _connect_scan(host: str, wanted: list[int], *, timeout: float, concurrency: int) -> dict[int, PortState]:
+async def _connect_scan(target: ResolvedTarget, wanted: list[int], settings: PortScanSettings) -> dict[int, PortState]:
     """Connect-scan ports already parsed and de-duplicated by :func:`_wanted`.
 
-    Both public entry points parse the specification themselves and then share
-    this, so it is parsed once whichever of them a caller used.
+    Both public entry points parse the specification, check the settings and
+    resolve the host themselves and then share this, so each is done once
+    whichever of them a caller used.
     """
 
     async def probe(port: int) -> tuple[int, PortState]:
         try:
-            _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+            connecting = asyncio.open_connection(target.address, port, family=target.family.socket_family)
+            _reader, writer = await asyncio.wait_for(connecting, settings.timeout)
         except (TimeoutError, asyncio.TimeoutError):
             return port, PortState.FILTERED
         except OSError as exc:
             return port, PortState.CLOSED if is_refusal(exc) else PortState.FILTERED
-        except ValueError:
-            # A name that does not resolve is not an answer about the port.
-            return port, PortState.FILTERED
         writer.close()
         with contextlib.suppress(OSError, asyncio.TimeoutError, ConnectionError):
             await writer.wait_closed()
@@ -375,4 +450,4 @@ async def _connect_scan(host: str, wanted: list[int], *, timeout: float, concurr
     # A worker pool rather than a semaphore inside a gather over everything:
     # the semaphore would bound sockets while still creating one Task per
     # port, which is 65535 of them for a full-range scan.
-    return dict(await gather_bounded(wanted, probe, concurrency))
+    return dict(await gather_bounded(wanted, probe, settings.concurrency))

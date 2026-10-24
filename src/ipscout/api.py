@@ -28,7 +28,9 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, NamedTuple
 
-from .errors import IPScoutError
+from pydantic import ValidationError
+
+from .errors import IPScoutError, refused_arguments
 from .factory import icmp_available, make_async_transport, make_transport
 from .models import AddressFamily, ProbeMethod, ResponseObject
 from .packet import DEFAULT_PAYLOAD_SIZE
@@ -101,18 +103,28 @@ def _request(  # noqa: PLR0913 - mirrors the public API's knobs, every one keywo
     Validation comes first and the probe method second: choosing it can open
     an ICMP socket to see whether one is available, and a request that
     validation rejects must not touch the machine at all.
+
+    Raises:
+        ValueError: A parameter is refused. Raised as a plain ``ValueError``
+            naming each refused field, with pydantic's own error as its cause:
+            ``str()`` of that error is written for the model's author and
+            carries a docs URL and the input echoed back, none of which helps
+            the caller who passed the value.
     """
 
-    request = PingRequest(
-        target=target,
-        address=resolved.address,
-        family=resolved.family,
-        times=times,
-        timeout=timeout,
-        interval=interval,
-        payload_size=payload_size,
-        tcp_port=tcp_port,
-    )
+    try:
+        request = PingRequest(
+            target=target,
+            address=resolved.address,
+            family=resolved.family,
+            times=times,
+            timeout=timeout,
+            interval=interval,
+            payload_size=payload_size,
+            tcp_port=tcp_port,
+        )
+    except ValidationError as refused:
+        raise refused_arguments("ping", refused) from refused
     return _with_method(request, _probe_method(request.family, allow_tcp_fallback=allow_tcp_fallback))
 
 
@@ -143,10 +155,23 @@ async def _asend(request: PingRequest) -> ResponseObject:
         return await arun_ping(request, transport)
 
 
-def _suppressed(target: str, times: int, exc: Exception) -> ResponseObject:
-    """Return the unreached result used when ``raise_on_error=False``."""
+def _suppressed(target: str, exc: Exception, *, resolved: ResolvedTarget | None, family: AddressFamily | None) -> ResponseObject:
+    """Return the unreached result used when ``raise_on_error=False``.
 
-    return ResponseObject(target=target, number_of_pings=times, error=str(exc))
+    Reports what was learned before the failure and nothing more: the
+    resolved address and its family when resolution got that far, otherwise
+    the family the caller asked for (IPv4 when they named none) with that
+    family's unspecified address. Nothing was sent, so every count is zero
+    whatever ``times`` was - a refused ``times`` is not a count to repeat.
+    """
+
+    # An exception with no message still has a class name, and the record
+    # refuses an empty reason because it would say nothing.
+    reason = str(exc) or type(exc).__name__
+    if resolved is not None:
+        return ResponseObject(target=target, ip=resolved.address, family=resolved.family, error=reason)
+    known = family or AddressFamily.IPV4
+    return ResponseObject(target=target, ip=known.unspecified_address, family=known, error=reason)
 
 
 def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful
@@ -182,7 +207,10 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
             even when ICMP answers.
         raise_on_error: Keep the strict contract. Set False to report every
             failure as ``reached=False`` with the reason on ``.error``
-            instead, argument mistakes included.
+            instead, argument mistakes included. Such a result sent nothing,
+            so its counts are zero; its ``ip`` and ``family`` are the resolved
+            ones when the target resolved before the failure, otherwise the
+            requested family (IPv4 when none was) and its unspecified address.
 
     Returns:
         The result. Unreachable targets, timeouts and total loss are all
@@ -192,8 +220,10 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
         IPScoutResolutionError: The target does not resolve.
         IPScoutPermissionError: ICMP is unavailable and no fallback was allowed.
         IPScoutUnsupportedError: No ICMP backend exists for this platform.
-        ValueError: ``times``, ``timeout``, ``interval``, ``payload_size`` or
-            ``tcp_port`` is out of range, whichever probe method runs.
+        ValueError: ``times`` (1-``MAX_TIMES``), ``timeout`` (above 0, at
+            most ``MAX_TIMEOUT``), ``interval`` (0 to ``MAX_TIMEOUT``),
+            ``payload_size`` or ``tcp_port`` is out of range, whichever probe
+            method runs. The message names each refused argument.
 
     Examples:
         >>> result = ping("127.0.0.1", 2, interval=0)
@@ -215,8 +245,18 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
         >>> muted.reached, muted.error is None
         (False, False)
 
+        An argument mistake is reported in the caller's terms, and the
+        address it resolved to is kept:
+
+        >>> refused = ping("::1", 0, raise_on_error=False)
+        >>> refused.error
+        'ping refused its arguments: times: Input should be greater than or equal to 1'
+        >>> refused.ip, refused.family.value
+        ('::1', 'ipv6')
+
     """
 
+    resolved: ResolvedTarget | None = None
     try:
         resolved = resolve_one(target, family=family)
         request = _request(
@@ -233,7 +273,7 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
     except (IPScoutError, ValueError) as exc:
         if raise_on_error:
             raise
-        return _suppressed(target, times, exc)
+        return _suppressed(target, exc, resolved=resolved, family=family)
 
 
 async def aping(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful
@@ -270,6 +310,7 @@ async def aping(  # noqa: PLR0913 - public API: every knob is keyword-only and i
 
     """
 
+    resolved: ResolvedTarget | None = None
     try:
         # getaddrinfo blocks for as long as the name server takes; on the loop
         # thread one slow name would stall every other probe in a sweep.
@@ -288,7 +329,7 @@ async def aping(  # noqa: PLR0913 - public API: every knob is keyword-only and i
     except (IPScoutError, ValueError) as exc:
         if raise_on_error:
             raise
-        return _suppressed(target, times, exc)
+        return _suppressed(target, exc, resolved=resolved, family=family)
 
 
 async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful
@@ -309,7 +350,7 @@ async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only 
     Args:
         targets: The targets. Duplicates are collapsed, since the result is
             keyed by target and a repeat could only overwrite itself.
-        concurrency: Maximum probes in flight at once.
+        concurrency: Maximum probes in flight at once; at least 1.
         times: Echoes per target.
         timeout: Seconds to wait for each reply.
         interval: Seconds between one target's consecutive echoes.
@@ -325,6 +366,11 @@ async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only 
 
     Returns:
         A mapping of target to result, in the order the targets were given.
+
+    Raises:
+        ValueError: ``concurrency`` is below 1. Refused for the whole sweep
+            whatever ``raise_on_error`` says, and before any probe: it is a
+            mistake about the sweep, not about one target.
 
     Examples:
         >>> import asyncio
@@ -390,6 +436,7 @@ def ping_many(  # noqa: PLR0913 - public API: every knob is keyword-only and ind
         RuntimeError: Called from inside a running event loop, where it would
             deadlock. Await :func:`aping_many` there instead. Failing loudly
             beats hanging.
+        ValueError: ``concurrency`` is below 1, as in :func:`aping_many`.
 
     Examples:
         >>> results = ping_many(["127.0.0.1", "::1"], times=1)

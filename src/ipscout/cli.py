@@ -23,14 +23,13 @@ Note:
 from __future__ import annotations
 
 import enum
-import ipaddress
 import re
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated, Generic, TypeVar
 
 import lib_cli_exit_tools
 import rich_click as click
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from rich.console import Console
 from rich.style import Style
 from rich.table import Table
@@ -39,13 +38,14 @@ from . import __init__conf__
 from .api import DEFAULT_CONCURRENCY as DEFAULT_PING_CONCURRENCY
 from .api import is_reachable, ping, ping_many
 from .banner import DEFAULT_CONCURRENCY as DEFAULT_BANNER_CONCURRENCY
-from .banner import DEFAULT_MAX_LINE_BYTES, grab_banners
+from .banner import DEFAULT_MAX_LINE_BYTES, BannerSettings, grab_banners
 from .banner import DEFAULT_TIMEOUT as DEFAULT_BANNER_TIMEOUT
 from .dhcp import DEFAULT_SETTLE, DEFAULT_TIMEOUT, dhcp_capture_available, observe_dhcp
-from .errors import IPScoutError, IPScoutSweepTooWideError
+from .errors import IPScoutError, validation_problems
 from .factory import icmp_available
 from .interfaces import local_interfaces
 from .models import (
+    MAX_HOP_LIMIT,
     AddressFamily,
     BannerState,
     CapabilityReport,
@@ -60,6 +60,7 @@ from .models import (
     Neighbour,
     ObserveDhcpReport,
     PackageInfo,
+    Port,
     PortResult,
     PortScanReport,
     PortState,
@@ -74,24 +75,25 @@ from .models import (
 )
 from .mtu import path_mtu
 from .neighbours import get_mac_address, lookup_mac, neighbours
+from .pool import Concurrency
 from .portscan import DEFAULT_CONCURRENCY as DEFAULT_PORTSCAN_CONCURRENCY
 from .portscan import DEFAULT_TIMEOUT as DEFAULT_PORT_TIMEOUT
-from .portscan import scan_ports
+from .portscan import PortScanSettings, scan_ports
 from .resolve import resolve as resolve_target
 from .resolve import reverse_dns
 from .routes import default_gateway, query_route
 from .scan import DEFAULT_CONCURRENCY as DEFAULT_SWEEP_CONCURRENCY
-from .scan import MAX_SWEEP_HOSTS, arp_scan, find_ip_by_mac, sweep_scope
+from .scan import MAX_SWEEP_HOSTS, SweepSettings, arp_scan, find_ip_by_mac, refuse_a_partial_scope, sweep_argument_refusal, sweep_scope
 from .serialize import dumps, to_jsonable
-from .service import DEFAULT_INTERVAL, DEFAULT_TIMES
+from .service import DEFAULT_INTERVAL, DEFAULT_TIMES, PingRequest
 from .service import DEFAULT_TIMEOUT as DEFAULT_PING_TIMEOUT
 from .static_neighbours import remove_neighbour, set_neighbour
 from .subnet import subnet_info
 from .traceroute import DEFAULT_MAX_HOPS, traceroute
 from .transport_tcp import DEFAULT_TCP_PORT
 from .typed_click import argument, option, version_option
+from .wol import DEFAULT_BROADCAST, wake_on_lan
 from .wol import DEFAULT_PORT as DEFAULT_WAKE_PORT
-from .wol import wake_on_lan
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -132,6 +134,56 @@ _NOTE_STYLE = Style(color="yellow")
 EXIT_OK = 0
 EXIT_NOT_REACHED = 1
 EXIT_ERROR = 2
+
+_T = TypeVar("_T")
+
+if TYPE_CHECKING:
+    _ParamTypeBase = click.ParamType[object, object]
+else:
+    # click made ParamType generic in 8.4, and the runtime dependency does not
+    # require that release, so the base is only parameterised for the checker.
+    _ParamTypeBase = click.ParamType
+
+
+class _Declared(_ParamTypeBase, Generic[_T]):
+    """An option type whose bounds are the library's own declaration of the argument.
+
+    Converting through the field the library validates with, rather than a
+    ``click.IntRange`` that restates its bound, keeps one definition of each
+    limit: a bad value is a usage error before any probe, in the library's own
+    words, and a bound changed in the library changes here with it.
+    """
+
+    def __init__(self, name: str, adapter: TypeAdapter[_T]) -> None:
+        self.name = name
+        self._adapter = adapter
+
+    def convert(self, value: object, param: click.Parameter | None, ctx: click.Context | None) -> _T:
+        """Return the value as the library's field accepts it, or fail as a usage error."""
+
+        try:
+            return self._adapter.validate_python(value)
+        except ValidationError as exc:
+            self.fail("; ".join(validation_problems(exc)), param, ctx)
+
+
+def _int_field(model: type[BaseModel], field: str) -> _Declared[int]:
+    """Return the option type for an integer field of ``model``, bounds included."""
+
+    return _Declared("integer", TypeAdapter(Annotated[int, model.model_fields[field]]))
+
+
+def _float_field(model: type[BaseModel], field: str) -> _Declared[float]:
+    """Return the option type for a float field of ``model``, bounds included."""
+
+    return _Declared("float", TypeAdapter(Annotated[float, model.model_fields[field]]))
+
+
+#: Every port option: the library's one port type, so 0 and 70000 are usage errors.
+_PORT = _Declared("integer", TypeAdapter(Port))
+
+#: A concurrency option with no settings model of its own: the pool's one rule.
+_CONCURRENCY = _Declared("integer", TypeAdapter(Concurrency))
 
 
 class OutputMode(str, enum.Enum):
@@ -326,18 +378,33 @@ def _fail(ctx: click.Context, command: CommandName, exc: Exception, *, skipped: 
         case OutputMode.ENVELOPE:
             click.echo(dumps(JsonEnvelope(ok=False, command=command, error=error, skipped=skipped)))
         case OutputMode.HUMAN:
-            console.print(f"Error: {exc}", style=_ERROR_STYLE, highlight=False)
+            console.print(f"Error: {_message(exc)}", style=_ERROR_STYLE, highlight=False)
     ctx.exit(EXIT_ERROR)
+
+
+def _message(exc: BaseException) -> str:
+    """Return what a failure says to whoever reads it, in either output mode.
+
+    Click keeps the offending option's name in the exception's formatting, not
+    its text: str() of a bad --timeout says only that "abc" is not a number,
+    which leaves a reader to guess which option was meant. A pydantic refusal's
+    str() is written for the model's author - its error types, a docs URL and
+    the input echoed back - so it becomes one sentence and one line per problem.
+    """
+
+    if isinstance(exc, click.ClickException):
+        return exc.format_message()
+    if isinstance(exc, ValidationError):
+        return "\n".join(["the arguments were refused:", *validation_problems(exc)])
+    return str(exc)
 
 
 def _json_error(exc: BaseException) -> JsonError:
     """Return the machine-readable record of a failure, for either JSON shape."""
 
-    # Click keeps the offending option's name in the exception's formatting,
-    # not its text: str() of a bad --timeout says only that "abc" is not a
-    # number, which leaves a JSON reader to guess which option was meant.
-    message = exc.format_message() if isinstance(exc, click.ClickException) else str(exc)
-    return JsonError(type=type(exc).__name__, message=message)
+    # An exception can carry no text at all; the record still has to say
+    # something, so the class name stands in for an empty message.
+    return JsonError(type=type(exc).__name__, message=_message(exc) or type(exc).__name__)
 
 
 def _family(*, ipv4: bool, ipv6: bool) -> AddressFamily | None:
@@ -393,13 +460,13 @@ def cli(ctx: click.Context, *, json_output: bool, json_bare: bool) -> None:
 
 @cli.command("ping", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("target")
-@option("--times", "-c", type=int, default=DEFAULT_TIMES, show_default=True, help="Echoes to send.")
-@option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per reply.")
-@option("--interval", type=float, default=DEFAULT_INTERVAL, show_default=True, help="Seconds between echoes.")
+@option("--times", "-c", type=_int_field(PingRequest, "times"), default=DEFAULT_TIMES, show_default=True, help="Echoes to send.")
+@option("--timeout", type=_float_field(PingRequest, "timeout"), default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per reply.")
+@option("--interval", type=_float_field(PingRequest, "interval"), default=DEFAULT_INTERVAL, show_default=True, help="Seconds between echoes.")
 @option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
 @option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
 @option("--tcp-fallback", is_flag=True, default=False, help="Fall back to a TCP connect when ICMP is unavailable.")
-@option("--tcp-port", type=int, default=DEFAULT_TCP_PORT, show_default=True, help="Port for the TCP fallback.")
+@option("--tcp-port", type=_PORT, default=DEFAULT_TCP_PORT, show_default=True, help="Port for the TCP fallback.")
 @click.pass_context
 def cli_ping(  # noqa: PLR0913 - one parameter per documented CLI option; collapsing them would hide the interface
     ctx: click.Context,
@@ -436,9 +503,9 @@ def cli_ping(  # noqa: PLR0913 - one parameter per documented CLI option; collap
 
 @cli.command("ping-many", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("targets", nargs=-1, required=True)
-@option("--times", "-c", type=int, default=DEFAULT_TIMES, show_default=True, help="Echoes per target.")
-@option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per reply.")
-@option("--concurrency", type=int, default=DEFAULT_PING_CONCURRENCY, show_default=True, help="Probes in flight at once.")
+@option("--times", "-c", type=_int_field(PingRequest, "times"), default=DEFAULT_TIMES, show_default=True, help="Echoes per target.")
+@option("--timeout", type=_float_field(PingRequest, "timeout"), default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per reply.")
+@option("--concurrency", type=_CONCURRENCY, default=DEFAULT_PING_CONCURRENCY, show_default=True, help="Probes in flight at once.")
 @click.pass_context
 def cli_ping_many(ctx: click.Context, targets: tuple[str, ...], *, times: int, timeout: float, concurrency: int) -> None:
     """Ping many hosts concurrently."""
@@ -464,8 +531,8 @@ def cli_ping_many(ctx: click.Context, targets: tuple[str, ...], *, times: int, t
 
 @cli.command("reachable", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("target")
-@option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to allow per attempt.")
-@option("--tcp-port", type=int, default=DEFAULT_TCP_PORT, show_default=True, help="Port for the TCP attempt.")
+@option("--timeout", type=_float_field(PingRequest, "timeout"), default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to allow per attempt.")
+@option("--tcp-port", type=_PORT, default=DEFAULT_TCP_PORT, show_default=True, help="Port for the TCP attempt.")
 @click.pass_context
 def cli_reachable(ctx: click.Context, target: str, *, timeout: float, tcp_port: int) -> None:
     """Answer whether a host responds, by ICMP or failing that TCP."""
@@ -479,7 +546,7 @@ def cli_reachable(ctx: click.Context, target: str, *, timeout: float, tcp_port: 
 
 @cli.command("traceroute", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("target")
-@option("--max-hops", type=int, default=DEFAULT_MAX_HOPS, show_default=True, help="Highest hop limit to try.")
+@option("--max-hops", type=click.IntRange(min=1, max=MAX_HOP_LIMIT), default=DEFAULT_MAX_HOPS, show_default=True, help="Highest hop limit to try.")
 @option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per hop.")
 @option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
 @option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
@@ -578,7 +645,13 @@ def cli_gateway(ctx: click.Context, *, ipv4: bool, ipv6: bool, destination: str 
     """Show the default route, or the next hop toward one address."""
 
     family = _family(ipv4=ipv4, ipv6=ipv6) or AddressFamily.IPV4
-    route = query_route(destination, family) if destination else default_gateway(family)
+    try:
+        route = query_route(destination, family) if destination else default_gateway(family)
+    except (IPScoutError, ValueError) as exc:
+        # A destination that is not an address is the caller's mistake: reported
+        # by this command, exit 2, rather than escaping to the errno mapping.
+        _fail(ctx, CommandName.GATEWAY, exc)
+        return
 
     if route is None:
         empty = RouteInfo()
@@ -630,7 +703,9 @@ def cli_mac(ctx: click.Context, ip: str, *, strict: bool, active: bool) -> None:
             payload = MacLookup(ip=ip, mac=address, scope=MacScope.DIRECT if address else MacScope.UNKNOWN)
         else:
             payload = lookup_mac(ip, active=active)
-    except IPScoutError as exc:
+    except (IPScoutError, ValueError) as exc:
+        # ValueError too: the route lookup behind it refuses a non-literal, and
+        # escaping would exit through the errno mapping with no command named.
         _fail(ctx, CommandName.MAC, exc)
         return
 
@@ -656,12 +731,10 @@ def cli_find_ip(  # noqa: PLR0913 - one parameter per documented CLI option; col
 ) -> None:
     """Find which addresses currently hold a hardware address."""
 
-    if network is not None and not scan:
-        # Dropping the flag would answer from the cache while the caller
-        # believes that network was swept. The library refuses the same call;
-        # this says it in the vocabulary the user typed.
-        msg = "--network applies only with --scan; without it only the existing neighbour cache is searched"
-        raise click.UsageError(msg)
+    # The library's rule and wording, in the vocabulary the user typed.
+    refusal = sweep_argument_refusal(scan=scan, named=None if network is None else "--network", scan_flag="--scan")
+    if refusal is not None:
+        raise click.UsageError(refusal)
 
     # Asked before sweeping, so the report can state its own coverage: the
     # address list alone cannot say whether a network went unprobed. Inside the
@@ -692,7 +765,7 @@ def cli_find_ip(  # noqa: PLR0913 - one parameter per documented CLI option; col
 
 @cli.command("arp-scan", context_settings=CLICK_CONTEXT_SETTINGS)
 @option("--network", default=None, help="CIDR to sweep. Defaults to the subnets this host is attached to.")
-@option("--concurrency", type=int, default=DEFAULT_SWEEP_CONCURRENCY, show_default=True, help="Probes in flight at once.")
+@option("--concurrency", type=_int_field(SweepSettings, "concurrency"), default=DEFAULT_SWEEP_CONCURRENCY, show_default=True, help="Probes in flight at once.")
 @option("-4", "ipv4", is_flag=True, default=False, help="Report only IPv4.")
 @option("-6", "ipv6", is_flag=True, default=False, help="Report only IPv6.")
 @click.pass_context
@@ -779,8 +852,14 @@ def cli_subnet(ctx: click.Context, *, interface: str | None) -> None:
 @argument("host")
 @option("--ports", required=True, help="Ports and ranges, as in 22,80,443,8000-8100.")
 @option("--syn", is_flag=True, default=False, help="Half-open SYN scan. Needs root or CAP_NET_RAW.")
-@option("--timeout", type=float, default=DEFAULT_PORT_TIMEOUT, show_default=True, help="Seconds to wait per port.")
-@option("--concurrency", type=int, default=DEFAULT_PORTSCAN_CONCURRENCY, show_default=True, help="Connects in flight at once.")
+@option("--timeout", type=_float_field(PortScanSettings, "timeout"), default=DEFAULT_PORT_TIMEOUT, show_default=True, help="Seconds to wait per port.")
+@option(
+    "--concurrency",
+    type=_int_field(PortScanSettings, "concurrency"),
+    default=DEFAULT_PORTSCAN_CONCURRENCY,
+    show_default=True,
+    help="Connects in flight at once.",
+)
 @click.pass_context
 def cli_scan_ports(  # noqa: PLR0913 - one parameter per CLI option, which is the point of the command
     ctx: click.Context,
@@ -851,16 +930,15 @@ def _banner_hosts(items: tuple[str, ...]) -> list[str]:
     Raises:
         ValueError: An item with a ``/`` is not a network.
         IPScoutSweepTooWideError: The networks together hold more addresses
-            than one sweep covers.
+            than one sweep covers. Every host of every network is grabbed, so
+            one left out would be a silently partial answer.
     """
 
-    networks = [ipaddress.ip_network(item, strict=False) for item in items if "/" in item]
-    total = sum(network.num_addresses for network in networks)
-    if total > MAX_SWEEP_HOSTS:
-        sizes = ", ".join(f"{network} holds {network.num_addresses} addresses" for network in networks)
-        msg = f"{sizes}, more than the {MAX_SWEEP_HOSTS} this will sweep; pass a narrower network"
-        raise IPScoutSweepTooWideError(msg)
-    expanded = iter(networks)
+    # The sweep's own budget and refusal, so a network too wide to sweep is too
+    # wide to grab banners from, in the same words.
+    scope = SweepScope.from_networks((item for item in items if "/" in item), limit=MAX_SWEEP_HOSTS)
+    refuse_a_partial_scope(scope)
+    expanded = iter(scope.networks)
     hosts: list[str] = []
     for item in items:
         if "/" in item:
@@ -872,10 +950,28 @@ def _banner_hosts(items: tuple[str, ...]) -> list[str]:
 
 @cli.command("banners", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("hosts", nargs=-1, required=True)
-@option("--port", type=int, required=True, help="TCP port to read the greeting on.")
-@option("--timeout", type=float, default=DEFAULT_BANNER_TIMEOUT, show_default=True, help="Seconds per host for connect and read together.")
-@option("--concurrency", type=int, default=DEFAULT_BANNER_CONCURRENCY, show_default=True, help="Connections in flight at once.")
-@option("--max-line-bytes", type=int, default=DEFAULT_MAX_LINE_BYTES, show_default=True, help="Most bytes of greeting kept per host.")
+@option("--port", type=_int_field(BannerSettings, "port"), required=True, help="TCP port to read the greeting on.")
+@option(
+    "--timeout",
+    type=_float_field(BannerSettings, "timeout"),
+    default=DEFAULT_BANNER_TIMEOUT,
+    show_default=True,
+    help="Seconds per host for connect and read together.",
+)
+@option(
+    "--concurrency",
+    type=_int_field(BannerSettings, "concurrency"),
+    default=DEFAULT_BANNER_CONCURRENCY,
+    show_default=True,
+    help="Connections in flight at once.",
+)
+@option(
+    "--max-line-bytes",
+    type=_int_field(BannerSettings, "max_line_bytes"),
+    default=DEFAULT_MAX_LINE_BYTES,
+    show_default=True,
+    help="Most bytes of greeting kept per host.",
+)
 @option("--farewell", default=None, help="Text to send after a greeting, before closing; \\r \\n \\t \\\\ are decoded (e.g. 'QUIT\\r\\n').")
 @option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
 @option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
@@ -940,15 +1036,15 @@ def cli_mtu(ctx: click.Context, target: str, *, ipv4: bool, ipv6: bool) -> None:
 
 @cli.command("wake", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("mac")
-@option("--broadcast", default="255.255.255.255", show_default=True, help="Where to send the magic packet.")
-@option("--port", type=int, default=DEFAULT_WAKE_PORT, show_default=True, help="UDP port. The NIC matches the payload, not the port.")
+@option("--broadcast", default=DEFAULT_BROADCAST, show_default=True, help="IPv4 address to send the magic packet to.")
+@option("--port", type=_PORT, default=DEFAULT_WAKE_PORT, show_default=True, help="UDP port. The NIC matches the payload, not the port.")
 @click.pass_context
 def cli_wake(ctx: click.Context, mac: str, *, broadcast: str, port: int) -> None:
     """Send a wake-on-LAN magic packet."""
 
     try:
         wake_on_lan(mac, broadcast=broadcast, port=port)
-    except (OSError, ValueError) as exc:
+    except (IPScoutError, ValueError) as exc:
         _fail(ctx, CommandName.WAKE, exc)
         return
 
@@ -1140,6 +1236,16 @@ def _exception_handler(output: OutputMode) -> Callable[[BaseException], int]:
                 click.echo(dumps(_json_error(exc)))
             case OutputMode.ENVELOPE:
                 click.echo(dumps(JsonEnvelope(ok=False, error=_json_error(exc))))
+            case OutputMode.HUMAN if isinstance(exc, click.ClickException):
+                # A malformed invocation is the user's to fix, not a crash.
+                # Click's own rendering names the option and the usage; the
+                # traceback print_exception_message() gives by default buried
+                # both, and its terse form dropped the option's name.
+                exc.show()
+            case OutputMode.HUMAN if isinstance(exc, ValidationError) and not lib_cli_exit_tools.config.traceback:
+                # The summary print_exception_message() would give is str(),
+                # which for a pydantic refusal is written for the model's author.
+                error_console.print(f"Error: {_message(exc)}", style=_ERROR_STYLE, highlight=False)
             case OutputMode.HUMAN:
                 lib_cli_exit_tools.print_exception_message()
         return code
