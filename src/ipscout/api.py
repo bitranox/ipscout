@@ -285,12 +285,12 @@ async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only 
     # A worker pool rather than a semaphore inside a gather over everything:
     # the semaphore bounds probes in flight while still creating one Task per
     # target up front, so a sweep of a large subnet holds them all at once.
-    completed = await gather_bounded(unique, one, concurrency)
-    results = dict(completed)
-    if len(results) != len(unique):  # pragma: no cover - a lost result is a bug, not a condition
-        msg = f"sweep returned {len(results)} results for {len(unique)} targets"
+    completed = dict(await gather_bounded(unique, one, concurrency))
+    if len(completed) != len(unique):  # pragma: no cover - a lost result is a bug, not a condition
+        msg = f"sweep returned {len(completed)} results for {len(unique)} targets"
         raise RuntimeError(msg)
-    return results
+    # Rebuilt from the input list: the pool's own order is completion order.
+    return {target: completed[target] for target in unique}
 
 
 def ping_many(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful

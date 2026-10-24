@@ -170,6 +170,16 @@ def test_a_sweep_returns_one_result_per_target_in_order() -> None:
     assert results[NEVER_ANSWERS].reached is False
 
 
+def test_a_sweep_keeps_input_order_when_the_first_target_finishes_last() -> None:
+    # The pool completes out of order; the loopback answer lands long before the
+    # timeout does, so only rebuilding the mapping in input order puts it second.
+    _require_icmp()
+
+    results = ipscout.ping_many([NEVER_ANSWERS, "127.0.0.1"], times=1, timeout=1.0)
+
+    assert list(results) == [NEVER_ANSWERS, "127.0.0.1"]
+
+
 def test_a_sweep_survives_one_bad_target_among_good_ones() -> None:
     # Defaulting raise_on_error to False for sweeps exists precisely so that
     # one typo cannot destroy 199 other results.
