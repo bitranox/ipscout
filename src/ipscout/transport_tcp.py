@@ -48,6 +48,35 @@ __all__ = ["DEFAULT_TCP_PORT", "AsyncTcpEchoTransport", "TcpEchoTransport"]
 DEFAULT_TCP_PORT = 443
 
 
+def _probe_socket(family: AddressFamily) -> socket.socket:
+    """Return a stream socket that can only carry traffic of ``family``.
+
+    An IPv6 socket accepts IPv4-mapped destinations (``::ffff:a.b.c.d``) by
+    default on Linux and macOS, and Python 3.15 on macOS maps a plain IPv4
+    literal there too, so an "IPv6" probe would reach an IPv4 listener and
+    report the host reachable over a family it never used. ``IPV6_V6ONLY``
+    makes that connect fail as unreachable instead.
+
+    Args:
+        family: The family the probe was asked to use.
+
+    Returns:
+        A new, unconnected socket the caller owns.
+
+    Examples:
+        >>> from ipscout.models import AddressFamily
+        >>> with _probe_socket(AddressFamily.IPV6) as sock:
+        ...     sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY)
+        1
+
+    """
+
+    sock = socket.socket(family.socket_family, socket.SOCK_STREAM)
+    if family.socket_family == socket.AF_INET6:
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    return sock
+
+
 class TcpEchoTransport:
     """Probe reachability by attempting a TCP connection.
 
@@ -107,7 +136,7 @@ class TcpEchoTransport:
         """
 
         del sequence, ttl
-        sock = socket.socket(self._family.socket_family, socket.SOCK_STREAM)
+        sock = _probe_socket(self._family)
         sock.settimeout(timeout)
         started = time.perf_counter()
         try:
@@ -179,25 +208,24 @@ class AsyncTcpEchoTransport:
         """
 
         del sequence, ttl
+        # The socket is built here rather than by open_connection, which offers
+        # no way to set IPV6_V6ONLY before it connects.
+        sock = _probe_socket(self._family)
+        sock.settimeout(0)
         started = time.perf_counter()
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(self._address, self._port, family=self._family.socket_family),
-                timeout,
-            )
+            await asyncio.wait_for(asyncio.get_running_loop().sock_connect(sock, (self._address, self._port)), timeout)
         except (TimeoutError, asyncio.TimeoutError):
             return EchoResult()
         except OSError as exc:
             if not is_refusal(exc):
                 return EchoResult()
             return EchoResult(rtt_ms=(time.perf_counter() - started) * 1000.0, source=self._address)
-
-        del reader
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        writer.close()
-        with contextlib.suppress(OSError, ConnectionError):
-            await writer.wait_closed()
-        return EchoResult(rtt_ms=elapsed_ms, source=self._address)
+        else:
+            return EchoResult(rtt_ms=(time.perf_counter() - started) * 1000.0, source=self._address)
+        finally:
+            with contextlib.suppress(OSError):
+                sock.close()
 
     async def aclose(self) -> None:
         """Release resources. Each probe owns its own connection, so this is a no-op."""

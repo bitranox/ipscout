@@ -151,6 +151,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- TCP fallback probes over IPv6 (`TcpEchoTransport`, `AsyncTcpEchoTransport`) could reach an IPv4
+  listener: an IPv4-mapped target (`::ffff:a.b.c.d`) connected through IPv4 on Linux and macOS,
+  and on macOS with Python 3.15 a plain IPv4 literal did too, so the host read as reachable over
+  IPv6. The probe socket now sets `IPV6_V6ONLY`, and such a target reads as unanswered.
 - Windows `local_interfaces()`: an adapter with no friendly name was named `b'{GUID}'` (the repr
   of the bytes) and one with no name at all `''`; it is now `{GUID}`, or `ifindex-<n>` /
   `adapter-<position>` when even that is missing.
