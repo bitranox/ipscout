@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from .models import AddressFamily
 from .ports import EchoResult
+from .sockerr import is_refusal
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -111,11 +112,11 @@ class TcpEchoTransport:
         started = time.perf_counter()
         try:
             sock.connect((self._address, self._port))
-        except ConnectionRefusedError:
+        except OSError as exc:
+            if not is_refusal(exc):
+                return EchoResult()
             # Refused means something answered, which only a live host does.
             return EchoResult(rtt_ms=(time.perf_counter() - started) * 1000.0, source=self._address)
-        except (TimeoutError, OSError):
-            return EchoResult()
         else:
             return EchoResult(rtt_ms=(time.perf_counter() - started) * 1000.0, source=self._address)
         finally:
@@ -184,10 +185,12 @@ class AsyncTcpEchoTransport:
                 asyncio.open_connection(self._address, self._port),
                 timeout,
             )
-        except ConnectionRefusedError:
-            return EchoResult(rtt_ms=(time.perf_counter() - started) * 1000.0, source=self._address)
-        except (TimeoutError, asyncio.TimeoutError, OSError):
+        except (TimeoutError, asyncio.TimeoutError):
             return EchoResult()
+        except OSError as exc:
+            if not is_refusal(exc):
+                return EchoResult()
+            return EchoResult(rtt_ms=(time.perf_counter() - started) * 1000.0, source=self._address)
 
         del reader
         elapsed_ms = (time.perf_counter() - started) * 1000.0
