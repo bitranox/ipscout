@@ -68,7 +68,7 @@ dev = [
   "import-linter>=2.15",
   "setuptools>=84.2.1",
   "rtoml>=0.14.0",
-  "certifi>=2026.10.19",  # PYSEC-2026-4320
+  "certifi>=2026.10.23",  # PYSEC-2026-4320
 ]
 
 [project.scripts]
