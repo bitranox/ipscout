@@ -487,6 +487,34 @@ ipscout.scan_ports(host, "1-1024", method=ipscout.ScanMethod.SYN)
 Both methods hold only `concurrency` probes alive at a time, so a full-range scan is bounded in
 memory rather than allocating a task per port.
 
+## Reading a banner
+
+Many services announce themselves the moment a client connects: an FTP or SMTP server sends a `220`
+line, an SSH server its version string. `grab_banners` reads that first line from many hosts at once,
+which is how a device is identified by what it says rather than by which port it has open:
+
+```python
+results = ipscout.grab_banners(["192.0.2.10", "192.0.2.11"], 21, farewell=b"QUIT\r\n")
+for host, banner in results.items():
+    if banner.line is not None and banner.line.startswith("220"):
+        print(host, banner.line)  # 192.0.2.10 220 Print Server Ready.
+```
+
+Each `Banner` carries one of four states. `GREETED` holds the decoded first line in `line`, and only
+a `GREETED` result has one, so `banner.line is not None` is the same test and narrows the type; `SILENT`
+means the host accepted the connection and sent nothing before the deadline; `REFUSED` means the port
+actively refused; `UNREACHABLE` puts the reason in `error`, and also covers a name that did not
+resolve, so one bad name never costs the other results.
+
+Everything for one host happens on a single connection: connect, read up to the first newline (at
+most `max_line_bytes`, 512 by default), send `farewell` if given and a line was read, close. Some
+embedded servers refuse a new connection for a moment after each session, so scanning for open
+ports first and connecting again to read misses exactly the devices a banner identifies.
+
+`timeout` (3.0 s by default) is one deadline per host for resolving, connecting and reading
+together. A refused connection is reported rather than retried; retry it yourself when the device is
+known to need it. `agrab_banners` is the same on the event loop.
+
 ## Waking a host, and the path to it
 
 ```python
@@ -502,7 +530,7 @@ one produces a silent black hole.
 
 ## The CLI
 
-21 commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
+22 commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
 
 | Command            | What it does                                                            |
 |--------------------|-------------------------------------------------------------------------|
@@ -522,6 +550,7 @@ one produces a silent black hole.
 | `remove-neighbour` | Delete an IPv4 neighbour entry; exits 1 when there was none.            |
 | `subnet`           | Show addressing, gateway and stored DHCP facts per subnet.              |
 | `scan-ports`       | Report which ports are open, closed or filtered.                        |
+| `banners`          | Read the first line each host sends on a TCP port.                      |
 | `mtu`              | Show the largest packet that reaches a target unfragmented.             |
 | `wake`             | Send a wake-on-LAN magic packet.                                        |
 | `observe-dhcp`     | Watch a DHCP handshake for the addresses offered to a hardware address. |
@@ -542,20 +571,21 @@ Global options, which live on the group so they compose with every subcommand:
 
 Per-command options:
 
-| Command            | Options                                                                                                   |
-|--------------------|-----------------------------------------------------------------------------------------------------------|
-| `ping`             | `--times/-c` (4), `--timeout` (2.0), `--interval` (0.2), `-4`, `-6`, `--tcp-fallback`, `--tcp-port` (443) |
-| `ping-many`        | `--times/-c` (4), `--timeout` (2.0), `--concurrency` (64)                                                 |
-| `reachable`        | `--timeout` (2.0), `--tcp-port` (443)                                                                     |
-| `traceroute`       | `--max-hops` (30), `--timeout` (2.0), `-4`, `-6`, `--resolve-names`                                       |
-| `resolve`          | `-4`, `-6`                                                                                                |
-| `reverse-dns`      | none beyond the global flags                                                                              |
-| `interfaces`       | none beyond the global flags                                                                              |
-| `observe-dhcp`     | `--interface` (the default route's), `--timeout` (60.0), `--settle` (12.0)                                |
-| `set-neighbour`    | `--interface` (the one whose subnet holds IP)                                                             |
-| `remove-neighbour` | `--interface` (every interface the cache lists IP on)                                                     |
-| `capabilities`     | none beyond the global flags                                                                              |
-| `info`             | none beyond the global flags                                                                              |
+| Command            | Options                                                                                                          |
+|--------------------|------------------------------------------------------------------------------------------------------------------|
+| `ping`             | `--times/-c` (4), `--timeout` (2.0), `--interval` (0.2), `-4`, `-6`, `--tcp-fallback`, `--tcp-port` (443)        |
+| `ping-many`        | `--times/-c` (4), `--timeout` (2.0), `--concurrency` (64)                                                        |
+| `reachable`        | `--timeout` (2.0), `--tcp-port` (443)                                                                            |
+| `traceroute`       | `--max-hops` (30), `--timeout` (2.0), `-4`, `-6`, `--resolve-names`                                              |
+| `resolve`          | `-4`, `-6`                                                                                                       |
+| `reverse-dns`      | none beyond the global flags                                                                                     |
+| `interfaces`       | none beyond the global flags                                                                                     |
+| `banners`          | `--port` (required), `--timeout` (3.0), `--concurrency` (64), `--max-line-bytes` (512), `--farewell`, `-4`, `-6` |
+| `observe-dhcp`     | `--interface` (the default route's), `--timeout` (60.0), `--settle` (12.0)                                       |
+| `set-neighbour`    | `--interface` (the one whose subnet holds IP)                                                                    |
+| `remove-neighbour` | `--interface` (every interface the cache lists IP on)                                                            |
+| `capabilities`     | none beyond the global flags                                                                                     |
+| `info`             | none beyond the global flags                                                                                     |
 
 `-4` and `-6` are mutually exclusive.
 
@@ -576,6 +606,7 @@ ipscout find-ip dc:b2:2f:44:34:59 --scan  # which addresses hold a MAC
 ipscout arp-scan --network 192.168.1.0/24 # sweep, then read what was learned
 ipscout subnet                            # addressing, gateway, stored DHCP facts
 ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
+ipscout banners 192.168.1.0/24 --port 21 --farewell 'QUIT\r\n'   # each host's greeting; networks expand
 ipscout mtu 8.8.8.8
 ipscout wake aa:bb:cc:dd:ee:ff --broadcast 192.168.1.255
 ipscout observe-dhcp 02:00:5e:10:00:00 --interface br0   # needs root; last line is the bound address
@@ -747,12 +778,12 @@ print(muted.reached, muted.error)
 
 ## Public surface
 
-Everything below is exported from the package root. This table is generated from
-
-`ipscout.__all__`, so a name here is a name that exists.
+Everything below is exported from the package root, and every name in `ipscout.__all__` is listed
+here or, for the exceptions, in the paragraph below the tables.
 
 | Name                           | Kind      | Purpose                                                           |
 |--------------------------------|-----------|-------------------------------------------------------------------|
+| `agrab_banners`                | coroutine | The same banner grab, on the event loop.                          |
 | `ais_reachable`                | coroutine | The same contract, on the event loop.                             |
 | `aping`                        | coroutine | The same, without blocking the event loop.                        |
 | `aping_many`                   | coroutine | Probe many targets concurrently.                                  |
@@ -763,6 +794,7 @@ Everything below is exported from the package root. This table is generated from
 | `default_gateway`              | function  | The route used when nothing more specific matches.                |
 | `find_ip_by_mac`               | function  | Which addresses currently hold a hardware address.                |
 | `get_mac_address`              | function  | The direct layer-2 address, or None for anything routed.          |
+| `grab_banners`                 | function  | The first line each host sends on a TCP port, on one connection.  |
 | `icmp_available`               | function  | Whether an ICMP probe could be made right now, per family.        |
 | `is_reachable`                 | function  | Total yes-or-no shortcut. Never raises, always falls back to TCP. |
 | `local_interfaces`             | function  | Every local network interface.                                    |
@@ -796,6 +828,7 @@ Result models, all frozen Pydantic models with `extra="forbid"`:
 
 | Name                 | Returned by                                      |
 |----------------------|--------------------------------------------------|
+| `Banner`             | grab_banners, agrab_banners                      |
 | `CapabilityReport`   | the capabilities CLI command                     |
 | `Interface`          | local_interfaces                                 |
 | `InterfaceAddress`   | the ipv4 and ipv6 fields of Interface            |
@@ -817,6 +850,7 @@ Enums, all `str` subclasses so their members are already strings on the wire:
 | Name             | Members                                                |
 |------------------|--------------------------------------------------------|
 | `AddressFamily`  | IPV4, IPV6                                             |
+| `BannerState`    | GREETED, SILENT, REFUSED, UNREACHABLE                  |
 | `CommandName`    | one member per CLI subcommand                          |
 | `MacScope`       | DIRECT, NEXT_HOP, UNKNOWN                              |
 | `NeighbourState` | REACHABLE, STALE, PERMANENT, INCOMPLETE, FAILED, OTHER |

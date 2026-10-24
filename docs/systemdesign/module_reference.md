@@ -58,7 +58,7 @@ The import-linter contract `Layered dependencies point one way only` is enforced
 listed highest first; each may import only from those below it.
 
 ```
-scan : subnet : portscan : mtu : wol   sweeps and single-purpose probes
+scan : subnet : portscan : banner : mtu : wol : dhcp   sweeps and single-purpose probes
 api          ping / aping / ping_many / aping_many / is_reachable / ais_reachable
 traceroute   traceroute / atraceroute / trace_path / atrace_path
 static_neighbours  set_neighbour / remove_neighbour
@@ -71,7 +71,9 @@ transport_posix : transport_windows : transport_tcp
   : interfaces_posix : interfaces_windows
   : routes_linux : routes_macos : routes_windows
   : neighbours_linux : neighbours_macos : neighbours_windows
+  : dhcp_linux : dhcp_windows : dhcp_macos
 packet : resolve : ports : winapi : netlink : bsdroute : arp : tcpsyn
+  : pool : sockerr : unixio : bootp : bpf
 models
 errors
 ```
@@ -208,6 +210,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `scan.py`              | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.                          |
 | `subnet.py`            | `subnet_info`, composing interfaces, routes and the stored lease.                                                                 |
 | `portscan.py`          | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                                           |
+| `banner.py`            | `grab_banners`, `agrab_banners`: connect, read the first line, say goodbye and close, all on one connection per host.             |
 | `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                  |
 | `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                     |
 | `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                     |
@@ -229,6 +232,8 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.                                                  |
 | `bpf.py`      | BSD packet filter ioctl encoding and record splitting, shared by two backends.                                          |
 | `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.                                                   |
+| `pool.py`     | `gather_bounded`: a fixed worker pool, so a long work list never becomes one Task per item.                             |
+| `sockerr.py`  | `is_refusal`: one reading of a refused connect across every platform's spelling, shared by every module that connects.  |
 
 ### Platform backends
 
@@ -255,7 +260,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 
 | Module              | Role                                                                       |
 |---------------------|----------------------------------------------------------------------------|
-| `cli.py`            | The rich-click group, twenty-one subcommands, `_emit` and `_fail`, `main`. |
+| `cli.py`            | The rich-click group, twenty-two subcommands, `_emit` and `_fail`, `main`. |
 | `serialize.py`      | `to_jsonable` and `dumps` at the output boundary.                          |
 | `typed_click.py`    | Typed facade over rich-click's partially-typed decorators.                 |
 | `__main__.py`       | `python -m ipscout`.                                                       |

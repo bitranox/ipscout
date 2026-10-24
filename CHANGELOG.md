@@ -5,6 +5,30 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `grab_banners` / `agrab_banners`: read the first line each of many hosts sends on one TCP port,
+  connecting, reading, optionally sending a `farewell` such as `b"QUIT\r\n"`, and closing on ONE
+  connection per host, so a device that refuses a second connect right after a session is still
+  read. Each host gets a `Banner` whose `BannerState` is `GREETED` (with `line`), `SILENT`,
+  `REFUSED` or `UNREACHABLE` (with `error`); a name that does not resolve is a result, not an
+  exception. One `timeout` per host covers resolution, connect and read; results keep input order.
+- `ipscout banners HOSTS... --port N`, the 22nd subcommand. A `HOSTS` item written as a network
+  expands to its hosts within the sweep bound; `--farewell` decodes `\r`, `\n`, `\t` and `\\`.
+  Exits 1 when no host greeted.
+
+### Fixed
+
+- `ping_many` / `aping_many` return their mapping in the order the targets were given, as documented.
+  It was in completion order, so a target that timed out ahead of one that answered came after it.
+- The TCP fallback (`allow_tcp_fallback`, `is_reachable`) counts a refused connection as an answer
+  in every spelling a platform uses for it. It recognised only `ConnectionRefusedError`, so a refusal
+  arriving as a bare `OSError` with `ECONNREFUSED`, or with the Windows numbering 10061 / 1225,
+  reported a live host as unanswered.
+- In `--json` and `--json-bare` modes, an invalid option value is reported with the option's name
+  (`Invalid value for '--timeout': ...`). The JSON error message carried only Click's bare text,
+  which did not say which option was wrong.
+
 ## [2.0.0] 2026-10-24 12:32:19
 
 ### Changed
