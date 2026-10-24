@@ -214,7 +214,7 @@ class AsyncTcpEchoTransport:
         sock.settimeout(0)
         started = time.perf_counter()
         try:
-            await asyncio.wait_for(asyncio.get_running_loop().sock_connect(sock, (self._address, self._port)), timeout)
+            await asyncio.wait_for(self._connect(sock), timeout)
         except (TimeoutError, asyncio.TimeoutError):
             return EchoResult()
         except OSError as exc:
@@ -226,6 +226,24 @@ class AsyncTcpEchoTransport:
         finally:
             with contextlib.suppress(OSError):
                 sock.close()
+
+    async def _connect(self, sock: socket.socket) -> None:
+        """Connect ``sock`` to the target, resolved within the socket's family.
+
+        The Windows proactor loop hands ``sock_connect`` its address unresolved,
+        and a bare ``(host, port)`` pair for an IPv6 socket is WinError 10022
+        there, so the full sockaddr (flow info and scope id included) comes
+        from ``getaddrinfo`` first. A target the family cannot express raises
+        ``socket.gaierror``, an ``OSError`` the probe reads as unanswered.
+
+        Args:
+            sock: A non-blocking socket from :func:`_probe_socket`.
+
+        """
+
+        loop = asyncio.get_running_loop()
+        resolved = await loop.getaddrinfo(self._address, self._port, family=sock.family, type=socket.SOCK_STREAM)
+        await loop.sock_connect(sock, resolved[0][4])
 
     async def aclose(self) -> None:
         """Release resources. Each probe owns its own connection, so this is a no-op."""
