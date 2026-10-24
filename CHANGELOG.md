@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.0.0] 2026-10-24 12:32:19
+
 ### Changed
 
 - **Breaking:** `factory.make_transport` and `factory.make_async_transport` take
