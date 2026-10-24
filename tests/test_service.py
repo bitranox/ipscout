@@ -110,16 +110,20 @@ class RefusingTransport:
         return None
 
 
+#: A valid request's raw fields, so each test states only what it changes.
+_VALID_FIELDS: dict[str, object] = {
+    "target": "example.test",
+    "address": "10.0.0.1",
+    "family": AddressFamily.IPV4,
+    "times": 3,
+    "interval": 0.0,
+}
+
+
 def _request(**overrides: object) -> PingRequest:
-    defaults: dict[str, object] = {
-        "target": "example.test",
-        "address": "10.0.0.1",
-        "family": AddressFamily.IPV4,
-        "times": 3,
-        "interval": 0.0,
-    }
-    defaults.update(overrides)
-    return PingRequest(**defaults)  # type: ignore[arg-type]
+    # Raw fields through model_validate, the path untyped input takes, so a
+    # bad override is rejected exactly as it would be from a caller.
+    return PingRequest.model_validate({**_VALID_FIELDS, **overrides})
 
 
 @pytest.mark.os_agnostic
@@ -186,7 +190,10 @@ def test_the_result_reports_what_the_caller_asked_for_not_what_arrived() -> None
 
 
 @pytest.mark.os_agnostic
-@pytest.mark.parametrize("bad", [{"times": 0}, {"times": -1}, {"timeout": 0}, {"timeout": -1.0}, {"interval": -0.1}])
+@pytest.mark.parametrize(
+    "bad",
+    [{"times": 0}, {"times": -1}, {"timeout": 0}, {"timeout": -1.0}, {"interval": -0.1}, {"tcp_port": 0}, {"tcp_port": 65536}],
+)
 def test_nonsense_parameters_are_rejected_before_any_packet_moves(bad: dict[str, object]) -> None:
     # The bounds live on the fields, so the constraint and its documentation
     # cannot drift apart the way a hand-written __post_init__ check could.

@@ -55,9 +55,58 @@ if TYPE_CHECKING:
 
 __all__ = ["AsyncPosixEchoTransport", "PosixEchoTransport", "RecvMsg", "open_socket", "recvmsg_of", "socket_const"]
 
-_FAMILY_TO_SOCKET = {
-    AddressFamily.IPV4: (socket.AF_INET, socket.IPPROTO_ICMP),
-    AddressFamily.IPV6: (socket.AF_INET6, socket.IPPROTO_ICMPV6),
+
+class _IcmpFamily(NamedTuple):
+    """The ICMP and IP-layer facts that differ between IPv4 and IPv6.
+
+    Kept as one row per family so that a family's protocol, option names and
+    message numbers cannot drift apart across separate if/else expressions.
+
+    Attributes:
+        protocol: The ICMP protocol number the socket is opened with.
+        recverr_option: The *name* of the error-queue option. It stays a name
+            because it is resolved through :func:`socket_const`: CPython only
+            began exposing it in 3.14, so a direct attribute would be absent on
+            every older Python.
+        origin: ``SO_EE_ORIGIN_ICMP`` / ``SO_EE_ORIGIN_ICMP6``, marking an
+            error-queue entry that came from a router rather than from the
+            local stack.
+        time_exceeded: The ICMP "Time Exceeded" type. A router sends it when
+            it discards a packet whose hop limit ran out, which is the entire
+            basis of traceroute.
+        hop_option: The ``setsockopt`` option that sets the outgoing hop limit.
+        offender_address: Where the address sits inside the offender
+            ``sockaddr`` that follows ``struct sock_extended_err``:
+            ``sockaddr_in`` is family(2) port(2) addr(4), ``sockaddr_in6`` is
+            family(2) port(2) flowinfo(4) addr(16).
+
+    """
+
+    protocol: int
+    recverr_option: str
+    origin: int
+    time_exceeded: int
+    hop_option: int
+    offender_address: slice
+
+
+_ICMP_FAMILY: dict[AddressFamily, _IcmpFamily] = {
+    AddressFamily.IPV4: _IcmpFamily(
+        protocol=socket.IPPROTO_ICMP,
+        recverr_option="IP_RECVERR",
+        origin=2,
+        time_exceeded=packet.TIME_EXCEEDED_V4,
+        hop_option=socket.IP_TTL,
+        offender_address=slice(4, 8),
+    ),
+    AddressFamily.IPV6: _IcmpFamily(
+        protocol=socket.IPPROTO_ICMPV6,
+        recverr_option="IPV6_RECVERR",
+        origin=3,
+        time_exceeded=packet.TIME_EXCEEDED_V6,
+        hop_option=socket.IPV6_UNICAST_HOPS,
+        offender_address=slice(8, 24),
+    ),
 }
 
 #: Guidance attached to a permission failure, because "denied" alone is useless.
@@ -90,7 +139,7 @@ def open_socket(family: AddressFamily) -> socket.socket:
 
     """
 
-    sock_family, proto = _FAMILY_TO_SOCKET[family]
+    sock_family, proto = family.socket_family, _ICMP_FAMILY[family].protocol
     try:
         return socket.socket(sock_family, socket.SOCK_DGRAM, proto)
     except OSError as dgram_error:
@@ -194,22 +243,6 @@ def recvmsg_of(sock: socket.socket) -> RecvMsg | None:
 #: Native byte order and alignment, as the kernel writes it.
 _EXTENDED_ERR = struct.Struct("=IBBBBII")
 
-#: ``SO_EE_ORIGIN_ICMP`` / ``SO_EE_ORIGIN_ICMP6``: the error came from a router
-#: rather than from the local stack.
-_ORIGIN_ICMP = 2
-_ORIGIN_ICMP6 = 3
-
-#: ICMP "Time Exceeded" in each family. A router sends this when it discards a
-#: packet whose hop limit ran out, which is the entire basis of traceroute.
-_TIME_EXCEEDED_V4 = 11
-_TIME_EXCEEDED_V6 = 3
-
-#: Byte offset where the address field ends inside the offender ``sockaddr``
-#: that follows ``struct sock_extended_err``: ``sockaddr_in`` is family(2)
-#: port(2) addr(4), ``sockaddr_in6`` is family(2) port(2) flowinfo(4) addr(16).
-_SOCKADDR_IN_ADDR = slice(4, 8)
-_SOCKADDR_IN6_ADDR = slice(8, 24)
-
 
 class _Arrival(NamedTuple):
     """What the reader hands an awaiting probe when its reply arrives.
@@ -263,20 +296,14 @@ def _offender_address(control: bytes, *, family: AddressFamily) -> str | None:
     if len(control) < _EXTENDED_ERR.size:
         return None
     _errno, origin, ee_type, _code, _pad, _info, _data = _EXTENDED_ERR.unpack(control[: _EXTENDED_ERR.size])
-    is_ipv6 = family is AddressFamily.IPV6
-    expected_origin = _ORIGIN_ICMP6 if is_ipv6 else _ORIGIN_ICMP
-    expected_type = _TIME_EXCEEDED_V6 if is_ipv6 else _TIME_EXCEEDED_V4
-    if origin != expected_origin or ee_type != expected_type:
+    facts = _ICMP_FAMILY[family]
+    if origin != facts.origin or ee_type != facts.time_exceeded:
         return None
 
     offender = control[_EXTENDED_ERR.size :]
-    if is_ipv6:
-        if len(offender) < _SOCKADDR_IN6_ADDR.stop:
-            return None
-        return socket.inet_ntop(socket.AF_INET6, offender[_SOCKADDR_IN6_ADDR])
-    if len(offender) < _SOCKADDR_IN_ADDR.stop:
+    if len(offender) < facts.offender_address.stop:
         return None
-    return socket.inet_ntop(socket.AF_INET, offender[_SOCKADDR_IN_ADDR])
+    return socket.inet_ntop(family.socket_family, offender[facts.offender_address])
 
 
 class ErrorQueueReader(NamedTuple):
@@ -316,18 +343,24 @@ def _enable_error_queue(sock: socket.socket, *, family: AddressFamily) -> ErrorQ
 
     """
 
-    is_ipv6 = family is AddressFamily.IPV6
     flag = socket_const("MSG_ERRQUEUE")
-    option = socket_const("IPV6_RECVERR" if is_ipv6 else "IP_RECVERR")
+    option = socket_const(_ICMP_FAMILY[family].recverr_option)
     recvmsg = recvmsg_of(sock)
     if flag is None or option is None or recvmsg is None:
         return None
-    level = socket.IPPROTO_IPV6 if is_ipv6 else socket.IPPROTO_IP
     try:
-        sock.setsockopt(level, option, 1)
+        sock.setsockopt(family.ip_option_level, option, 1)
     except OSError:
         return None
     return ErrorQueueReader(recvmsg, flag)
+
+
+def _apply_ttl(sock: socket.socket, ttl: int | None, *, family: AddressFamily) -> None:
+    """Set the outgoing hop limit for subsequent packets; ``None`` leaves the default."""
+
+    if ttl is None:
+        return
+    sock.setsockopt(family.ip_option_level, _ICMP_FAMILY[family].hop_option, ttl)
 
 
 def _matches(parsed: packet.ParsedReply, *, sequence: int, token: bytes, family: AddressFamily) -> bool:
@@ -364,7 +397,7 @@ class PosixEchoTransport:
         address: str,
         family: AddressFamily,
         *,
-        payload_size: int = 56,
+        payload_size: int = packet.DEFAULT_PAYLOAD_SIZE,
         socket_factory: SocketFactory | None = None,
     ) -> None:
         self._family = family
@@ -437,16 +470,6 @@ class PosixEchoTransport:
             return None
         return cast("tuple[str, ...]", address)[0]
 
-    def _apply_ttl(self, ttl: int | None) -> None:
-        """Set the outgoing hop limit for subsequent packets."""
-
-        if ttl is None:
-            return
-        if self._family is AddressFamily.IPV6:
-            self._socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, ttl)
-        else:
-            self._socket.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
-
     def probe(self, *, sequence: int, timeout: float, ttl: int | None = None) -> EchoResult:
         """Send one echo and wait for the matching reply.
 
@@ -469,7 +492,7 @@ class PosixEchoTransport:
 
         """
 
-        self._apply_ttl(ttl)
+        _apply_ttl(self._socket, ttl, family=self._family)
         datagram, token = packet.build_echo_request(
             sequence=sequence,
             payload_size=self._payload_size,
@@ -548,7 +571,7 @@ class AsyncPosixEchoTransport:
         address: str,
         family: AddressFamily,
         *,
-        payload_size: int = 56,
+        payload_size: int = packet.DEFAULT_PAYLOAD_SIZE,
         socket_factory: SocketFactory | None = None,
     ) -> None:
         self._family = family
@@ -606,16 +629,6 @@ class AsyncPosixEchoTransport:
             if waiter is not None and not waiter.done():
                 waiter.set_result(_Arrival(finished=time.perf_counter(), source=str(peer[0])))
 
-    def _apply_ttl(self, ttl: int | None) -> None:
-        """Set the outgoing hop limit for subsequent packets."""
-
-        if ttl is None:
-            return
-        if self._family is AddressFamily.IPV6:
-            self._socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, ttl)
-        else:
-            self._socket.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
-
     async def probe(self, *, sequence: int, timeout: float, ttl: int | None = None) -> EchoResult:
         """Send one echo and await the matching reply.
 
@@ -630,7 +643,7 @@ class AsyncPosixEchoTransport:
         """
 
         self._ensure_reader()
-        self._apply_ttl(ttl)
+        _apply_ttl(self._socket, ttl, family=self._family)
         datagram, token = packet.build_echo_request(
             sequence=sequence,
             payload_size=self._payload_size,

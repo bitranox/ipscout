@@ -24,7 +24,7 @@ import contextlib
 import socket
 import struct
 
-from .models import RouteInfo
+from .models import AddressFamily, RouteInfo
 from .netlink import (
     NLM_F_DUMP,
     NLM_F_REQUEST,
@@ -65,21 +65,21 @@ _MAX_DUMP_CHUNKS = 64
 _IFINDEX_SIZE = 4
 
 
-def _build_query(packed_destination: bytes, family: int) -> bytes:
+def _build_query(packed_destination: bytes, family: AddressFamily) -> bytes:
     """Build the RTM_GETROUTE message asking about one destination."""
 
-    body = _RTMSG.pack(family, len(packed_destination) * 8, 0, 0, 0, 0, 0, 0, 0)
+    body = _RTMSG.pack(family.socket_family, len(packed_destination) * 8, 0, 0, 0, 0, 0, 0, 0)
     attribute = struct.pack("=HH", 4 + len(packed_destination), _RTA_DST) + packed_destination
     return build_message(_RTM_GETROUTE, NLM_F_REQUEST, body + attribute)
 
 
-def _build_dump(family: int) -> bytes:
+def _build_dump(family: AddressFamily) -> bytes:
     """Build the RTM_GETROUTE message asking for the whole table."""
 
-    return build_message(_RTM_GETROUTE, NLM_F_REQUEST | NLM_F_DUMP, _RTMSG.pack(family, 0, 0, 0, 0, 0, 0, 0, 0))
+    return build_message(_RTM_GETROUTE, NLM_F_REQUEST | NLM_F_DUMP, _RTMSG.pack(family.socket_family, 0, 0, 0, 0, 0, 0, 0, 0))
 
 
-def _parse_route(payload: bytes, family: int) -> RouteInfo:
+def _parse_route(payload: bytes, family: AddressFamily) -> RouteInfo:
     """Read the gateway, interface and source out of one route message."""
 
     gateway: str | None = None
@@ -89,10 +89,10 @@ def _parse_route(payload: bytes, family: int) -> RouteInfo:
     for attribute, value in iter_attributes(payload, _RTMSG.size):
         if attribute == _RTA_GATEWAY:
             with contextlib.suppress(OSError, ValueError):
-                gateway = socket.inet_ntop(family, value)
+                gateway = socket.inet_ntop(family.socket_family, value)
         elif attribute == _RTA_PREFSRC:
             with contextlib.suppress(OSError, ValueError):
-                source = socket.inet_ntop(family, value)
+                source = socket.inet_ntop(family.socket_family, value)
         elif attribute == _RTA_OIF and len(value) >= _IFINDEX_SIZE:
             index = struct.unpack("=I", value[:_IFINDEX_SIZE])[0]
             with contextlib.suppress(OSError, ValueError):
@@ -101,7 +101,7 @@ def _parse_route(payload: bytes, family: int) -> RouteInfo:
     return RouteInfo(gateway=gateway, interface=interface, source=source)
 
 
-def _route_in(data: bytes, family: int) -> RouteInfo | None:
+def _route_in(data: bytes, family: AddressFamily) -> RouteInfo | None:
     """Return the route in a single-message netlink reply."""
 
     for message_type, payload in iter_messages(data):
@@ -115,12 +115,12 @@ def _route_in(data: bytes, family: int) -> RouteInfo | None:
     return None
 
 
-def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | None:
+def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | None:
     """Ask the kernel which route reaches ``destination``.
 
     Args:
         destination: The address to look up.
-        family: ``AF_INET`` or ``AF_INET6``.
+        family: Which address family ``destination`` belongs to.
 
     Returns:
         The route, or ``None`` if the kernel reported no usable route or the
@@ -134,7 +134,7 @@ def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | N
     """
 
     try:
-        packed = socket.inet_pton(family, destination)
+        packed = socket.inet_pton(family.socket_family, destination)
     except OSError:
         return None
 
@@ -155,7 +155,7 @@ def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | N
     return _route_in(data, family)
 
 
-def _default_route_in(data: bytes, family: int) -> RouteInfo | None:
+def _default_route_in(data: bytes, family: AddressFamily) -> RouteInfo | None:
     """Return the zero-length-prefix route in one netlink dump chunk."""
 
     for message_type, payload in iter_messages(data):
@@ -174,11 +174,11 @@ def _default_route_in(data: bytes, family: int) -> RouteInfo | None:
     return None
 
 
-def default_gateway(family: int = socket.AF_INET) -> RouteInfo | None:
+def default_gateway(family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | None:
     """Return the route used for traffic with no more specific destination.
 
     Args:
-        family: ``AF_INET`` or ``AF_INET6``.
+        family: Which address family to ask about.
 
     Returns:
         The default route, or ``None`` when this host has none.

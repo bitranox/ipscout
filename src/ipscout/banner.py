@@ -23,11 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import socket
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 from .errors import IPScoutError
-from .models import AddressFamily, Banner, BannerState
+from .models import AddressFamily, Banner, BannerState, require_port
 from .pool import gather_bounded
 from .resolve import resolve_one
 from .sockerr import is_refusal
@@ -49,11 +48,6 @@ DEFAULT_TIMEOUT = 3.0
 #: can make the caller buffer per host.
 DEFAULT_MAX_LINE_BYTES = 512
 
-_MIN_PORT = 1
-_MAX_PORT = 65535
-
-_SOCKET_FAMILY = {AddressFamily.IPV4: socket.AF_INET, AddressFamily.IPV6: socket.AF_INET6}
-
 _T = TypeVar("_T")
 
 
@@ -70,9 +64,7 @@ class _Settings(NamedTuple):
 def _validate(settings: _Settings, concurrency: int) -> None:
     """Refuse an argument that could never produce a useful grab, before any connect."""
 
-    if not _MIN_PORT <= settings.port <= _MAX_PORT:
-        msg = f"port must be {_MIN_PORT}-{_MAX_PORT}, got {settings.port}"
-        raise ValueError(msg)
+    require_port(settings.port)
     if not settings.timeout > 0:
         msg = f"timeout must be greater than 0 seconds, got {settings.timeout}"
         raise ValueError(msg)
@@ -82,6 +74,23 @@ def _validate(settings: _Settings, concurrency: int) -> None:
     if concurrency < 1:
         msg = f"concurrency must be at least 1, got {concurrency}"
         raise ValueError(msg)
+
+
+def _reason(exc: BaseException) -> str:
+    """Return why a grab failed, in the exception's own words or by its name.
+
+    An exception can carry an empty message, and an unreachable result must
+    name a reason, so the class name stands in rather than an empty string.
+
+    Examples:
+        >>> _reason(OSError("Network is unreachable"))
+        'Network is unreachable'
+        >>> _reason(IPScoutError())
+        'IPScoutError'
+
+    """
+
+    return str(exc) or type(exc).__name__
 
 
 async def _within(deadline: float, awaitable: Coroutine[object, object, _T]) -> _T:
@@ -166,16 +175,15 @@ async def _grab_one(host: str, settings: _Settings) -> Banner:
     try:
         # In a thread: a slow DNS answer for one name must not stall every other host.
         target = await _within(deadline, asyncio.to_thread(resolve_one, host, family=settings.family))
-        family = _SOCKET_FAMILY[target.family]
-        reader, writer = await _within(deadline, asyncio.open_connection(target.address, settings.port, family=family))
+        reader, writer = await _within(deadline, asyncio.open_connection(target.address, settings.port, family=target.family.socket_family))
     except IPScoutError as exc:
-        return unreachable(str(exc))
+        return unreachable(_reason(exc))
     except TimeoutError:
         return unreachable(f"no connection within {settings.timeout:g} s")
     except OSError as exc:
         if is_refusal(exc):
             return Banner(host=host, port=settings.port, state=BannerState.REFUSED)
-        return unreachable(str(exc) or type(exc).__name__)
+        return unreachable(_reason(exc))
     return await _converse(host, reader, writer, settings, deadline)
 
 

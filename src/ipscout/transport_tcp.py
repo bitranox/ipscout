@@ -34,19 +34,18 @@ import socket
 import time
 from typing import TYPE_CHECKING
 
-from .models import AddressFamily
 from .ports import EchoResult
 from .sockerr import is_refusal
 
 if TYPE_CHECKING:
     from types import TracebackType
 
-__all__ = ["AsyncTcpEchoTransport", "TcpEchoTransport"]
+    from .models import AddressFamily
 
-_FAMILY_TO_SOCKET = {
-    AddressFamily.IPV4: socket.AF_INET,
-    AddressFamily.IPV6: socket.AF_INET6,
-}
+__all__ = ["DEFAULT_TCP_PORT", "AsyncTcpEchoTransport", "TcpEchoTransport"]
+
+#: Default port for a connect probe: HTTPS, the port a live host most often has open.
+DEFAULT_TCP_PORT = 443
 
 
 class TcpEchoTransport:
@@ -59,6 +58,7 @@ class TcpEchoTransport:
 
     Examples:
         >>> import socket
+        >>> from ipscout.models import AddressFamily
         >>> listener = socket.socket()
         >>> listener.bind(("127.0.0.1", 0))
         >>> listener.listen(1)
@@ -70,7 +70,7 @@ class TcpEchoTransport:
 
     """
 
-    def __init__(self, address: str, family: AddressFamily, *, port: int = 443) -> None:
+    def __init__(self, address: str, family: AddressFamily, *, port: int = DEFAULT_TCP_PORT) -> None:
         self._address = address
         self._family = family
         self._port = port
@@ -107,7 +107,7 @@ class TcpEchoTransport:
         """
 
         del sequence, ttl
-        sock = socket.socket(_FAMILY_TO_SOCKET[self._family], socket.SOCK_STREAM)
+        sock = socket.socket(self._family.socket_family, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         started = time.perf_counter()
         try:
@@ -148,7 +148,7 @@ class AsyncTcpEchoTransport:
 
     """
 
-    def __init__(self, address: str, family: AddressFamily, *, port: int = 443) -> None:
+    def __init__(self, address: str, family: AddressFamily, *, port: int = DEFAULT_TCP_PORT) -> None:
         self._address = address
         self._family = family
         self._port = port
@@ -182,7 +182,7 @@ class AsyncTcpEchoTransport:
         started = time.perf_counter()
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(self._address, self._port),
+                asyncio.open_connection(self._address, self._port, family=self._family.socket_family),
                 timeout,
             )
         except (TimeoutError, asyncio.TimeoutError):

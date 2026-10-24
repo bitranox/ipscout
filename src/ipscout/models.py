@@ -33,16 +33,19 @@ Two decisions worth knowing:
 from __future__ import annotations
 
 import enum
+import socket
 import statistics
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
-from pydantic import BaseModel, ConfigDict, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
 __all__ = [
+    "MAX_PORT",
+    "MIN_PORT",
     "AddressFamily",
     "Banner",
     "BannerState",
@@ -78,6 +81,7 @@ __all__ = [
     "SweepScope",
     "TraceHop",
     "WakeReport",
+    "require_port",
 ]
 
 #: An IPv4 or IPv6 network, as the standard library models it. Carried as the
@@ -93,6 +97,47 @@ NO_TIME_MS = -1.0
 #: Reported for "no address determined". A placeholder in the result only;
 #: nothing is ever bound to it.
 UNKNOWN_IP = "0.0.0.0"  # noqa: S104  # nosec B104
+
+#: The lowest and highest TCP/UDP port numbers. Port 0 is excluded: it asks
+#: the OS to pick one, so it never names a port on a remote host.
+MIN_PORT = 1
+MAX_PORT = 65535
+
+#: A port number a remote host can be asked about. Every record carrying one
+#: refuses anything else, so a reader never meets a port no producer could
+#: have probed.
+_Port = Annotated[int, Field(ge=MIN_PORT, le=MAX_PORT)]
+
+
+def require_port(value: int) -> int:
+    """Return ``value`` if it is a usable port number, or raise saying why not.
+
+    The one check every entry point taking a port number applies, so a port
+    list, a specification string and a single port are refused alike.
+
+    Args:
+        value: The candidate port number.
+
+    Returns:
+        ``value`` unchanged.
+
+    Raises:
+        ValueError: ``value`` is outside ``MIN_PORT``-``MAX_PORT``.
+
+    Examples:
+        >>> require_port(22)
+        22
+        >>> require_port(0)
+        Traceback (most recent call last):
+        ...
+        ValueError: port out of range 1-65535: 0
+
+    """
+
+    if not MIN_PORT <= value <= MAX_PORT:
+        msg = f"port out of range {MIN_PORT}-{MAX_PORT}: {value}"
+        raise ValueError(msg)
+    return value
 
 
 #: Compared against ``ip_address().version``, which speaks numbers.
@@ -110,6 +155,30 @@ class AddressFamily(str, enum.Enum):
 
     IPV4 = "ipv4"
     IPV6 = "ipv6"
+
+    @property
+    def socket_family(self) -> socket.AddressFamily:
+        """Return the ``socket.AF_*`` constant a socket of this family is opened with.
+
+        Examples:
+            >>> AddressFamily.IPV6.socket_family is socket.AF_INET6
+            True
+
+        """
+
+        return socket.AF_INET6 if self is AddressFamily.IPV6 else socket.AF_INET
+
+    @property
+    def ip_option_level(self) -> int:
+        """Return the ``setsockopt`` level for IP-layer options of this family.
+
+        Examples:
+            >>> AddressFamily.IPV6.ip_option_level == socket.IPPROTO_IPV6
+            True
+
+        """
+
+        return socket.IPPROTO_IPV6 if self is AddressFamily.IPV6 else socket.IPPROTO_IP
 
 
 class ProbeMethod(str, enum.Enum):
@@ -553,7 +622,7 @@ class SubnetInfo(_Frozen):
 class PortResult(_Frozen):
     """One port and what the scan found it to be."""
 
-    port: int
+    port: _Port
     state: PortState
 
 
@@ -572,8 +641,8 @@ class PortScanReport(_Frozen):
 class Banner(_Frozen):
     """The first line one host sent on one TCP port, and how the attempt went.
 
-    ``line`` is set exactly when the state is GREETED, and ``error`` only when
-    it is UNREACHABLE; any other pairing is refused at construction, so a
+    ``line`` is set exactly when the state is GREETED, and ``error`` exactly
+    when it is UNREACHABLE; any other pairing is refused at construction, so a
     reader can trust the state alone instead of re-checking both fields.
 
     Examples:
@@ -586,20 +655,21 @@ class Banner(_Frozen):
 
     #: The host exactly as the caller gave it, so results key back to the input.
     host: str
-    port: int
+    port: _Port
     state: BannerState
     #: The decoded first line, terminator and surrounding whitespace removed.
     line: str | None = None
     #: Why the host was unreachable, in the resolver's or the OS's words.
-    error: str | None = None
+    #: Never empty: the reason column prints it, and an empty one says nothing.
+    error: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def _fields_agree_with_state(self) -> Banner:
         if (self.line is not None) != (self.state is BannerState.GREETED):
             msg = "line is set exactly when state is GREETED"
             raise ValueError(msg)
-        if self.error is not None and self.state is not BannerState.UNREACHABLE:
-            msg = "error is set only when state is UNREACHABLE"
+        if (self.error is not None) != (self.state is BannerState.UNREACHABLE):
+            msg = "error is set exactly when state is UNREACHABLE"
             raise ValueError(msg)
         return self
 
@@ -632,7 +702,7 @@ class WakeReport(_Frozen):
 
     mac: str
     broadcast: str
-    port: int
+    port: _Port
     sent: bool = True
 
 

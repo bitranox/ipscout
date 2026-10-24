@@ -20,6 +20,7 @@ from __future__ import annotations
 import socket
 
 from .errors import IPScoutError
+from .models import require_port
 from .neighbours import normalise_mac
 
 __all__ = ["DEFAULT_PORT", "build_magic_packet", "wake_on_lan"]
@@ -78,7 +79,8 @@ def wake_on_lan(mac: str, *, broadcast: str = "255.255.255.255", port: int = DEF
             the NIC matches the payload, not the port.
 
     Raises:
-        ValueError: The input is not a hardware address.
+        ValueError: The input is not a hardware address, or the port is
+            outside ``MIN_PORT``-``MAX_PORT``.
         IPScoutError: The packet could not be sent - an unroutable broadcast
             address, or no route to it.
 
@@ -93,6 +95,7 @@ def wake_on_lan(mac: str, *, broadcast: str = "255.255.255.255", port: int = DEF
 
     """
 
+    require_port(port)
     packet = build_magic_packet(mac)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:

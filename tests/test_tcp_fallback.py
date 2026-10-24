@@ -132,3 +132,34 @@ def test_reachability_falls_through_to_tcp_when_icmp_stays_silent(listening_port
     # The shortcut always tries TCP after ICMP fails, which is what makes it
     # useful on hosts that drop ICMP but serve traffic.
     assert ipscout.is_reachable("127.0.0.1", tcp_port=listening_port) is True
+
+
+#: One past the highest port: a connect to it fails with OverflowError, which
+#: is neither an OSError nor a ValueError.
+_PORT_OUT_OF_RANGE = 65536
+
+
+def test_a_port_out_of_range_makes_reachability_false_rather_than_raising() -> None:
+    # The shortcut never raises. An out-of-range port used to reach the TCP
+    # connect and escape as OverflowError; it is now refused when the request
+    # is validated, which the shortcut answers as False.
+    assert ipscout.is_reachable(NEVER_ANSWERS, timeout=0.5, tcp_port=_PORT_OUT_OF_RANGE) is False
+
+
+def test_a_port_out_of_range_makes_async_reachability_false_rather_than_raising() -> None:
+    assert asyncio.run(ipscout.ais_reachable(NEVER_ANSWERS, timeout=0.5, tcp_port=_PORT_OUT_OF_RANGE)) is False
+
+
+def test_a_port_out_of_range_does_not_hide_a_host_that_answers_icmp() -> None:
+    # The port belongs to the TCP leg only; a host that answers the ICMP leg is
+    # reachable whatever port the TCP leg would have used.
+    if not ipscout.icmp_available():
+        pytest.skip("ICMP unavailable here, so the ICMP leg cannot answer")
+
+    assert ipscout.is_reachable("127.0.0.1", tcp_port=_PORT_OUT_OF_RANGE) is True
+    assert asyncio.run(ipscout.ais_reachable("127.0.0.1", tcp_port=_PORT_OUT_OF_RANGE)) is True
+
+
+def test_ping_refuses_a_port_out_of_range_as_a_caller_mistake() -> None:
+    with pytest.raises(ValueError, match="tcp_port"):
+        ipscout.ping("127.0.0.1", 1, interval=0, tcp_port=_PORT_OUT_OF_RANGE)

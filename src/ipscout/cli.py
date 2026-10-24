@@ -79,9 +79,12 @@ from .resolve import reverse_dns
 from .routes import default_gateway, query_route
 from .scan import MAX_SWEEP_HOSTS, arp_scan, find_ip_by_mac, sweep_scope
 from .serialize import dumps, to_jsonable
+from .service import DEFAULT_INTERVAL, DEFAULT_TIMES
+from .service import DEFAULT_TIMEOUT as DEFAULT_PING_TIMEOUT
 from .static_neighbours import remove_neighbour, set_neighbour
 from .subnet import subnet_info
 from .traceroute import traceroute
+from .transport_tcp import DEFAULT_TCP_PORT
 from .typed_click import argument, option, version_option
 from .wol import wake_on_lan
 
@@ -385,13 +388,13 @@ def cli(ctx: click.Context, *, json_output: bool, json_bare: bool) -> None:
 
 @cli.command("ping", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("target")
-@option("--times", "-c", type=int, default=4, show_default=True, help="Echoes to send.")
-@option("--timeout", type=float, default=2.0, show_default=True, help="Seconds to wait per reply.")
-@option("--interval", type=float, default=0.2, show_default=True, help="Seconds between echoes.")
+@option("--times", "-c", type=int, default=DEFAULT_TIMES, show_default=True, help="Echoes to send.")
+@option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per reply.")
+@option("--interval", type=float, default=DEFAULT_INTERVAL, show_default=True, help="Seconds between echoes.")
 @option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
 @option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
 @option("--tcp-fallback", is_flag=True, default=False, help="Fall back to a TCP connect when ICMP is unavailable.")
-@option("--tcp-port", type=int, default=443, show_default=True, help="Port for the TCP fallback.")
+@option("--tcp-port", type=int, default=DEFAULT_TCP_PORT, show_default=True, help="Port for the TCP fallback.")
 @click.pass_context
 def cli_ping(  # noqa: PLR0913 - one parameter per documented CLI option; collapsing them would hide the interface
     ctx: click.Context,
@@ -428,8 +431,8 @@ def cli_ping(  # noqa: PLR0913 - one parameter per documented CLI option; collap
 
 @cli.command("ping-many", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("targets", nargs=-1, required=True)
-@option("--times", "-c", type=int, default=4, show_default=True, help="Echoes per target.")
-@option("--timeout", type=float, default=2.0, show_default=True, help="Seconds to wait per reply.")
+@option("--times", "-c", type=int, default=DEFAULT_TIMES, show_default=True, help="Echoes per target.")
+@option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per reply.")
 @option("--concurrency", type=int, default=64, show_default=True, help="Probes in flight at once.")
 @click.pass_context
 def cli_ping_many(ctx: click.Context, targets: tuple[str, ...], *, times: int, timeout: float, concurrency: int) -> None:
@@ -456,8 +459,8 @@ def cli_ping_many(ctx: click.Context, targets: tuple[str, ...], *, times: int, t
 
 @cli.command("reachable", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("target")
-@option("--timeout", type=float, default=2.0, show_default=True, help="Seconds to allow per attempt.")
-@option("--tcp-port", type=int, default=443, show_default=True, help="Port for the TCP attempt.")
+@option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to allow per attempt.")
+@option("--tcp-port", type=int, default=DEFAULT_TCP_PORT, show_default=True, help="Port for the TCP attempt.")
 @click.pass_context
 def cli_reachable(ctx: click.Context, target: str, *, timeout: float, tcp_port: int) -> None:
     """Answer whether a host responds, by ICMP or failing that TCP."""

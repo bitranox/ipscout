@@ -28,7 +28,9 @@ from ipscout.models import AddressFamily
 from ipscout.transport_posix import AsyncPosixEchoTransport, ErrorQueueReader, PosixEchoTransport, recvmsg_of
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+
+    from _typeshed import ReadableBuffer
 
 pytestmark = [
     pytest.mark.os_posix,
@@ -83,7 +85,7 @@ class _EchoResponder:
         self.socket.close()
 
 
-def _factory(responder_port: int) -> object:
+def _factory(responder_port: int) -> Callable[[AddressFamily], socket.socket]:
     """Return a socket factory whose sockets reach the responder.
 
     ICMP carries no port, so the transport sends to port 0. UDP needs a real
@@ -94,9 +96,11 @@ def _factory(responder_port: int) -> object:
     class _PortMappedSocket(socket.socket):
         """A real UDP socket that redirects the port ICMP does not have."""
 
-        def sendto(self, data: object, address: object) -> int:  # type: ignore[override]
-            del address
-            return int(super().sendto(bytes(data), ("127.0.0.1", responder_port)))  # type: ignore[arg-type]
+        def sendto(self, data: ReadableBuffer, /, *args: object) -> int:
+            # Both stdlib forms, (data, address) and (data, flags, address),
+            # end in the address this replaces, so the rest is dropped.
+            del args
+            return super().sendto(data, ("127.0.0.1", responder_port))
 
     def make(family: AddressFamily) -> socket.socket:
         del family
@@ -115,7 +119,7 @@ def responder() -> Iterator[_EchoResponder]:
 
 
 def test_a_matching_reply_is_recognised_and_timed(responder: _EchoResponder) -> None:
-    with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port)) as transport:  # type: ignore[arg-type]
+    with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port)) as transport:
         result = transport.probe(sequence=1, timeout=2.0)
 
     assert result.answered
@@ -128,7 +132,7 @@ def test_a_reply_carrying_someone_elses_token_is_never_accepted() -> None:
     # timeout, not as a successful probe.
     peer = _EchoResponder(corrupt_token=True)
     try:
-        with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(peer.port)) as transport:  # type: ignore[arg-type]
+        with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(peer.port)) as transport:
             result = transport.probe(sequence=1, timeout=0.6)
     finally:
         peer.close()
@@ -142,7 +146,7 @@ def test_foreign_traffic_does_not_consume_the_whole_timeout_budget() -> None:
     # timeout whenever another process shares the host's ICMP traffic.
     peer = _EchoResponder(foreign_first=3)
     try:
-        with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(peer.port)) as transport:  # type: ignore[arg-type]
+        with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(peer.port)) as transport:
             result = transport.probe(sequence=1, timeout=2.0)
     finally:
         peer.close()
@@ -153,7 +157,7 @@ def test_foreign_traffic_does_not_consume_the_whole_timeout_budget() -> None:
 def test_a_silent_peer_times_out_within_the_budget() -> None:
     peer = _EchoResponder(drop=True)
     try:
-        with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(peer.port)) as transport:  # type: ignore[arg-type]
+        with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(peer.port)) as transport:
             started = time.perf_counter()
             result = transport.probe(sequence=1, timeout=0.8)
             elapsed = time.perf_counter() - started
@@ -168,7 +172,7 @@ def test_a_reply_to_a_different_sequence_is_not_accepted(responder: _EchoRespond
     # The responder echoes whatever sequence it was sent, so asking for one
     # sequence and matching another must fail. Guards against a matcher that
     # only checks the token.
-    with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port)) as transport:  # type: ignore[arg-type]
+    with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port)) as transport:
         first = transport.probe(sequence=1, timeout=1.0)
         second = transport.probe(sequence=2, timeout=1.0)
 
@@ -177,19 +181,19 @@ def test_a_reply_to_a_different_sequence_is_not_accepted(responder: _EchoRespond
 
 
 def test_a_hop_limit_is_applied_without_error(responder: _EchoResponder) -> None:
-    with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port)) as transport:  # type: ignore[arg-type]
+    with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port)) as transport:
         result = transport.probe(sequence=1, timeout=2.0, ttl=5)
 
     assert result.answered
 
 
 def test_the_transport_declares_it_can_carry_a_hop_limit(responder: _EchoResponder) -> None:
-    with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port)) as transport:  # type: ignore[arg-type]
+    with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port)) as transport:
         assert transport.supports_ttl is True
 
 
 def test_closing_twice_is_harmless(responder: _EchoResponder) -> None:
-    transport = PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port))  # type: ignore[arg-type]
+    transport = PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=_factory(responder.port))
 
     transport.close()
     transport.close()
@@ -201,7 +205,7 @@ def test_every_payload_size_round_trips(responder: _EchoResponder, payload_size:
         "127.0.0.1",
         AddressFamily.IPV4,
         payload_size=payload_size,
-        socket_factory=_factory(responder.port),  # type: ignore[arg-type]
+        socket_factory=_factory(responder.port),
     ) as transport:
         result = transport.probe(sequence=1, timeout=2.0)
 
@@ -213,7 +217,7 @@ def test_the_async_transport_matches_a_reply(responder: _EchoResponder) -> None:
         transport = AsyncPosixEchoTransport(
             "127.0.0.1",
             AddressFamily.IPV4,
-            socket_factory=_factory(responder.port),  # type: ignore[arg-type]
+            socket_factory=_factory(responder.port),
         )
         async with transport:
             return (await transport.probe(sequence=1, timeout=2.0)).answered
@@ -228,7 +232,7 @@ def test_the_async_transport_times_out_on_a_silent_peer() -> None:
         transport = AsyncPosixEchoTransport(
             "127.0.0.1",
             AddressFamily.IPV4,
-            socket_factory=_factory(peer.port),  # type: ignore[arg-type]
+            socket_factory=_factory(peer.port),
         )
         async with transport:
             return (await transport.probe(sequence=1, timeout=0.6)).answered
@@ -246,7 +250,7 @@ def test_the_async_transport_serves_many_probes_on_one_socket(responder: _EchoRe
         transport = AsyncPosixEchoTransport(
             "127.0.0.1",
             AddressFamily.IPV4,
-            socket_factory=_factory(responder.port),  # type: ignore[arg-type]
+            socket_factory=_factory(responder.port),
         )
         async with transport:
             results = await asyncio.gather(*(transport.probe(sequence=n, timeout=3.0) for n in range(1, 26)))
@@ -262,7 +266,7 @@ def test_the_async_transport_discards_foreign_traffic() -> None:
         transport = AsyncPosixEchoTransport(
             "127.0.0.1",
             AddressFamily.IPV4,
-            socket_factory=_factory(peer.port),  # type: ignore[arg-type]
+            socket_factory=_factory(peer.port),
         )
         async with transport:
             return (await transport.probe(sequence=1, timeout=2.0)).answered

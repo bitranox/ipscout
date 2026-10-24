@@ -31,9 +31,11 @@ from typing import TYPE_CHECKING
 from .errors import IPScoutError
 from .factory import icmp_available, make_async_transport, make_transport
 from .models import AddressFamily, ProbeMethod, ResponseObject
+from .packet import DEFAULT_PAYLOAD_SIZE
 from .pool import gather_bounded
 from .resolve import resolve_one
-from .service import PingRequest, arun_ping, run_ping
+from .service import DEFAULT_INTERVAL, DEFAULT_TIMEOUT, DEFAULT_TIMES, PingRequest, arun_ping, run_ping
+from .transport_tcp import DEFAULT_TCP_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -53,35 +55,91 @@ __all__ = [
 #: exhaust file descriptors on a default ulimit.
 DEFAULT_CONCURRENCY = 64
 
+#: Everything ``is_reachable`` turns into False rather than raising: the setup
+#: errors ``ping`` raises, plus a socket error from either probe.
+_NOT_REACHED = (IPScoutError, ValueError, OSError)
 
-def _probe_method(family: AddressFamily | None, *, allow_tcp_fallback: bool) -> ProbeMethod:
-    """Return TCP only when the caller allowed it and ICMP cannot be used here."""
 
-    if allow_tcp_fallback and not icmp_available(family or AddressFamily.IPV4):
+def _probe_method(family: AddressFamily, *, allow_tcp_fallback: bool) -> ProbeMethod:
+    """Return TCP only when the caller allowed it and ICMP cannot be used for ``family``.
+
+    ``family`` is the RESOLVED one, never the caller's optional preference:
+    ICMP availability differs per family, so asking about IPv4 before the
+    target turned out to be IPv6 would answer the wrong question.
+    """
+
+    if allow_tcp_fallback and not icmp_available(family):
         return ProbeMethod.TCP
     return ProbeMethod.ICMP
+
+
+def _with_method(request: PingRequest, method: ProbeMethod) -> PingRequest:
+    """Return ``request`` probing by ``method`` instead.
+
+    A copy rather than a second construction: every other field was validated
+    already, and ``model_copy`` skips validation, which is sound here only
+    because the one value it sets is a ``ProbeMethod`` member, the field's own type.
+    """
+
+    return request.model_copy(update={"method": method})
 
 
 def _request(  # noqa: PLR0913 - mirrors the public API's knobs, every one keyword-only and independently useful
     target: str,
     resolved: ResolvedTarget,
+    *,
     times: int,
     timeout: float,
     interval: float,
-    *,
-    method: ProbeMethod,
+    payload_size: int,
+    tcp_port: int,
+    allow_tcp_fallback: bool,
 ) -> PingRequest:
-    """Validate the parameters into a request for an already-resolved target."""
+    """Validate the parameters into a request for an already-resolved target.
 
-    return PingRequest(
+    Validation comes first and the probe method second: choosing it can open
+    an ICMP socket to see whether one is available, and a request that
+    validation rejects must not touch the machine at all.
+    """
+
+    request = PingRequest(
         target=target,
         address=resolved.address,
         family=resolved.family,
         times=times,
         timeout=timeout,
         interval=interval,
-        method=method,
+        payload_size=payload_size,
+        tcp_port=tcp_port,
     )
+    return _with_method(request, _probe_method(request.family, allow_tcp_fallback=allow_tcp_fallback))
+
+
+def _send(request: PingRequest) -> ResponseObject:
+    """Run a validated request over a synchronous transport."""
+
+    with make_transport(
+        request.address,
+        request.family,
+        payload_size=request.payload_size,
+        method=request.method,
+        tcp_port=request.tcp_port,
+    ) as transport:
+        return run_ping(request, transport)
+
+
+async def _asend(request: PingRequest) -> ResponseObject:
+    """Run a validated request over an asynchronous transport."""
+
+    transport = make_async_transport(
+        request.address,
+        request.family,
+        payload_size=request.payload_size,
+        method=request.method,
+        tcp_port=request.tcp_port,
+    )
+    async with transport:
+        return await arun_ping(request, transport)
 
 
 def _suppressed(target: str, times: int, exc: Exception) -> ResponseObject:
@@ -92,14 +150,14 @@ def _suppressed(target: str, times: int, exc: Exception) -> ResponseObject:
 
 def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful
     target: str,
-    times: int = 4,
+    times: int = DEFAULT_TIMES,
     *,
-    timeout: float = 2.0,
-    interval: float = 0.2,
+    timeout: float = DEFAULT_TIMEOUT,
+    interval: float = DEFAULT_INTERVAL,
     family: AddressFamily | None = None,
-    payload_size: int = 56,
+    payload_size: int = DEFAULT_PAYLOAD_SIZE,
     allow_tcp_fallback: bool = False,
-    tcp_port: int = 443,
+    tcp_port: int = DEFAULT_TCP_PORT,
     raise_on_error: bool = True,
 ) -> ResponseObject:
     """Ping a target and report what came back.
@@ -111,9 +169,10 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
         interval: Seconds between the start of consecutive echoes.
         family: Force IPv4 or IPv6. ``None`` takes the resolver's preference.
         payload_size: Bytes of ICMP payload per echo.
-        allow_tcp_fallback: Probe over TCP when ICMP is unavailable. Off by
-            default: a TCP result is not an ICMP result, and substituting one
-            silently would misreport a filtered port as a dead host.
+        allow_tcp_fallback: Probe over TCP when ICMP is unavailable for the
+            family the target resolved to. Off by default: a TCP result is not
+            an ICMP result, and substituting one silently would misreport a
+            filtered port as a dead host.
         tcp_port: Port used only when the TCP fallback is engaged.
         raise_on_error: Keep the strict contract. Set False to report every
             failure as ``reached=False`` with the reason on ``.error``
@@ -127,7 +186,7 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
         IPScoutResolutionError: The target does not resolve.
         IPScoutPermissionError: ICMP is unavailable and no fallback was allowed.
         IPScoutUnsupportedError: No ICMP backend exists for this platform.
-        ValueError: ``times``, ``timeout`` or ``interval`` is out of range.
+        ValueError: ``times``, ``timeout``, ``interval`` or ``tcp_port`` is out of range.
 
     Examples:
         >>> result = ping("127.0.0.1", 2, interval=0)
@@ -152,17 +211,18 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
     """
 
     try:
-        method = _probe_method(family, allow_tcp_fallback=allow_tcp_fallback)
         resolved = resolve_one(target, family=family)
-        request = _request(target, resolved, times, timeout, interval, method=method)
-        with make_transport(
-            request.address,
-            request.family,
+        request = _request(
+            target,
+            resolved,
+            times=times,
+            timeout=timeout,
+            interval=interval,
             payload_size=payload_size,
-            method=request.method,
             tcp_port=tcp_port,
-        ) as transport:
-            return run_ping(request, transport)
+            allow_tcp_fallback=allow_tcp_fallback,
+        )
+        return _send(request)
     except (IPScoutError, ValueError) as exc:
         if raise_on_error:
             raise
@@ -171,14 +231,14 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
 
 async def aping(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful
     target: str,
-    times: int = 4,
+    times: int = DEFAULT_TIMES,
     *,
-    timeout: float = 2.0,
-    interval: float = 0.2,
+    timeout: float = DEFAULT_TIMEOUT,
+    interval: float = DEFAULT_INTERVAL,
     family: AddressFamily | None = None,
-    payload_size: int = 56,
+    payload_size: int = DEFAULT_PAYLOAD_SIZE,
     allow_tcp_fallback: bool = False,
-    tcp_port: int = 443,
+    tcp_port: int = DEFAULT_TCP_PORT,
     raise_on_error: bool = True,
 ) -> ResponseObject:
     """Ping a target without blocking the event loop.
@@ -204,20 +264,20 @@ async def aping(  # noqa: PLR0913 - public API: every knob is keyword-only and i
     """
 
     try:
-        method = _probe_method(family, allow_tcp_fallback=allow_tcp_fallback)
         # getaddrinfo blocks for as long as the name server takes; on the loop
         # thread one slow name would stall every other probe in a sweep.
         resolved = await asyncio.to_thread(resolve_one, target, family=family)
-        request = _request(target, resolved, times, timeout, interval, method=method)
-        transport = make_async_transport(
-            request.address,
-            request.family,
+        request = _request(
+            target,
+            resolved,
+            times=times,
+            timeout=timeout,
+            interval=interval,
             payload_size=payload_size,
-            method=request.method,
             tcp_port=tcp_port,
+            allow_tcp_fallback=allow_tcp_fallback,
         )
-        async with transport:
-            return await arun_ping(request, transport)
+        return await _asend(request)
     except (IPScoutError, ValueError) as exc:
         if raise_on_error:
             raise
@@ -228,13 +288,13 @@ async def aping_many(  # noqa: PLR0913 - public API: every knob is keyword-only 
     targets: Iterable[str],
     *,
     concurrency: int = DEFAULT_CONCURRENCY,
-    times: int = 4,
-    timeout: float = 2.0,
-    interval: float = 0.2,
+    times: int = DEFAULT_TIMES,
+    timeout: float = DEFAULT_TIMEOUT,
+    interval: float = DEFAULT_INTERVAL,
     family: AddressFamily | None = None,
-    payload_size: int = 56,
+    payload_size: int = DEFAULT_PAYLOAD_SIZE,
     allow_tcp_fallback: bool = False,
-    tcp_port: int = 443,
+    tcp_port: int = DEFAULT_TCP_PORT,
     raise_on_error: bool = False,
 ) -> dict[str, ResponseObject]:
     """Ping many targets concurrently.
@@ -302,13 +362,13 @@ def ping_many(  # noqa: PLR0913 - public API: every knob is keyword-only and ind
     targets: Iterable[str],
     *,
     concurrency: int = DEFAULT_CONCURRENCY,
-    times: int = 4,
-    timeout: float = 2.0,
-    interval: float = 0.2,
+    times: int = DEFAULT_TIMES,
+    timeout: float = DEFAULT_TIMEOUT,
+    interval: float = DEFAULT_INTERVAL,
     family: AddressFamily | None = None,
-    payload_size: int = 56,
+    payload_size: int = DEFAULT_PAYLOAD_SIZE,
     allow_tcp_fallback: bool = False,
-    tcp_port: int = 443,
+    tcp_port: int = DEFAULT_TCP_PORT,
     raise_on_error: bool = False,
 ) -> dict[str, ResponseObject]:
     """Ping many targets concurrently from synchronous code.
@@ -357,20 +417,21 @@ def ping_many(  # noqa: PLR0913 - public API: every knob is keyword-only and ind
 def is_reachable(
     target: str,
     *,
-    timeout: float = 2.0,
-    tcp_port: int = 443,
+    timeout: float = DEFAULT_TIMEOUT,
+    tcp_port: int = DEFAULT_TCP_PORT,
     family: AddressFamily | None = None,
 ) -> bool:
     """Return whether a target answers, by any means available.
 
     The deliberate exception to this module's error contract. It **never
     raises** and it **always** tries TCP when ICMP does not answer or is
-    unavailable. That is the entire point of the shortcut.
+    unavailable. That is the entire point of the shortcut. The target is
+    resolved once, and both attempts probe that one address.
 
     Args:
         target: Hostname or IP address literal.
         timeout: Seconds to allow for each attempt.
-        tcp_port: Port for the TCP attempt.
+        tcp_port: Port for the TCP attempt. Outside 1-65535 the check answers False.
         family: Force IPv4 or IPv6.
 
     Returns:
@@ -390,25 +451,72 @@ def is_reachable(
 
     """
 
-    if ping(target, 1, timeout=timeout, interval=0, family=family, raise_on_error=False).reached:
-        return True
-
-    # Fall through to TCP unconditionally. Going via ping(allow_tcp_fallback=True)
-    # would not do it: that only substitutes TCP when ICMP is *unavailable*, and
-    # the common case here is ICMP being available but the target not answering it.
+    # One lookup for both tries: a second could answer a different address
+    # (round-robin DNS, a v4/v6 preference), and the two tries would then probe
+    # two different hosts for what is reported as one answer.
     try:
         resolved = resolve_one(target, family=family)
-        with make_transport(resolved.address, resolved.family, method=ProbeMethod.TCP, tcp_port=tcp_port) as transport:
-            return transport.probe(sequence=1, timeout=timeout).answered
-    except (IPScoutError, ValueError, OSError):
+        icmp = _reachability_request(target, resolved, timeout)
+    except _NOT_REACHED:
+        return False
+    if _answers(icmp):
+        return True
+    tcp = _tcp_leg(target, resolved, timeout, tcp_port)
+    return tcp is not None and _answers(tcp)
+
+
+def _reachability_request(
+    target: str,
+    resolved: ResolvedTarget,
+    timeout: float,
+    tcp_port: int = DEFAULT_TCP_PORT,
+) -> PingRequest:
+    """Validate the single echo a reachability check sends on one leg.
+
+    Both legs probe the one resolved address. The ICMP leg leaves ``tcp_port``
+    at its default because the port is the TCP leg's alone: a caller's bad port
+    must not make a host that answers ICMP read as unreachable.
+    """
+
+    return PingRequest(
+        target=target,
+        address=resolved.address,
+        family=resolved.family,
+        times=1,
+        timeout=timeout,
+        interval=0,
+        tcp_port=tcp_port,
+    )
+
+
+def _tcp_leg(target: str, resolved: ResolvedTarget, timeout: float, tcp_port: int) -> PingRequest | None:
+    """Return the validated TCP leg, or None when ``tcp_port`` is refused.
+
+    Tried unconditionally after ICMP, which ``ping(allow_tcp_fallback=True)``
+    would not do: that only substitutes TCP when ICMP is *unavailable*, and the
+    common case here is ICMP being available but the target not answering it.
+    """
+
+    try:
+        return _with_method(_reachability_request(target, resolved, timeout, tcp_port), ProbeMethod.TCP)
+    except _NOT_REACHED:
+        return None
+
+
+def _answers(request: PingRequest) -> bool:
+    """Return whether ``request`` reached its target; any failure is False."""
+
+    try:
+        return _send(request).reached
+    except _NOT_REACHED:
         return False
 
 
 async def ais_reachable(
     target: str,
     *,
-    timeout: float = 2.0,
-    tcp_port: int = 443,
+    timeout: float = DEFAULT_TIMEOUT,
+    tcp_port: int = DEFAULT_TCP_PORT,
     family: AddressFamily | None = None,
 ) -> bool:
     """Return whether a target answers, without blocking the event loop.
@@ -425,14 +533,23 @@ async def ais_reachable(
 
     """
 
-    icmp = await aping(target, 1, timeout=timeout, interval=0, family=family, raise_on_error=False)
-    if icmp.reached:
-        return True
-
+    # One lookup for both tries, as in is_reachable, and off the loop thread,
+    # as in aping.
     try:
         resolved = await asyncio.to_thread(resolve_one, target, family=family)
-        transport = make_async_transport(resolved.address, resolved.family, method=ProbeMethod.TCP, tcp_port=tcp_port)
-        async with transport:
-            return (await transport.probe(sequence=1, timeout=timeout)).answered
-    except (IPScoutError, ValueError, OSError):
+        icmp = _reachability_request(target, resolved, timeout)
+    except _NOT_REACHED:
+        return False
+    if await _aanswers(icmp):
+        return True
+    tcp = _tcp_leg(target, resolved, timeout, tcp_port)
+    return tcp is not None and await _aanswers(tcp)
+
+
+async def _aanswers(request: PingRequest) -> bool:
+    """Return whether ``request`` reached its target; any failure is False."""
+
+    try:
+        return (await _asend(request)).reached
+    except _NOT_REACHED:
         return False

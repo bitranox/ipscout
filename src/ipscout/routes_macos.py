@@ -35,7 +35,7 @@ from .bsdroute import (
     address_of,
     split_sockaddrs,
 )
-from .models import RouteInfo
+from .models import AddressFamily, RouteInfo
 
 __all__ = ["default_gateway", "parse_route_reply", "query_route"]
 
@@ -110,15 +110,15 @@ def parse_route_reply(data: bytes, *, pid: int | None = None, seq: int | None = 
     return RouteInfo(gateway=gateway, interface=interface, source=source)
 
 
-def _build_request(packed_destination: bytes, family: int, seq: int) -> bytes:
+def _build_request(packed_destination: bytes, family: AddressFamily, seq: int) -> bytes:
     """Build the RTM_GET message asking about one destination."""
 
-    if family == socket.AF_INET6:
+    if family is AddressFamily.IPV6:
         # sockaddr_in6: len, family, port, flowinfo, addr, scope_id.
-        sockaddr = struct.pack("=BBHI16sI", 28, family, 0, 0, packed_destination, 0)
+        sockaddr = struct.pack("=BBHI16sI", 28, family.socket_family, 0, 0, packed_destination, 0)
     else:
         # sockaddr_in: len, family, port, addr, then 8 bytes of zero padding.
-        sockaddr = struct.pack("=BBH4s8s", 16, family, 0, packed_destination, b"\x00" * 8)
+        sockaddr = struct.pack("=BBH4s8s", 16, family.socket_family, 0, packed_destination, b"\x00" * 8)
 
     header = RT_MSGHDR.pack(
         RT_MSGHDR.size + len(sockaddr),
@@ -147,12 +147,12 @@ def _open_route_socket() -> socket.socket | None:
         return None
 
 
-def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | None:  # pragma: no cover - macOS only
+def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | None:  # pragma: no cover - macOS only
     """Ask the kernel which route reaches ``destination``.
 
     Args:
         destination: The address to look up.
-        family: ``AF_INET`` or ``AF_INET6``.
+        family: Which address family ``destination`` belongs to.
 
     Returns:
         The route, or ``None`` if the kernel reported no usable route or the
@@ -161,7 +161,7 @@ def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | N
     """
 
     try:
-        packed = socket.inet_pton(family, destination)
+        packed = socket.inet_pton(family.socket_family, destination)
     except OSError:
         return None
 
@@ -189,11 +189,11 @@ def query_route(destination: str, family: int = socket.AF_INET) -> RouteInfo | N
     return None
 
 
-def default_gateway(family: int = socket.AF_INET) -> RouteInfo | None:  # pragma: no cover - macOS only
+def default_gateway(family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | None:  # pragma: no cover - macOS only
     """Return the route used for traffic with no more specific destination.
 
     Args:
-        family: ``AF_INET`` or ``AF_INET6``.
+        family: Which address family to ask about.
 
     Returns:
         The default route, or ``None`` when this host has none.
@@ -202,5 +202,5 @@ def default_gateway(family: int = socket.AF_INET) -> RouteInfo | None:  # pragma
 
     # The unspecified address is the lookup key the default route matches on;
     # it is never bound to.
-    unspecified = "::" if family == socket.AF_INET6 else "0.0.0.0"  # noqa: S104  # nosec B104
+    unspecified = "::" if family is AddressFamily.IPV6 else "0.0.0.0"  # noqa: S104  # nosec B104
     return query_route(unspecified, family)

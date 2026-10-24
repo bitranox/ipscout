@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING
 
 from .errors import IPScoutPermissionError
 from .models import AddressFamily, ProbeMethod
+from .packet import DEFAULT_PAYLOAD_SIZE
 from .transport_posix import AsyncPosixEchoTransport, PosixEchoTransport, open_socket
-from .transport_tcp import AsyncTcpEchoTransport, TcpEchoTransport
+from .transport_tcp import DEFAULT_TCP_PORT, AsyncTcpEchoTransport, TcpEchoTransport
 from .transport_windows import AsyncWindowsEchoTransport, WindowsEchoTransport, windows_icmp_available
 
 if TYPE_CHECKING:
@@ -67,9 +68,9 @@ def make_transport(
     address: str,
     family: AddressFamily,
     *,
-    payload_size: int = 56,
+    payload_size: int = DEFAULT_PAYLOAD_SIZE,
     method: ProbeMethod = ProbeMethod.ICMP,
-    tcp_port: int = 443,
+    tcp_port: int = DEFAULT_TCP_PORT,
 ) -> EchoTransport:
     """Return a synchronous transport for these parameters.
 
@@ -100,9 +101,9 @@ def make_async_transport(
     address: str,
     family: AddressFamily,
     *,
-    payload_size: int = 56,
+    payload_size: int = DEFAULT_PAYLOAD_SIZE,
     method: ProbeMethod = ProbeMethod.ICMP,
-    tcp_port: int = 443,
+    tcp_port: int = DEFAULT_TCP_PORT,
 ) -> AsyncEchoTransport:
     """Return an asyncio transport for these parameters.
 

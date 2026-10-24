@@ -21,12 +21,23 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import AddressFamily, ProbeMethod, ResponseObject
+from .models import MAX_PORT, MIN_PORT, AddressFamily, ProbeMethod, ResponseObject
+from .packet import DEFAULT_PAYLOAD_SIZE
+from .transport_tcp import DEFAULT_TCP_PORT
 
 if TYPE_CHECKING:
     from .ports import AsyncEchoTransport, EchoResult, EchoTransport
 
-__all__ = ["PingRequest", "arun_ping", "run_ping"]
+__all__ = ["DEFAULT_INTERVAL", "DEFAULT_TIMEOUT", "DEFAULT_TIMES", "PingRequest", "arun_ping", "run_ping"]
+
+#: Default echoes per ping, the count Windows ping sends unasked.
+DEFAULT_TIMES = 4
+
+#: Default seconds to wait for each reply.
+DEFAULT_TIMEOUT = 2.0
+
+#: Default seconds between the start of consecutive echoes.
+DEFAULT_INTERVAL = 0.2
 
 
 class PingRequest(BaseModel):
@@ -43,14 +54,17 @@ class PingRequest(BaseModel):
         times: How many echoes to send.
         timeout: Seconds to wait for each individual reply.
         interval: Seconds between the start of consecutive echoes.
+        payload_size: Bytes of ICMP payload per echo. Ignored by the TCP transport.
+        tcp_port: Port the TCP transport connects to. Ignored by ICMP.
         method: Which protocol the chosen transport represents.
 
     Raises:
         pydantic.ValidationError: ``times`` below 1, ``timeout`` not positive,
-            or ``interval`` negative. These are caller mistakes, not network
-            conditions, so they raise regardless of ``raise_on_error``. The
-            bounds live on the fields rather than in a hand-written check, so
-            the constraint and the documentation cannot drift apart.
+            ``interval`` negative, or ``tcp_port`` outside 1-65535. These
+            are caller mistakes, not network conditions, so they raise
+            regardless of ``raise_on_error``. The bounds live on the fields
+            rather than in a hand-written check, so the constraint and the
+            documentation cannot drift apart.
 
     Examples:
         >>> PingRequest(target="t", address="127.0.0.1", family=AddressFamily.IPV4).times
@@ -67,9 +81,11 @@ class PingRequest(BaseModel):
     target: str
     address: str
     family: AddressFamily
-    times: int = Field(default=4, ge=1, description="Echoes to send; fewer than one describes no probe at all.")
-    timeout: float = Field(default=2.0, gt=0, description="Seconds to wait per reply; zero would never wait.")
-    interval: float = Field(default=0.2, ge=0, description="Seconds between echoes; negative is meaningless.")
+    times: int = Field(default=DEFAULT_TIMES, ge=1, description="Echoes to send; fewer than one describes no probe at all.")
+    timeout: float = Field(default=DEFAULT_TIMEOUT, gt=0, description="Seconds to wait per reply; zero would never wait.")
+    interval: float = Field(default=DEFAULT_INTERVAL, ge=0, description="Seconds between echoes; negative is meaningless.")
+    payload_size: int = Field(default=DEFAULT_PAYLOAD_SIZE, description="Bytes of ICMP payload per echo; the packet builder raises it to its minimum.")
+    tcp_port: int = Field(default=DEFAULT_TCP_PORT, ge=MIN_PORT, le=MAX_PORT, description="Port for the TCP transport; outside 1-65535 no connect can be made.")
     method: ProbeMethod = ProbeMethod.ICMP
 
 

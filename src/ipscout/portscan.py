@@ -38,7 +38,7 @@ import sys
 import time
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
-from .models import PortState, ScanMethod
+from .models import MAX_PORT, PortState, ScanMethod, require_port
 from .pool import gather_bounded
 from .routes import query_route
 from .sockerr import is_refusal
@@ -50,10 +50,6 @@ IS_WINDOWS = sys.platform == "win32"
 
 #: Enough to finish a wide scan quickly without exhausting file handles.
 DEFAULT_CONCURRENCY = 256
-
-#: Ports are 16-bit, and zero is not a usable destination.
-MIN_PORT = 1
-MAX_PORT = 65535
 
 #: The ephemeral range a SYN scan picks its source port from, at random.
 #: A predictable choice collides with a concurrent scan in the same
@@ -112,16 +108,17 @@ def _port(text: str) -> int:
     except ValueError:
         msg = f"not a port number: {text.strip()!r}"
         raise ValueError(msg) from None
-    if not MIN_PORT <= value <= MAX_PORT:
-        msg = f"port out of range 1-{MAX_PORT}: {value}"
-        raise ValueError(msg)
-    return value
+    return require_port(value)
 
 
 def _wanted(ports: str | list[int]) -> list[int]:
-    """Return the ports to scan, however they were specified."""
+    """Return the ports to scan, however they were specified.
 
-    return parse_ports(ports) if isinstance(ports, str) else sorted(set(ports))
+    A list is held to the same range as a specification, so a port no host
+    can listen on is refused before any connect or SYN is attempted.
+    """
+
+    return parse_ports(ports) if isinstance(ports, str) else sorted({require_port(port) for port in ports})
 
 
 def choose_source_port() -> int:
@@ -186,6 +183,8 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = 1.0) -> dict[int, 
             means root or ``CAP_NET_RAW`` on Linux and macOS.
         IPScoutUnsupportedError: Windows, which has blocked raw TCP sends
             since XP SP2, or no route to the target.
+        ValueError: A port is outside ``MIN_PORT``-``MAX_PORT``. Checked first, so a
+            bad list is reported as such whatever the privileges.
 
     Note:
         Never falls back to a connect scan. The two measure different things,
@@ -193,6 +192,9 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = 1.0) -> dict[int, 
         it had been a half-open probe.
 
     """
+
+    for port in ports:
+        require_port(port)
 
     if IS_WINDOWS:  # pragma: no cover - Windows only
         msg = "Windows blocks raw TCP sends, so a SYN scan is unavailable at any privilege level; use the connect method"
@@ -295,7 +297,8 @@ def scan_ports(
         range.
 
     Raises:
-        ValueError: The port specification is malformed.
+        ValueError: The port specification is malformed, or a listed port
+            is outside ``MIN_PORT``-``MAX_PORT``.
         IPScoutPermissionError: A SYN scan without the privilege it needs.
         IPScoutUnsupportedError: A SYN scan where the platform has none.
         RuntimeError: The connect method called from inside a running event
@@ -336,7 +339,8 @@ async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = 1.0
         the two would hide a firewall.
 
     Raises:
-        ValueError: The port specification is malformed.
+        ValueError: The port specification is malformed, or a listed port
+            is outside ``MIN_PORT``-``MAX_PORT``.
 
     """
 

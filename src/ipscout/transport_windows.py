@@ -114,7 +114,7 @@ class WindowsEchoTransport:
 
     """
 
-    def __init__(self, address: str, family: AddressFamily, *, payload_size: int = 56) -> None:
+    def __init__(self, address: str, family: AddressFamily, *, payload_size: int = packet.DEFAULT_PAYLOAD_SIZE) -> None:
         self._address = address
         self._family = family
         self._payload_size = payload_size
@@ -307,7 +307,7 @@ class AsyncWindowsEchoTransport:
         address: str,
         family: AddressFamily,
         *,
-        payload_size: int = 56,
+        payload_size: int = packet.DEFAULT_PAYLOAD_SIZE,
         max_workers: int = _MAX_WORKERS,
     ) -> None:
         self._inner = WindowsEchoTransport(address, family, payload_size=payload_size)

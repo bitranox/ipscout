@@ -42,6 +42,7 @@ from pydantic import BaseModel, ConfigDict
 from .models import AddressFamily
 
 __all__ = [
+    "DEFAULT_PAYLOAD_SIZE",
     "ECHO_REPLY_V4",
     "ECHO_REPLY_V6",
     "ECHO_REQUEST_V4",
@@ -79,6 +80,9 @@ TOKEN_SIZE = 8
 
 #: Smallest payload that can still carry magic and token.
 MIN_PAYLOAD_SIZE = len(MAGIC) + TOKEN_SIZE
+
+#: Default bytes of ICMP payload per echo, the size the system ping sends.
+DEFAULT_PAYLOAD_SIZE = 56
 
 #: IPv4 version nibble, and the smallest legal IPv4 header. Used to recognise a
 #: header that some platforms prepend to a received ICMP datagram.
@@ -235,7 +239,7 @@ class EchoRequest(NamedTuple):
 def build_echo_request(
     *,
     sequence: int,
-    payload_size: int = 56,
+    payload_size: int = DEFAULT_PAYLOAD_SIZE,
     family: AddressFamily = AddressFamily.IPV4,
     identifier: int = 0,
     token: bytes | None = None,

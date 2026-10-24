@@ -41,9 +41,6 @@ pytestmark = pytest.mark.os_agnostic
 #: hop limit of 1 expires at the first router rather than reaching the target.
 FAR_TARGET = "1.1.1.1"
 
-#: ICMP type 11: Time Exceeded, what a router sends when the hop limit runs out.
-ICMP_TIME_EXCEEDED = 11
-
 
 def _probe_error_queue() -> tuple[bool, str]:
     """Return whether MSG_ERRQUEUE yields a Time Exceeded, and what happened."""
@@ -98,7 +95,7 @@ def _probe_plain_recv() -> tuple[bool, str]:
             return False, f"plain recv yielded nothing: {exc!r}"
         parsed = packet.parse_echo_reply(raw)
         icmp_type = parsed.icmp_type if parsed is not None else -1
-        return icmp_type == ICMP_TIME_EXCEEDED, f"plain recv from {addr[0]} gave ICMP type {icmp_type}"
+        return icmp_type == packet.TIME_EXCEEDED_V4, f"plain recv from {addr[0]} gave ICMP type {icmp_type}"
     finally:
         sock.close()
 

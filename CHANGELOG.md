@@ -5,12 +5,36 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `ipscout.models.require_port`, `MIN_PORT` and `MAX_PORT`: the one port-range check (1-65535)
+  every entry point taking a port number now applies.
+
+### Changed
+
+- Every port number is held to 1-65535 the same way, with the message
+  `port out of range 1-65535: N`. `scan_ports` / `ascan_ports` / `syn_scan` refuse a port LIST
+  holding an out-of-range port with `ValueError` (only a specification string was checked);
+  `grab_banners` / `agrab_banners` keep refusing a bad port, now in that wording; `ping` / `aping`
+  refuse an out-of-range `tcp_port`; and `PortResult`, `Banner` and `WakeReport` refuse one at
+  construction.
+- `Banner` requires `error` exactly when the state is `UNREACHABLE` and refuses an empty one. It
+  used to forbid `error` on the other states but allowed an `UNREACHABLE` banner without a reason.
+
 ### Fixed
 
 - `aping`, `aping_many`, `ais_reachable` and `atraceroute` resolve their target in a worker
   thread, and `atrace_path(resolve_names=True)` looks up each hop's name there too. They called
   `getaddrinfo` / `gethostbyaddr` on the event-loop thread, so one slow name server stalled every
   other task in the loop: in `aping_many`, one slow name held up the whole sweep.
+- `is_reachable` / `ais_reachable` resolve the target once and probe that one address on both the
+  ICMP and the TCP attempt; they resolved twice, so round-robin DNS could make the two attempts
+  probe different hosts. ICMP versus TCP is now chosen for the family the target resolved to, not
+  for IPv4, and a socket error from either attempt answers `False` instead of escaping. A
+  `tcp_port` outside 1-65535 raised an uncaught `OverflowError` from the connect; it now makes only
+  the TCP attempt answer `False`, so a host that answers ICMP still reads as reachable.
+- `wake_on_lan` refuses a port outside 1-65535 with `ValueError`. It raised an uncaught
+  `OverflowError` from the socket layer, which the CLI printed as a traceback.
 
 ## [2.1.0] 2026-10-24 17:18:42
 

@@ -44,11 +44,6 @@ __all__ = [
     "zone_index",
 ]
 
-_SOCKET_FAMILY = {
-    AddressFamily.IPV4: socket.AF_INET,
-    AddressFamily.IPV6: socket.AF_INET6,
-}
-
 #: What ``getaddrinfo`` puts in a sockaddr: ``(address, port)`` for IPv4, and
 #: ``(address, port, flowinfo, scope_id)`` for IPv6. The link-layer form,
 #: ``(protocol, address)``, is in the signature for families this never asks
@@ -87,7 +82,7 @@ def family_of(address: str) -> AddressFamily | None:
         parsed = ipaddress.ip_address(address)
     except ValueError:
         return None
-    return AddressFamily.IPV6 if parsed.version == 6 else AddressFamily.IPV4  # noqa: PLR2004
+    return AddressFamily.IPV6 if parsed.version == _IPV6_VERSION else AddressFamily.IPV4
 
 
 class ScopedAddress(NamedTuple):
@@ -288,6 +283,17 @@ def _dedupe(items: Iterable[str]) -> list[str]:
     return ordered
 
 
+def _no_address_of_family(target: str, family: AddressFamily) -> IPScoutResolutionError:
+    """Return the refusal for a target that holds no address of ``family``.
+
+    Raised from two places - a literal of the other family, and a literal the
+    resolver then refuses for the requested one - and both must read the same,
+    because the caller's remedy is the same: drop or flip the family flag.
+    """
+
+    return IPScoutResolutionError(f"{target!r} has no {family.value} address")
+
+
 def resolve(target: str, *, family: AddressFamily | None = None) -> list[str]:
     """Return the addresses ``target`` resolves to.
 
@@ -333,8 +339,7 @@ def resolve(target: str, *, family: AddressFamily | None = None) -> list[str]:
     # Neither is a usable IPv6 address for the caller, so settle it up front.
     literal = family_of(target)
     if family is not None and literal is not None and literal is not family:
-        msg = f"{target!r} has no {family.value} address"
-        raise IPScoutResolutionError(msg)
+        raise _no_address_of_family(target, family)
 
     # The zone comes off before the resolver sees it, because the resolvers
     # disagree about it as well: Windows getaddrinfo refuses an interface NAME
@@ -344,15 +349,14 @@ def resolve(target: str, *, family: AddressFamily | None = None) -> list[str]:
     # where it is actually needed, at the send.
     _refuse_a_malformed_zone(target)
     lookup, written_zone = split_zone(target)
-    requested = _SOCKET_FAMILY.get(family) if family is not None else socket.AF_UNSPEC
+    requested = family.socket_family if family is not None else socket.AF_UNSPEC
     try:
-        infos = socket.getaddrinfo(lookup, None, requested or socket.AF_UNSPEC, socket.SOCK_DGRAM)
+        infos = socket.getaddrinfo(lookup, None, requested, socket.SOCK_DGRAM)
     except socket.gaierror as exc:
         # Distinguish "no such name" from "name exists, wrong family", because
         # the caller's next move differs: fix the name, or drop the -4/-6 flag.
-        if family is not None and family_of(target) is not None:
-            msg = f"{target!r} has no {family.value} address"
-            raise IPScoutResolutionError(msg) from exc
+        if family is not None and literal is not None:
+            raise _no_address_of_family(target, family) from exc
         if family is not None:
             msg = f"cannot resolve {target!r} to an {family.value} address: {exc.strerror or exc}"
             raise IPScoutResolutionError(msg) from exc

@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import socket
 import sys
+from typing import NamedTuple
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily
@@ -32,13 +33,36 @@ __all__ = ["path_mtu"]
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
 
-#: IP_MTU_DISCOVER / IP_PMTUDISC_DO, and the option holding the answer. Only
-#: Linux defines these, and CPython exposes them there.
-_IP_MTU_DISCOVER = 10
+#: IP_PMTUDISC_DO: always set don't-fragment, so the kernel tracks the path
+#: MTU. Linux's IPV6_PMTUDISC_DO has the same value, so one constant serves
+#: both families. Hardcoded because CPython's socket module does not export
+#: it; the value is Linux kernel ABI from include/uapi/linux/in.h and in6.h,
+#: fixed for every compiled binary.
 _IP_PMTUDISC_DO = 2
-_IP_MTU = 14
-_IPV6_MTU_DISCOVER = 23
-_IPV6_MTU = 24
+
+
+class _LinuxMtuOptions(NamedTuple):
+    """The two Linux socket options the path MTU query uses, for one family.
+
+    Hardcoded for the same reason as :data:`_IP_PMTUDISC_DO`: CPython's socket
+    module does not export them, and the values are Linux kernel ABI from
+    include/uapi/linux/in.h (IPv4) and in6.h (IPv6).
+
+    Attributes:
+        discover: ``IP_MTU_DISCOVER`` / ``IPV6_MTU_DISCOVER``, which turns on
+            path MTU discovery for the socket.
+        mtu: ``IP_MTU`` / ``IPV6_MTU``, which reads the route's path MTU back.
+
+    """
+
+    discover: int
+    mtu: int
+
+
+_LINUX_MTU_OPTIONS: dict[AddressFamily, _LinuxMtuOptions] = {
+    AddressFamily.IPV4: _LinuxMtuOptions(discover=10, mtu=14),
+    AddressFamily.IPV6: _LinuxMtuOptions(discover=23, mtu=24),
+}
 
 #: IP_FLAG_DF, in the Windows echo options.
 _IP_FLAG_DF = 0x02
@@ -66,18 +90,15 @@ def _linux_mtu(address: str, family: AddressFamily) -> int | None:
     the wire, and the kernel already knows that route's MTU.
     """
 
-    if family is AddressFamily.IPV6:
-        af, level, discover, option = socket.AF_INET6, socket.IPPROTO_IPV6, _IPV6_MTU_DISCOVER, _IPV6_MTU
-    else:
-        af, level, discover, option = socket.AF_INET, socket.IPPROTO_IP, _IP_MTU_DISCOVER, _IP_MTU
+    level, options = family.ip_option_level, _LINUX_MTU_OPTIONS[family]
 
     try:
-        with socket.socket(af, socket.SOCK_DGRAM) as sock:
-            sock.setsockopt(level, discover, _IP_PMTUDISC_DO)
+        with socket.socket(family.socket_family, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(level, options.discover, _IP_PMTUDISC_DO)
             # Port 9 is the discard service; nothing is sent, so it only has
             # to be a valid port for connect() to pick a route.
             sock.connect((address, 9))
-            value = sock.getsockopt(level, option)
+            value = sock.getsockopt(level, options.mtu)
     except OSError:
         return None
     return value if value > 0 else None

@@ -17,9 +17,8 @@ Note:
 
 from __future__ import annotations
 
-import socket
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from .models import AddressFamily
 from .resolve import split_zone
@@ -33,10 +32,32 @@ IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 
 
-def _socket_family(family: AddressFamily) -> int:
-    """Return the ``AF_*`` constant for a public address family."""
+class _RouteBackend(Protocol):
+    """The two lookups every per-platform route module provides."""
 
-    return socket.AF_INET6 if family is AddressFamily.IPV6 else socket.AF_INET
+    def query_route(self, destination: str, family: AddressFamily) -> RouteInfo | None:
+        """Return how this host would reach ``destination``."""
+        ...
+
+    def default_gateway(self, family: AddressFamily) -> RouteInfo | None:
+        """Return the route used when nothing more specific matches."""
+        ...
+
+
+def _backend() -> _RouteBackend:
+    """Return this platform's route module.
+
+    Imported on first use rather than at module top, so a process loads only
+    the backend for the platform it runs on.
+    """
+
+    if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
+        from . import routes_windows as backend  # noqa: PLC0415 - load only this platform's backend
+    elif IS_MACOS:  # pragma: no cover - exercised on macOS CI only
+        from . import routes_macos as backend  # noqa: PLC0415 - load only this platform's backend
+    else:
+        from . import routes_linux as backend  # noqa: PLC0415 - load only this platform's backend
+    return backend
 
 
 def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | None:
@@ -64,14 +85,7 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
     # refuses scoped text. Left in, the refusal is indistinguishable from an
     # honest "no route to there".
     bare = split_zone(destination).address
-    af = _socket_family(family)
-    if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
-        from .routes_windows import query_route as _query  # noqa: PLC0415 - Windows-only import
-    elif IS_MACOS:  # pragma: no cover - exercised on macOS CI only
-        from .routes_macos import query_route as _query  # noqa: PLC0415 - macOS-only import
-    else:
-        from .routes_linux import query_route as _query  # noqa: PLC0415 - Linux-only import
-    return _query(bare, af)
+    return _backend().query_route(bare, family)
 
 
 def default_gateway(family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | None:
@@ -94,11 +108,4 @@ def default_gateway(family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | N
 
     """
 
-    af = _socket_family(family)
-    if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
-        from .routes_windows import default_gateway as _default  # noqa: PLC0415 - Windows-only import
-    elif IS_MACOS:  # pragma: no cover - exercised on macOS CI only
-        from .routes_macos import default_gateway as _default  # noqa: PLC0415 - macOS-only import
-    else:
-        from .routes_linux import default_gateway as _default  # noqa: PLC0415 - Linux-only import
-    return _default(af)
+    return _backend().default_gateway(family)

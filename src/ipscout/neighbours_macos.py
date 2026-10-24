@@ -149,8 +149,8 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - macOS only
     """
 
     found: list[Neighbour] = []
-    for family, af in ((AddressFamily.IPV4, socket.AF_INET), (AddressFamily.IPV6, socket.AF_INET6)):
-        data = sysctl([CTL_NET, PF_ROUTE, 0, af, NET_RT_FLAGS, RTF_LLINFO])
+    for family in AddressFamily:
+        data = sysctl([CTL_NET, PF_ROUTE, 0, family.socket_family, NET_RT_FLAGS, RTF_LLINFO])
         if data:
             found.extend(parse_neighbour_dump(data, family))
     return tuple(found)
@@ -159,6 +159,10 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - macOS only
 # --------------------------------------------------------------------------
 # Active resolution, over BPF
 # --------------------------------------------------------------------------
+#: The way out offered whenever active resolution is refused for want of root.
+_UNPRIVILEGED_ADVICE = "Run as root, or use arp_scan(), which resolves the same addresses unprivileged"
+
+
 def _open_bpf(interface: str) -> BpfDevice:  # pragma: no cover - macOS only
     """Open a free BPF device bound to one interface, and its buffer size.
 
@@ -179,10 +183,7 @@ def _open_bpf(interface: str) -> BpfDevice:  # pragma: no cover - macOS only
 def _permission_error(exc: OSError) -> IPScoutPermissionError:
     """Return the error explaining which privilege the caller is missing."""
 
-    return IPScoutPermissionError(
-        f"active ARP on macOS needs a BPF device, and /dev/bpf* is root-only: {exc}. "
-        f"Run as root, or use arp_scan(), which resolves the same addresses unprivileged"
-    )
+    return IPScoutPermissionError(f"active ARP on macOS needs a BPF device, and /dev/bpf* is root-only: {exc}. {_UNPRIVILEGED_ADVICE}")
 
 
 def resolve_active_ipv4(
@@ -252,10 +253,7 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
     try:
         sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
     except OSError as exc:
-        raise IPScoutPermissionError(
-            f"active neighbour discovery needs a raw ICMPv6 socket, which is root-only here: {exc}. "
-            f"Run as root, or use arp_scan(), which resolves the same addresses unprivileged"
-        ) from exc
+        raise IPScoutPermissionError(f"active neighbour discovery needs a raw ICMPv6 socket, which is root-only here: {exc}. {_UNPRIVILEGED_ADVICE}") from exc
 
     try:
         index = socket.if_nametoindex(interface)

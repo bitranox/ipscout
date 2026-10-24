@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import socket
+
 import pytest
 from pydantic import ValidationError
 
-from ipscout.models import AddressFamily, Banner, BannerState, MacLookup, MacScope, Neighbour, ProbeMethod, ResponseObject
+from ipscout.models import MAX_PORT, MIN_PORT, AddressFamily, Banner, BannerState, MacLookup, MacScope, Neighbour, ProbeMethod, ResponseObject
 
 
 def _reply(*rtts: float | None, target: str = "example.test", ip: str = "10.0.0.1") -> ResponseObject:
@@ -219,9 +221,11 @@ def test_a_greeting_is_carried_with_its_line() -> None:
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("state", [BannerState.SILENT, BannerState.REFUSED, BannerState.UNREACHABLE])
 def test_only_a_greeting_carries_a_line(state: BannerState) -> None:
-    # A line on a host that never spoke would be read as what it said.
-    with pytest.raises(ValidationError):
-        Banner(host="h.test", port=21, state=state, line="220 ready")
+    # A line on a host that never spoke would be read as what it said. An
+    # unreachable host gets its reason too, so only the line is wrong.
+    error = "boom" if state is BannerState.UNREACHABLE else None
+    with pytest.raises(ValidationError, match="line is set exactly when state is GREETED"):
+        Banner(host="h.test", port=21, state=state, line="220 ready", error=error)
 
 
 @pytest.mark.os_agnostic
@@ -236,6 +240,33 @@ def test_only_an_unreachable_host_carries_an_error(state: BannerState) -> None:
     line = "220 ready" if state is BannerState.GREETED else None
     with pytest.raises(ValidationError):
         Banner(host="h.test", port=21, state=state, line=line, error="boom")
+
+
+@pytest.mark.os_agnostic
+def test_an_unreachable_host_without_a_reason_is_refused() -> None:
+    # The reason column prints line or error; an unreachable row with neither says nothing.
+    with pytest.raises(ValidationError, match="error is set exactly when state is UNREACHABLE"):
+        Banner(host="h.test", port=21, state=BannerState.UNREACHABLE)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("state", list(BannerState))
+def test_an_empty_reason_is_refused_whatever_the_state(state: BannerState) -> None:
+    # An empty reason prints as nothing, so it is no reason at all.
+    line = "220 ready" if state is BannerState.GREETED else None
+    with pytest.raises(ValidationError, match="at least 1 character"):
+        Banner(host="h.test", port=21, state=state, line=line, error="")
+
+
+@pytest.mark.os_agnostic
+def test_each_address_family_names_its_socket_constant() -> None:
+    assert AddressFamily.IPV4.socket_family is socket.AF_INET
+    assert AddressFamily.IPV6.socket_family is socket.AF_INET6
+
+
+@pytest.mark.os_agnostic
+def test_the_port_bounds_are_the_tcp_and_udp_port_range() -> None:
+    assert (MIN_PORT, MAX_PORT) == (1, 65535)
 
 
 @pytest.mark.os_agnostic

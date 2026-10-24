@@ -57,10 +57,22 @@ _UNSUPPORTED = (
 )
 
 
-def _require_discovery(supports: bool) -> None:  # noqa: FBT001 - a capability answer, not a mode flag
-    """Raise unless expired hops can be observed on this transport."""
+def _require_walkable(max_hops: int, *, supports_ttl_discovery: bool) -> None:
+    """Refuse a walk that could never report a hop, before any probe is sent.
 
-    if not supports:
+    One check for both walks, so the sync and async entry points cannot drift
+    apart on what they refuse or how they word it.
+
+    Raises:
+        ValueError: ``max_hops`` is below 1.
+        IPScoutUnsupportedError: Expired hops cannot be observed on this
+            transport.
+    """
+
+    if max_hops < 1:
+        msg = f"max_hops must be at least 1, got {max_hops}"
+        raise ValueError(msg)
+    if not supports_ttl_discovery:
         raise IPScoutUnsupportedError(_UNSUPPORTED)
 
 
@@ -132,10 +144,7 @@ def trace_path(
 
     """
 
-    if max_hops < 1:
-        msg = f"max_hops must be at least 1, got {max_hops}"
-        raise ValueError(msg)
-    _require_discovery(transport.supports_ttl_discovery)
+    _require_walkable(max_hops, supports_ttl_discovery=transport.supports_ttl_discovery)
 
     hops: list[TraceHop] = []
     for ttl in range(1, max_hops + 1):
@@ -176,10 +185,7 @@ async def atrace_path(
 
     """
 
-    if max_hops < 1:
-        msg = f"max_hops must be at least 1, got {max_hops}"
-        raise ValueError(msg)
-    _require_discovery(transport.supports_ttl_discovery)
+    _require_walkable(max_hops, supports_ttl_discovery=transport.supports_ttl_discovery)
 
     hops: list[TraceHop] = []
     for ttl in range(1, max_hops + 1):

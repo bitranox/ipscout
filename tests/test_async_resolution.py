@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import pytest
 
@@ -26,6 +26,8 @@ pytestmark = pytest.mark.os_agnostic
 
 _SLOW_NAME = "slow-resolver.invalid"
 
+_T = TypeVar("_T")
+
 
 class ResolverSpy:
     """Stands in for ``socket.getaddrinfo`` and records the calling thread.
@@ -38,9 +40,9 @@ class ResolverSpy:
         self._real = socket.getaddrinfo
         self.threads: list[int] = []
 
-    def __call__(self, host: object, *args: object, **kwargs: object) -> object:
+    def __call__(self, host: str | bytes | None, *args: Any, **kwargs: Any) -> object:
         if host != _SLOW_NAME:
-            return self._real(host, *args, **kwargs)  # type: ignore[arg-type]
+            return self._real(host, *args, **kwargs)
         self.threads.append(threading.get_ident())
         raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
 
@@ -52,10 +54,10 @@ def spy(monkeypatch: pytest.MonkeyPatch) -> ResolverSpy:
     return recorder
 
 
-def _run_recording_loop_thread(coro: Coroutine[object, object, object]) -> tuple[object, int]:
+def _run_recording_loop_thread(coro: Coroutine[Any, Any, _T]) -> tuple[_T, int]:
     """Run a coroutine and return its result plus the loop thread's id."""
 
-    async def wrapper() -> tuple[object, int]:
+    async def wrapper() -> tuple[_T, int]:
         return await coro, threading.get_ident()
 
     return asyncio.run(wrapper())
@@ -66,7 +68,7 @@ def test_aping_resolves_off_the_event_loop_thread(spy: ResolverSpy) -> None:
 
     assert spy.threads, "the resolver was never asked, so the test proves nothing"
     assert loop_thread not in spy.threads
-    assert result.error is not None  # type: ignore[attr-defined]
+    assert result.error is not None
 
 
 def test_aping_still_raises_an_unresolvable_name(spy: ResolverSpy) -> None:
@@ -81,15 +83,15 @@ def test_aping_many_resolves_every_name_off_the_event_loop_thread(spy: ResolverS
 
     assert spy.threads
     assert loop_thread not in spy.threads
-    assert results[_SLOW_NAME].error is not None  # type: ignore[index]
+    assert results[_SLOW_NAME].error is not None
 
 
-def test_ais_reachable_resolves_off_the_event_loop_thread_in_both_tries(spy: ResolverSpy) -> None:
+def test_ais_reachable_resolves_once_off_the_event_loop_thread(spy: ResolverSpy) -> None:
     reachable, loop_thread = _run_recording_loop_thread(ais_reachable(_SLOW_NAME))
 
-    # Two lookups: the ICMP try, then the TCP fallback. One recorded call
-    # would mean the fallback was never reached.
-    assert len(spy.threads) == 2
+    # One lookup serves both the ICMP try and the TCP fallback: a second one
+    # could answer a different address, so the two tries would probe two hosts.
+    assert len(spy.threads) == 1
     assert loop_thread not in spy.threads
     assert reachable is False
 
