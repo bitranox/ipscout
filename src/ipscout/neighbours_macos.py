@@ -41,7 +41,7 @@ from .arp import (
     parse_neighbour_advertisement,
     solicited_node_multicast,
 )
-from .bpf import iter_bpf_frames, open_bpf_device
+from .bpf import BpfDevice, iter_bpf_frames, open_bpf_device
 from .bsdroute import (
     CTL_NET,
     NET_RT_FLAGS,
@@ -65,12 +65,11 @@ from .bsdroute import (
     sysctl,
 )
 from .errors import IPScoutError, IPScoutPermissionError
-from .models import AddressFamily, Neighbour, NeighbourState
+from .models import AddressFamily, Neighbour, NeighbourChange, NeighbourState
 
 __all__ = [
     "build_add_message",
     "build_delete_message",
-    "iter_bpf_frames",
     "list_neighbours",
     "parse_neighbour_dump",
     "raise_for_route_errno",
@@ -160,11 +159,15 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - macOS only
 # --------------------------------------------------------------------------
 # Active resolution, over BPF
 # --------------------------------------------------------------------------
-def _open_bpf(interface: str) -> tuple[int, int]:  # pragma: no cover - macOS only
+def _open_bpf(interface: str) -> BpfDevice:  # pragma: no cover - macOS only
     """Open a free BPF device bound to one interface, and its buffer size.
 
     Thin wrapper over :func:`ipscout.bpf.open_bpf_device`: the plumbing is
     shared with the DHCP capture, only the remediation message differs.
+
+    Returns:
+        The claimed device, its descriptor and read size, exactly as
+        :func:`ipscout.bpf.open_bpf_device` returns it.
     """
 
     try:
@@ -362,12 +365,12 @@ def _header(message_type: int, addrs: int, payload_length: int, *, pid: int, seq
     )
 
 
-def raise_for_route_errno(error: int, *, action: str) -> None:
+def raise_for_route_errno(error: int, *, action: NeighbourChange) -> None:
     """Raise unless a routing-socket write succeeded.
 
     Args:
         error: ``0`` for success, otherwise the errno the write failed with.
-        action: What was asked, for the message (``"add"``, ``"remove"``).
+        action: What was asked, named in the message.
 
     Raises:
         IPScoutPermissionError: ``EPERM`` or ``EACCES``: only root may change
@@ -377,8 +380,8 @@ def raise_for_route_errno(error: int, *, action: str) -> None:
             is not a neighbour - and is not overwritten blind.
 
     Examples:
-        >>> raise_for_route_errno(0, action="add")
-        >>> raise_for_route_errno(errno.EPERM, action="add")
+        >>> raise_for_route_errno(0, action=NeighbourChange.ADD)
+        >>> raise_for_route_errno(errno.EPERM, action=NeighbourChange.ADD)
         Traceback (most recent call last):
         ...
         ipscout.errors.IPScoutPermissionError: ...root...
@@ -390,7 +393,7 @@ def raise_for_route_errno(error: int, *, action: str) -> None:
     if error in (errno.EPERM, errno.EACCES):
         msg = f"changing the neighbour table needs root on macOS: {os.strerror(error)}. Run as root"
         raise IPScoutPermissionError(msg)
-    msg = f"the kernel refused to {action} the neighbour entry: {os.strerror(error)} (errno {error})"
+    msg = f"the kernel refused to {action.value} the neighbour entry: {os.strerror(error)} (errno {error})"
     raise IPScoutError(msg)
 
 
@@ -412,7 +415,7 @@ def removed_from_route_errno(error: int) -> bool:
 
     if error == errno.ESRCH:
         return False
-    raise_for_route_errno(error, action="remove")
+    raise_for_route_errno(error, action=NeighbourChange.REMOVE)
     return True
 
 
@@ -473,7 +476,7 @@ def set_static_neighbour(ip: str, mac: bytes, ifindex: int) -> None:  # pragma: 
     # entry on another link blocks the add just the same.
     if _is_listed(ip):
         removed_from_route_errno(_route_write(build_delete_message(ip, pid=pid, seq=1)))
-    raise_for_route_errno(_route_write(build_add_message(ip, mac, ifindex, pid=pid, seq=2)), action="add")
+    raise_for_route_errno(_route_write(build_add_message(ip, mac, ifindex, pid=pid, seq=2)), action=NeighbourChange.ADD)
 
 
 def remove_static_neighbour(ip: str, ifindex: int) -> bool:  # pragma: no cover - macOS only

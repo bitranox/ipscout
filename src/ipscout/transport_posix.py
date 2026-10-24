@@ -36,7 +36,7 @@ import socket
 import struct
 import sys
 import time
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, NamedTuple, Protocol, cast
 
 from . import packet
 from .errors import IPScoutPermissionError
@@ -204,8 +204,27 @@ _ORIGIN_ICMP6 = 3
 _TIME_EXCEEDED_V4 = 11
 _TIME_EXCEEDED_V6 = 3
 
+#: Byte offset where the address field ends inside the offender ``sockaddr``
+#: that follows ``struct sock_extended_err``: ``sockaddr_in`` is family(2)
+#: port(2) addr(4), ``sockaddr_in6`` is family(2) port(2) flowinfo(4) addr(16).
+_SOCKADDR_IN_ADDR = slice(4, 8)
+_SOCKADDR_IN6_ADDR = slice(8, 24)
 
-def _destination_for(address: str, *, is_ipv6: bool) -> tuple[str, int] | tuple[str, int, int, int]:
+
+class _Arrival(NamedTuple):
+    """What the reader hands an awaiting probe when its reply arrives.
+
+    Attributes:
+        finished: ``time.perf_counter()`` reading taken when the reply was read.
+        source: The address the reply came from.
+
+    """
+
+    finished: float
+    source: str
+
+
+def _destination_for(address: str, *, family: AddressFamily) -> tuple[str, int] | tuple[str, int, int, int]:
     """Return the sockaddr to send to, carrying the interface when scoped.
 
     An ICMPv6 socket refuses a zone written into the address string: measured
@@ -215,7 +234,7 @@ def _destination_for(address: str, *, is_ipv6: bool) -> tuple[str, int] | tuple[
     here rather than as text, even though ``getaddrinfo`` accepts either.
     """
 
-    if not is_ipv6:
+    if family is not AddressFamily.IPV6:
         return (address, 0)
     bare, zone = split_zone(address)
     if zone is None:
@@ -223,7 +242,7 @@ def _destination_for(address: str, *, is_ipv6: bool) -> tuple[str, int] | tuple[
     return (bare, 0, 0, zone_index(zone))
 
 
-def _offender_address(control: bytes, *, is_ipv6: bool) -> str | None:
+def _offender_address(control: bytes, *, family: AddressFamily) -> str | None:
     """Return the router named by ``SO_EE_OFFENDER``, if the message carries one.
 
     The control message is ``struct sock_extended_err`` followed immediately by
@@ -233,7 +252,7 @@ def _offender_address(control: bytes, *, is_ipv6: bool) -> str | None:
 
     Args:
         control: One ancillary control-message payload.
-        is_ipv6: Which family's Time Exceeded type number to expect.
+        family: Which family's Time Exceeded type number to expect.
 
     Returns:
         The router address, or ``None`` when this message is not a Time
@@ -244,24 +263,41 @@ def _offender_address(control: bytes, *, is_ipv6: bool) -> str | None:
     if len(control) < _EXTENDED_ERR.size:
         return None
     _errno, origin, ee_type, _code, _pad, _info, _data = _EXTENDED_ERR.unpack(control[: _EXTENDED_ERR.size])
+    is_ipv6 = family is AddressFamily.IPV6
     expected_origin = _ORIGIN_ICMP6 if is_ipv6 else _ORIGIN_ICMP
     expected_type = _TIME_EXCEEDED_V6 if is_ipv6 else _TIME_EXCEEDED_V4
     if origin != expected_origin or ee_type != expected_type:
         return None
 
     offender = control[_EXTENDED_ERR.size :]
-    # sockaddr_in:  family(2) port(2) addr(4)
-    # sockaddr_in6: family(2) port(2) flowinfo(4) addr(16)
     if is_ipv6:
-        if len(offender) < 24:  # noqa: PLR2004 - sockaddr_in6 through the address field
+        if len(offender) < _SOCKADDR_IN6_ADDR.stop:
             return None
-        return socket.inet_ntop(socket.AF_INET6, offender[8:24])
-    if len(offender) < 8:  # noqa: PLR2004 - sockaddr_in through the address field
+        return socket.inet_ntop(socket.AF_INET6, offender[_SOCKADDR_IN6_ADDR])
+    if len(offender) < _SOCKADDR_IN_ADDR.stop:
         return None
-    return socket.inet_ntop(socket.AF_INET, offender[4:8])
+    return socket.inet_ntop(socket.AF_INET, offender[_SOCKADDR_IN_ADDR])
 
 
-def _enable_error_queue(sock: socket.socket, *, is_ipv6: bool) -> tuple[RecvMsg, int] | None:
+class ErrorQueueReader(NamedTuple):
+    """What reading a socket's error queue takes: the call, and the flag to pass it.
+
+    The two only make sense together - ``recvmsg`` without ``MSG_ERRQUEUE``
+    reads ordinary datagrams, not the queued ICMP errors - so they travel as
+    one record, and one ``None`` says the platform has no error queue at all.
+
+    Attributes:
+        recvmsg: The socket's bound ``recvmsg``.
+        flag: The platform's ``MSG_ERRQUEUE`` value, passed as ``recvmsg``'s
+            flags argument to read the queue rather than the socket.
+
+    """
+
+    recvmsg: RecvMsg
+    flag: int
+
+
+def _enable_error_queue(sock: socket.socket, *, family: AddressFamily) -> ErrorQueueReader | None:
     """Turn on the error queue, returning how to read it, or None if unavailable.
 
     ``IP_RECVERR`` asks the kernel to keep ICMP errors - including Time
@@ -272,14 +308,15 @@ def _enable_error_queue(sock: socket.socket, *, is_ipv6: bool) -> tuple[RecvMsg,
 
     Args:
         sock: The ICMP socket to configure.
-        is_ipv6: Selects the IPv6 spelling of the option.
+        family: ``AddressFamily.IPV6`` selects the IPv6 spelling of the option.
 
     Returns:
-        A ``(recvmsg, MSG_ERRQUEUE)`` pair, or ``None`` where the platform has
-        no error queue.
+        An :class:`ErrorQueueReader`, or ``None`` where the platform has no
+        error queue.
 
     """
 
+    is_ipv6 = family is AddressFamily.IPV6
     flag = socket_const("MSG_ERRQUEUE")
     option = socket_const("IPV6_RECVERR" if is_ipv6 else "IP_RECVERR")
     recvmsg = recvmsg_of(sock)
@@ -290,17 +327,17 @@ def _enable_error_queue(sock: socket.socket, *, is_ipv6: bool) -> tuple[RecvMsg,
         sock.setsockopt(level, option, 1)
     except OSError:
         return None
-    return recvmsg, flag
+    return ErrorQueueReader(recvmsg, flag)
 
 
-def _matches(parsed: packet.ParsedReply, *, sequence: int, token: bytes, is_ipv6: bool) -> bool:
+def _matches(parsed: packet.ParsedReply, *, sequence: int, token: bytes, family: AddressFamily) -> bool:
     """Return whether a decoded datagram answers this specific probe.
 
     Deliberately ignores ``parsed.identifier``: the kernel rewrites that field
     on an unprivileged socket, so comparing it would reject every real reply.
     """
 
-    return packet.is_echo_reply(parsed, is_ipv6=is_ipv6) and parsed.sequence == sequence and parsed.token == token
+    return packet.is_echo_reply(parsed, family=family) and parsed.sequence == sequence and parsed.token == token
 
 
 class PosixEchoTransport:
@@ -330,15 +367,13 @@ class PosixEchoTransport:
         payload_size: int = 56,
         socket_factory: SocketFactory | None = None,
     ) -> None:
-        self._address = address
         self._family = family
-        self._is_ipv6 = family is AddressFamily.IPV6
         # Resolved once: an unknown interface name is a setup problem, so it
         # must raise while the transport is being built, not per probe.
-        self._destination = _destination_for(address, is_ipv6=self._is_ipv6)
+        self._destination = _destination_for(address, family=family)
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
-        self._errqueue = _enable_error_queue(self._socket, is_ipv6=self._is_ipv6)
+        self._errqueue = _enable_error_queue(self._socket, family=family)
         self._is_raw = _is_raw_socket(self._socket)
 
     @property
@@ -367,15 +402,15 @@ class PosixEchoTransport:
     def _read_ttl_expired(self) -> str | None:
         """Return the router that discarded the packet, if one reported doing so."""
 
-        if self._errqueue is None:
+        reader = self._errqueue
+        if reader is None:
             return self._read_ttl_expired_raw() if self._is_raw else None
-        recvmsg, flag = self._errqueue
         try:
-            _data, ancillary, _flags, _addr = recvmsg(4096, 4096, flag)
+            _data, ancillary, _flags, _addr = reader.recvmsg(4096, 4096, reader.flag)
         except (TimeoutError, OSError):
             return None
         for _level, _ctype, control in ancillary:
-            offender = _offender_address(control, is_ipv6=self._is_ipv6)
+            offender = _offender_address(control, family=self._family)
             if offender is not None:
                 return offender
         return None
@@ -393,7 +428,7 @@ class PosixEchoTransport:
             data, address = self._socket.recvfrom(4096)
         except (TimeoutError, OSError):
             return None
-        if not packet.is_time_exceeded(data, is_ipv6=self._is_ipv6):
+        if not packet.is_time_exceeded(data, family=self._family):
             return None
         # recvfrom's address element type is unknown to the checker, so the
         # tuple is cast rather than the value read out of it: indexing an
@@ -407,7 +442,7 @@ class PosixEchoTransport:
 
         if ttl is None:
             return
-        if self._is_ipv6:
+        if self._family is AddressFamily.IPV6:
             self._socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, ttl)
         else:
             self._socket.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
@@ -438,7 +473,7 @@ class PosixEchoTransport:
         datagram, token = packet.build_echo_request(
             sequence=sequence,
             payload_size=self._payload_size,
-            is_ipv6=self._is_ipv6,
+            family=self._family,
         )
 
         started = time.perf_counter()
@@ -462,7 +497,7 @@ class PosixEchoTransport:
 
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             parsed = packet.parse_echo_reply(raw)
-            if parsed is not None and _matches(parsed, sequence=sequence, token=token, is_ipv6=self._is_ipv6):
+            if parsed is not None and _matches(parsed, sequence=sequence, token=token, family=self._family):
                 return EchoResult(rtt_ms=elapsed_ms, source=str(peer[0]))
 
     def _expired_or_silent(self, started: float, ttl: int | None) -> EchoResult:
@@ -516,19 +551,17 @@ class AsyncPosixEchoTransport:
         payload_size: int = 56,
         socket_factory: SocketFactory | None = None,
     ) -> None:
-        self._address = address
         self._family = family
-        self._is_ipv6 = family is AddressFamily.IPV6
         # Resolved once: an unknown interface name is a setup problem, so it
         # must raise while the transport is being built, not per probe.
-        self._destination = _destination_for(address, is_ipv6=self._is_ipv6)
+        self._destination = _destination_for(address, family=family)
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
         # settimeout(0) is setblocking(False) without a boolean positional arg.
         self._socket.settimeout(0)
-        self._waiters: dict[bytes, asyncio.Future[tuple[float, str]]] = {}
+        self._waiters: dict[bytes, asyncio.Future[_Arrival]] = {}
         self._reader_installed = False
-        self._errqueue = _enable_error_queue(self._socket, is_ipv6=self._is_ipv6)
+        self._errqueue = _enable_error_queue(self._socket, family=family)
         self._is_raw = _is_raw_socket(self._socket)
 
     @property
@@ -562,7 +595,7 @@ class AsyncPosixEchoTransport:
                 return
 
             parsed = packet.parse_echo_reply(raw)
-            if parsed is None or not packet.is_echo_reply(parsed, is_ipv6=self._is_ipv6):
+            if parsed is None or not packet.is_echo_reply(parsed, family=self._family):
                 continue
             token = parsed.token
             if token is None:
@@ -571,14 +604,14 @@ class AsyncPosixEchoTransport:
             # A token with no waiter is a late reply to a probe that already
             # timed out, or another process's traffic. Both are simply dropped.
             if waiter is not None and not waiter.done():
-                waiter.set_result((time.perf_counter(), str(peer[0])))
+                waiter.set_result(_Arrival(finished=time.perf_counter(), source=str(peer[0])))
 
     def _apply_ttl(self, ttl: int | None) -> None:
         """Set the outgoing hop limit for subsequent packets."""
 
         if ttl is None:
             return
-        if self._is_ipv6:
+        if self._family is AddressFamily.IPV6:
             self._socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, ttl)
         else:
             self._socket.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
@@ -601,11 +634,11 @@ class AsyncPosixEchoTransport:
         datagram, token = packet.build_echo_request(
             sequence=sequence,
             payload_size=self._payload_size,
-            is_ipv6=self._is_ipv6,
+            family=self._family,
         )
 
         loop = asyncio.get_running_loop()
-        waiter: asyncio.Future[tuple[float, str]] = loop.create_future()
+        waiter: asyncio.Future[_Arrival] = loop.create_future()
         self._waiters[token] = waiter
         started = time.perf_counter()
         try:
@@ -615,10 +648,10 @@ class AsyncPosixEchoTransport:
                 return EchoResult()
 
             try:
-                finished, source = await asyncio.wait_for(waiter, timeout)
+                arrival = await asyncio.wait_for(waiter, timeout)
             except (TimeoutError, asyncio.TimeoutError):
                 return EchoResult()
-            return EchoResult(rtt_ms=(finished - started) * 1000.0, source=source)
+            return EchoResult(rtt_ms=(arrival.finished - started) * 1000.0, source=arrival.source)
         finally:
             # Always unregister, so a timed-out probe cannot leak its entry and
             # a later reply to it cannot resolve a future nobody is awaiting.

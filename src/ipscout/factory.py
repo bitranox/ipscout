@@ -18,7 +18,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from .errors import IPScoutPermissionError
-from .models import AddressFamily
+from .models import AddressFamily, ProbeMethod
 from .transport_posix import AsyncPosixEchoTransport, PosixEchoTransport, open_socket
 from .transport_tcp import AsyncTcpEchoTransport, TcpEchoTransport
 from .transport_windows import AsyncWindowsEchoTransport, WindowsEchoTransport, windows_icmp_available
@@ -68,7 +68,7 @@ def make_transport(
     family: AddressFamily,
     *,
     payload_size: int = 56,
-    use_tcp: bool = False,
+    method: ProbeMethod = ProbeMethod.ICMP,
     tcp_port: int = 443,
 ) -> EchoTransport:
     """Return a synchronous transport for these parameters.
@@ -77,7 +77,7 @@ def make_transport(
         address: Resolved address to probe.
         family: Address family of ``address``.
         payload_size: Bytes of ICMP payload. Ignored by the TCP transport.
-        use_tcp: Probe with a TCP connect instead of ICMP.
+        method: How to probe: an ICMP echo, or a TCP connect to ``tcp_port``.
         tcp_port: Port for the TCP probe.
 
     Returns:
@@ -89,7 +89,7 @@ def make_transport(
 
     """
 
-    if use_tcp:
+    if method is ProbeMethod.TCP:
         return TcpEchoTransport(address, family, port=tcp_port)
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
         return WindowsEchoTransport(address, family, payload_size=payload_size)
@@ -101,7 +101,7 @@ def make_async_transport(
     family: AddressFamily,
     *,
     payload_size: int = 56,
-    use_tcp: bool = False,
+    method: ProbeMethod = ProbeMethod.ICMP,
     tcp_port: int = 443,
 ) -> AsyncEchoTransport:
     """Return an asyncio transport for these parameters.
@@ -110,7 +110,7 @@ def make_async_transport(
         address: Resolved address to probe.
         family: Address family of ``address``.
         payload_size: Bytes of ICMP payload. Ignored by the TCP transport.
-        use_tcp: Probe with a TCP connect instead of ICMP.
+        method: How to probe: an ICMP echo, or a TCP connect to ``tcp_port``.
         tcp_port: Port for the TCP probe.
 
     Returns:
@@ -122,7 +122,7 @@ def make_async_transport(
 
     """
 
-    if use_tcp:
+    if method is ProbeMethod.TCP:
         return AsyncTcpEchoTransport(address, family, port=tcp_port)
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
         return AsyncWindowsEchoTransport(address, family, payload_size=payload_size)

@@ -279,13 +279,9 @@ layers = [
 ]
 
 [tool.pip-audit]
-# Known vulnerabilities to ignore (unfixable or accepted risk)
-# GHSA-4xh5-x5gv-qwph: py library ReDoS (no fix available, low risk)
-# PYSEC-2022-42969: same as above (alias)
-# GHSA-w853-jp5j-5j7f: filelock vulnerability (transitive dep, fix requires update)
-# GHSA-qmgc-5h2g-mvrw: filelock vulnerability (transitive dep, fix requires update)
-# No exclusions. Verified 2026-07-29: pip-audit over the fully resolved tree (75 packages,
-# --extra dev) reports no known vulnerabilities with nothing ignored, so the nine ids
+# Known vulnerabilities to ignore (unfixable or accepted risk). No exclusions. Verified
+# 2026-07-29: pip-audit over the fully resolved tree (75 packages, --extra dev) reports no
+# known vulnerabilities with nothing ignored, so the nine ids
 # inherited from the template were all inert. An inert ignore is not free - it is a
 # permanent blind spot for that id, so a future dependency carrying one would pass silently.
 # Removed rather than kept: re-add an id here only when it actually fires and has no fix.

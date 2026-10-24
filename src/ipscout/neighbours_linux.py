@@ -3,6 +3,8 @@
 Contents:
     list_neighbours: Every entry the kernel currently holds (``RTM_GETNEIGH``).
     parse_neighbour_dump: Pure decoder for one dump chunk.
+    NeighbourDumpChunk: What that decoder returns - the entries and whether
+        the dump ended.
     set_static_neighbour / remove_static_neighbour: Write a permanent IPv4
         entry (``RTM_NEWNEIGH``) or delete one (``RTM_DELNEIGH``).
     build_set_request / build_remove_request: Pure encoders for those two.
@@ -20,12 +22,14 @@ Note:
 from __future__ import annotations
 
 import contextlib
+import enum
 import errno
 import ipaddress
 import os
 import socket
 import struct
 import time
+from typing import NamedTuple
 
 from .arp import (
     ETH_P_ARP,
@@ -36,7 +40,7 @@ from .arp import (
     solicited_node_multicast,
 )
 from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
-from .models import AddressFamily, Neighbour, NeighbourState
+from .models import AddressFamily, Neighbour, NeighbourChange, NeighbourState
 from .netlink import (
     NLM_F_ACK,
     NLM_F_CREATE,
@@ -54,6 +58,7 @@ from .netlink import (
 )
 
 __all__ = [
+    "NeighbourDumpChunk",
     "build_remove_request",
     "build_set_request",
     "format_mac",
@@ -155,7 +160,29 @@ def _is_not_a_neighbour(ip: str) -> bool:
     return address.is_multicast or address.is_unspecified
 
 
-def _read_address_attributes(payload: bytes, family: int) -> tuple[str | None, str | None]:
+class _EntryAddresses(NamedTuple):
+    """The destination address and link address one neighbour entry carries.
+
+    A ``NamedTuple`` so the pair cannot be read back in the wrong order: both
+    fields are optional strings, so a swapped unpack would type-check.
+
+    Attributes:
+        ip: The textual destination address, or ``None`` when the entry lacks
+            one or it does not decode.
+        mac: The formatted hardware address, or ``None`` when the entry lacks
+            a learned Ethernet address.
+
+    Examples:
+        >>> _EntryAddresses("192.0.2.5", None) == ("192.0.2.5", None)
+        True
+
+    """
+
+    ip: str | None
+    mac: str | None
+
+
+def _read_address_attributes(payload: bytes, family: int) -> _EntryAddresses:
     """Return the destination address and link address an entry carries.
 
     Args:
@@ -178,7 +205,7 @@ def _read_address_attributes(payload: bytes, family: int) -> tuple[str | None, s
                 ip = socket.inet_ntop(family, value)
         elif attribute == _NDA_LLADDR:
             mac = format_mac(value)
-    return ip, mac
+    return _EntryAddresses(ip=ip, mac=mac)
 
 
 def _interface_name(ifindex: int) -> str | None:
@@ -210,7 +237,8 @@ def _neighbour_from_payload(payload: bytes) -> Neighbour | None:
     if family not in (socket.AF_INET, socket.AF_INET6):
         return None
 
-    ip, mac = _read_address_attributes(payload, family)
+    addresses = _read_address_attributes(payload, family)
+    ip, mac = addresses.ip, addresses.mac
     if ip is None or mac is None or _is_not_a_neighbour(ip):
         return None
 
@@ -223,7 +251,35 @@ def _neighbour_from_payload(payload: bytes) -> Neighbour | None:
     )
 
 
-def parse_neighbour_dump(data: bytes) -> tuple[list[Neighbour], bool]:
+class NeighbourDumpChunk(NamedTuple):
+    """What one netlink dump chunk decodes to.
+
+    A ``NamedTuple`` rather than a pydantic model on purpose: it was a plain
+    ``(entries, done)`` tuple first, and callers unpack it and compare it with
+    tuples. A NamedTuple keeps every one of those working while letting new
+    code name the fields instead of remembering their order.
+
+    Attributes:
+        entries: The neighbours this chunk carried, in the order the kernel
+            reported them. Entries with no usable hardware address are already
+            dropped.
+        done: Whether the kernel signalled the end of the dump in this chunk,
+            so the reader stops asking for more.
+
+    Examples:
+        >>> chunk = NeighbourDumpChunk([], True)
+        >>> chunk.entries, chunk.done
+        ([], True)
+        >>> chunk == ([], True)
+        True
+
+    """
+
+    entries: list[Neighbour]
+    done: bool
+
+
+def parse_neighbour_dump(data: bytes) -> NeighbourDumpChunk:
     """Decode one netlink dump chunk into neighbour entries.
 
     Args:
@@ -236,20 +292,20 @@ def parse_neighbour_dump(data: bytes) -> tuple[list[Neighbour], bool]:
 
     Examples:
         >>> parse_neighbour_dump(b"")
-        ([], False)
+        NeighbourDumpChunk(entries=[], done=False)
 
     """
 
     found: list[Neighbour] = []
     for message_type, payload in iter_messages(data):
         if message_type in (NLMSG_DONE, NLMSG_ERROR):
-            return found, True
+            return NeighbourDumpChunk(entries=found, done=True)
         if message_type != _RTM_NEWNEIGH or len(payload) < _NDMSG.size:
             continue
         neighbour = _neighbour_from_payload(payload)
         if neighbour is not None:
             found.append(neighbour)
-    return found, False
+    return NeighbourDumpChunk(entries=found, done=False)
 
 
 def list_neighbours() -> tuple[Neighbour, ...]:
@@ -276,9 +332,9 @@ def list_neighbours() -> tuple[Neighbour, ...]:
         # AF_UNSPEC asks for every family in one dump.
         sock.send(build_message(_RTM_GETNEIGH, NLM_F_REQUEST | NLM_F_DUMP, _NDMSG.pack(socket.AF_UNSPEC, 0, 0, 0, 0, 0, 0)))
         for _ in range(_MAX_DUMP_CHUNKS):
-            entries, done = parse_neighbour_dump(sock.recv(65535))
-            found.extend(entries)
-            if done:
+            chunk = parse_neighbour_dump(sock.recv(65535))
+            found.extend(chunk.entries)
+            if chunk.done:
                 break
     except OSError:
         return tuple(found)
@@ -288,11 +344,38 @@ def list_neighbours() -> tuple[Neighbour, ...]:
     return tuple(found)
 
 
-def _permission_error(exc: OSError, what: str) -> IPScoutPermissionError:
-    """Return the error explaining which privilege the caller is missing."""
+class _Solicitation(str, enum.Enum):
+    """The active query a raw socket was opened for, as the error names it.
+
+    Render a member with ``.value``, never by formatting the member itself: on
+    3.11 and later an f-string of a ``str`` enum member gives
+    ``_Solicitation.ARP``, not ``ARP``, so the message would change with the
+    interpreter.
+
+    Examples:
+        >>> f"active {_Solicitation.NEIGHBOUR_DISCOVERY.value} needs a raw socket"
+        'active neighbour discovery needs a raw socket'
+
+    """
+
+    ARP = "ARP"
+    NEIGHBOUR_DISCOVERY = "neighbour discovery"
+
+
+def _permission_error(exc: OSError, what: _Solicitation) -> IPScoutPermissionError:
+    """Return the error explaining which privilege the caller is missing.
+
+    Args:
+        exc: The refusal the socket call raised, quoted in the message.
+        what: The query the socket was for.
+
+    Returns:
+        The error to raise, naming the capability and how to grant it.
+
+    """
 
     return IPScoutPermissionError(
-        f"active {what} needs a raw socket, so root or CAP_NET_RAW: {exc}. "
+        f"active {what.value} needs a raw socket, so root or CAP_NET_RAW: {exc}. "
         f"Grant it with 'setcap cap_net_raw+ep $(readlink -f $(which python3))', run as root, "
         f"or use arp_scan(), which resolves the same addresses unprivileged"
     )
@@ -329,9 +412,9 @@ def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, sourc
     try:
         sock = socket.socket(af_packet, socket.SOCK_RAW, socket.htons(ETH_P_ARP))
     except PermissionError as exc:
-        raise _permission_error(exc, "ARP") from exc
+        raise _permission_error(exc, _Solicitation.ARP) from exc
     except OSError as exc:  # pragma: no cover - no interface to bind
-        raise _permission_error(exc, "ARP") from exc
+        raise _permission_error(exc, _Solicitation.ARP) from exc
 
     try:
         sock.bind((interface, ETH_P_ARP))
@@ -351,7 +434,7 @@ def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, sourc
                 return found
         return None
     except PermissionError as exc:  # pragma: no cover - bind may also be denied
-        raise _permission_error(exc, "ARP") from exc
+        raise _permission_error(exc, _Solicitation.ARP) from exc
     except OSError:
         return None
     finally:
@@ -384,9 +467,9 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
     try:
         sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
     except PermissionError as exc:
-        raise _permission_error(exc, "neighbour discovery") from exc
+        raise _permission_error(exc, _Solicitation.NEIGHBOUR_DISCOVERY) from exc
     except OSError as exc:  # pragma: no cover - no IPv6 stack
-        raise _permission_error(exc, "neighbour discovery") from exc
+        raise _permission_error(exc, _Solicitation.NEIGHBOUR_DISCOVERY) from exc
 
     try:
         index = socket.if_nametoindex(interface)
@@ -406,7 +489,7 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
                 return found
         return None
     except PermissionError as exc:  # pragma: no cover - send may also be denied
-        raise _permission_error(exc, "neighbour discovery") from exc
+        raise _permission_error(exc, _Solicitation.NEIGHBOUR_DISCOVERY) from exc
     except OSError:
         return None
     finally:
@@ -474,13 +557,13 @@ def build_remove_request(ip: str, ifindex: int, sequence: int = 1) -> bytes:
     return build_message(_RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK, body, sequence)
 
 
-def raise_for_ack(error: int | None, *, action: str) -> None:
+def raise_for_ack(error: int | None, *, action: NeighbourChange) -> None:
     """Raise unless the kernel acknowledged a neighbour-table change.
 
     Args:
         error: What :func:`~ipscout.netlink.parse_ack` read: ``0`` for success,
             a positive errno for a refusal, ``None`` for no answer at all.
-        action: What was asked, for the message (``"add"``, ``"remove"``).
+        action: What was asked, named in the message.
 
     Raises:
         IPScoutPermissionError: ``EPERM`` or ``EACCES``. Writing the table
@@ -488,8 +571,8 @@ def raise_for_ack(error: int | None, *, action: str) -> None:
         IPScoutError: Any other refusal, or no acknowledgement.
 
     Examples:
-        >>> raise_for_ack(0, action="add")
-        >>> raise_for_ack(errno.EPERM, action="add")
+        >>> raise_for_ack(0, action=NeighbourChange.ADD)
+        >>> raise_for_ack(errno.EPERM, action=NeighbourChange.ADD)
         Traceback (most recent call last):
         ...
         ipscout.errors.IPScoutPermissionError: ...CAP_NET_ADMIN...
@@ -499,7 +582,7 @@ def raise_for_ack(error: int | None, *, action: str) -> None:
     if error == 0:
         return
     if error is None:
-        msg = f"the kernel did not acknowledge the request to {action} the neighbour entry"
+        msg = f"the kernel did not acknowledge the request to {action.value} the neighbour entry"
         raise IPScoutError(msg)
     if error in (errno.EPERM, errno.EACCES):
         msg = (
@@ -507,7 +590,7 @@ def raise_for_ack(error: int | None, *, action: str) -> None:
             f"Run as root, or grant it with 'setcap cap_net_admin+ep $(readlink -f $(which python3))'"
         )
         raise IPScoutPermissionError(msg)
-    msg = f"the kernel refused to {action} the neighbour entry: {os.strerror(error)} (errno {error})"
+    msg = f"the kernel refused to {action.value} the neighbour entry: {os.strerror(error)} (errno {error})"
     raise IPScoutError(msg)
 
 
@@ -533,7 +616,7 @@ def removed_from_ack(error: int | None) -> bool:
 
     if error == errno.ENOENT:
         return False
-    raise_for_ack(error, action="remove")
+    raise_for_ack(error, action=NeighbourChange.REMOVE)
     return True
 
 
@@ -573,7 +656,7 @@ def set_static_neighbour(ip: str, mac: bytes, ifindex: int) -> None:
 
     """
 
-    raise_for_ack(_exchange(build_set_request(ip, mac, ifindex)), action="add")
+    raise_for_ack(_exchange(build_set_request(ip, mac, ifindex)), action=NeighbourChange.ADD)
 
 
 def remove_static_neighbour(ip: str, ifindex: int) -> bool:

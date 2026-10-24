@@ -127,7 +127,7 @@ def trace_path(
     if max_hops < 1:
         msg = f"max_hops must be at least 1, got {max_hops}"
         raise ValueError(msg)
-    _require_discovery(getattr(transport, "supports_ttl_discovery", False))
+    _require_discovery(transport.supports_ttl_discovery)
 
     hops: list[TraceHop] = []
     for ttl in range(1, max_hops + 1):
@@ -169,7 +169,7 @@ async def atrace_path(
     if max_hops < 1:
         msg = f"max_hops must be at least 1, got {max_hops}"
         raise ValueError(msg)
-    _require_discovery(getattr(transport, "supports_ttl_discovery", False))
+    _require_discovery(transport.supports_ttl_discovery)
 
     hops: list[TraceHop] = []
     for ttl in range(1, max_hops + 1):
@@ -209,8 +209,8 @@ def traceroute(
 
     """
 
-    address, resolved = resolve_one(target, family=family)
-    with make_transport(address, resolved) as transport:
+    resolved = resolve_one(target, family=family)
+    with make_transport(resolved.address, resolved.family) as transport:
         return trace_path(transport, max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)
 
 
@@ -231,7 +231,7 @@ async def atraceroute(
 
     """
 
-    address, resolved = resolve_one(target, family=family)
-    transport = make_async_transport(address, resolved)
+    resolved = resolve_one(target, family=family)
+    transport = make_async_transport(resolved.address, resolved.family)
     async with transport:
         return await atrace_path(transport, max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)

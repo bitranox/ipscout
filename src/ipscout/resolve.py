@@ -8,6 +8,9 @@ is made rather than that decision being scattered through every transport.
 Contents:
     resolve: Turn a hostname or literal into a list of addresses.
     resolve_one: Pick the single address a probe should use.
+    ResolvedTarget: The ``(address, family)`` record resolve_one returns.
+    split_zone: Separate an address from its IPv6 ``%zone`` suffix.
+    ScopedAddress: The ``(address, zone)`` record split_zone returns.
     reverse_dns: Turn an address back into a name.
     family_of: Classify a literal address.
 
@@ -20,8 +23,9 @@ Note:
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from .errors import IPScoutResolutionError
 from .models import AddressFamily
@@ -29,7 +33,16 @@ from .models import AddressFamily
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-__all__ = ["family_of", "resolve", "resolve_one", "reverse_dns", "split_zone", "zone_index"]
+__all__ = [
+    "ResolvedTarget",
+    "ScopedAddress",
+    "family_of",
+    "resolve",
+    "resolve_one",
+    "reverse_dns",
+    "split_zone",
+    "zone_index",
+]
 
 _SOCKET_FAMILY = {
     AddressFamily.IPV4: socket.AF_INET,
@@ -77,7 +90,34 @@ def family_of(address: str) -> AddressFamily | None:
     return AddressFamily.IPV6 if parsed.version == 6 else AddressFamily.IPV4  # noqa: PLR2004
 
 
-def split_zone(address: str) -> tuple[str, str | None]:
+class ScopedAddress(NamedTuple):
+    """An address with its IPv6 zone held apart from it.
+
+    A ``NamedTuple`` rather than a pydantic model on purpose: it was a plain
+    ``(address, zone)`` tuple first, and callers unpack it and compare it with
+    tuples. A NamedTuple keeps those working while letting new code name the
+    field it wants instead of remembering which side the zone is on.
+
+    Attributes:
+        address: The address alone, which is what packing into bytes - a raw
+            packet, a sockaddr, ``inet_pton`` - accepts.
+        zone: The text after the ``%`` - an interface name or index - or
+            ``None`` when the address named no zone.
+
+    Examples:
+        >>> scoped = ScopedAddress("fe80::1", "eth0")
+        >>> scoped.address, scoped.zone
+        ('fe80::1', 'eth0')
+        >>> scoped == ("fe80::1", "eth0")
+        True
+
+    """
+
+    address: str
+    zone: str | None
+
+
+def split_zone(address: str) -> ScopedAddress:
     """Return an address split from its IPv6 zone, if it carries one.
 
     RFC 4007 writes the interface an address belongs to after a ``%``:
@@ -86,16 +126,31 @@ def split_zone(address: str) -> tuple[str, str | None]:
     needs the zone as well, so the two are separated here once rather than by
     each caller guessing.
 
+    Args:
+        address: An address literal, scoped or not.
+
+    Returns:
+        A :class:`ScopedAddress`. A ``%`` with nothing after it names no zone,
+        so the address comes back unchanged with ``zone`` ``None``. It is a
+        tuple, so ``bare, zone = split_zone(...)`` still unpacks it.
+
     Examples:
         >>> split_zone("fe80::1%eth0")
-        ('fe80::1', 'eth0')
+        ScopedAddress(address='fe80::1', zone='eth0')
         >>> split_zone("192.168.1.1")
-        ('192.168.1.1', None)
+        ScopedAddress(address='192.168.1.1', zone=None)
 
     """
 
     bare, separator, zone = address.partition("%")
-    return (bare, zone) if separator and zone else (address, None)
+    return ScopedAddress(bare, zone) if separator and zone else ScopedAddress(address, None)
+
+
+#: The digits an interface index may be written with: ASCII only, as many as a uint32 needs.
+_ZONE_INDEX = re.compile(r"[0-9]{1,10}")
+
+#: A sockaddr carries the scope as an unsigned 32-bit field.
+_MAX_INTERFACE_INDEX = 2**32 - 1
 
 
 def zone_index(zone: str) -> int:
@@ -109,17 +164,28 @@ def zone_index(zone: str) -> int:
         The index, which is what a sockaddr carries.
 
     Raises:
-        IPScoutResolutionError: No interface goes by that name here. That is a
-            setup problem - a typo, or a interface that has gone away - so it
+        IPScoutResolutionError: No interface goes by that name here, or the
+            number is past the largest index a sockaddr can carry. That is a
+            setup problem - a typo, or an interface that has gone away - so it
             raises rather than being reported as an unreachable host.
 
     """
 
-    if zone.isdigit():
-        return int(zone)
+    # ASCII digits only, and at most ten of them. str.isdigit() also accepts
+    # superscripts (which int() then refuses with a bare ValueError) and other
+    # scripts' digits (which int() silently reads, so a typo picks a real
+    # interface), and an unbounded run would hit int()'s digit limit.
+    if _ZONE_INDEX.fullmatch(zone):
+        index = int(zone)
+        if index <= _MAX_INTERFACE_INDEX:
+            return index
+        msg = f"zone {zone!r} is past the largest interface index ({_MAX_INTERFACE_INDEX}): use an index or a name this host has"
+        raise IPScoutResolutionError(msg)
     try:
         return socket.if_nametoindex(zone)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError is what if_nametoindex raises for an embedded NUL, which no
+        # interface name can hold - the same "no such interface" to the caller.
         msg = f"no interface named {zone!r} to send on: name one this host has, or use its index"
         raise IPScoutResolutionError(msg) from exc
 
@@ -300,7 +366,33 @@ def resolve(target: str, *, family: AddressFamily | None = None) -> list[str]:
     return addresses
 
 
-def resolve_one(target: str, *, family: AddressFamily | None = None) -> tuple[str, AddressFamily]:
+class ResolvedTarget(NamedTuple):
+    """The single address a probe should use, and the family it belongs to.
+
+    A ``NamedTuple`` rather than a pydantic model on purpose: it was a plain
+    ``(address, family)`` tuple first, and callers unpack it, index it and
+    compare it with tuples. A NamedTuple keeps every one of those working while
+    letting new code name the fields instead of remembering their order.
+
+    Attributes:
+        address: The address literal, with its ``%zone`` suffix when it has one.
+        family: The family of ``address``, decided once here so no later stage
+            has to infer it.
+
+    Examples:
+        >>> target = ResolvedTarget("127.0.0.1", AddressFamily.IPV4)
+        >>> target.address, target.family is AddressFamily.IPV4
+        ('127.0.0.1', True)
+        >>> target == ("127.0.0.1", AddressFamily.IPV4)
+        True
+
+    """
+
+    address: str
+    family: AddressFamily
+
+
+def resolve_one(target: str, *, family: AddressFamily | None = None) -> ResolvedTarget:
     """Return the single address a probe should use, plus its family.
 
     Args:
@@ -308,16 +400,17 @@ def resolve_one(target: str, *, family: AddressFamily | None = None) -> tuple[st
         family: Restrict to one family, or accept the resolver's preference.
 
     Returns:
-        An ``(address, family)`` pair.
+        A :class:`ResolvedTarget`. It is a tuple, so ``address, family =
+        resolve_one(...)`` still unpacks it.
 
     Raises:
         IPScoutResolutionError: As :func:`resolve`.
 
     Examples:
         >>> resolve_one("127.0.0.1")
-        ('127.0.0.1', <AddressFamily.IPV4: 'ipv4'>)
-        >>> address, fam = resolve_one("::1")
-        >>> address, fam is AddressFamily.IPV6
+        ResolvedTarget(address='127.0.0.1', family=<AddressFamily.IPV4: 'ipv4'>)
+        >>> resolved = resolve_one("::1")
+        >>> resolved.address, resolved.family is AddressFamily.IPV6
         ('::1', True)
 
     """
@@ -335,7 +428,7 @@ def resolve_one(target: str, *, family: AddressFamily | None = None) -> tuple[st
         # with a message of its own.
         msg = f"{target!r} resolved to {address!r}, which is not an address this host can use, and no more specific reason was recognised - please report it"
         raise IPScoutResolutionError(msg)
-    return address, resolved
+    return ResolvedTarget(address, resolved)
 
 
 def reverse_dns(ip: str) -> str | None:

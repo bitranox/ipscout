@@ -282,9 +282,9 @@ def _syn_exchange(  # noqa: PLR0913 - one parameter per piece of the exchange, a
             # The packet names its own port, so it is read once and looked
             # up. Testing every outstanding port against it is quadratic.
             answer = read_reply(packet, source_port=source_port, peer_ip=host)
-            if answer is not None and answer[0] in outstanding:
-                found[answer[0]] = answer[1]
-                outstanding.discard(answer[0])
+            if answer is not None and answer.port in outstanding:
+                found[answer.port] = answer.state
+                outstanding.discard(answer.port)
         return found
     finally:
         with contextlib.suppress(OSError):
@@ -339,7 +339,7 @@ def scan_ports(
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(ascan_ports(host, wanted, timeout=timeout, concurrency=concurrency))
+        return asyncio.run(_connect_scan(host, wanted, timeout=timeout, concurrency=concurrency))
     msg = "scan_ports() cannot run inside an event loop; await ascan_ports() instead"
     raise RuntimeError(msg)
 
@@ -364,7 +364,15 @@ async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = 1.0
 
     """
 
-    wanted = _wanted(ports)
+    return await _connect_scan(host, _wanted(ports), timeout=timeout, concurrency=concurrency)
+
+
+async def _connect_scan(host: str, wanted: list[int], *, timeout: float, concurrency: int) -> dict[int, PortState]:
+    """Connect-scan ports already parsed and de-duplicated by :func:`_wanted`.
+
+    Both public entry points parse the specification themselves and then share
+    this, so it is parsed once whichever of them a caller used.
+    """
 
     async def probe(port: int) -> tuple[int, PortState]:
         try:

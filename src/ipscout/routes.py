@@ -63,7 +63,7 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
     # interface, and every backend packs the destination with inet_pton, which
     # refuses scoped text. Left in, the refusal is indistinguishable from an
     # honest "no route to there".
-    bare, _ = split_zone(destination)
+    bare = split_zone(destination).address
     af = _socket_family(family)
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
         from .routes_windows import query_route as _query  # noqa: PLC0415 - Windows-only import

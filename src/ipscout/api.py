@@ -52,6 +52,14 @@ __all__ = [
 DEFAULT_CONCURRENCY = 64
 
 
+def _probe_method(family: AddressFamily | None, *, allow_tcp_fallback: bool) -> ProbeMethod:
+    """Return TCP only when the caller allowed it and ICMP cannot be used here."""
+
+    if allow_tcp_fallback and not icmp_available(family or AddressFamily.IPV4):
+        return ProbeMethod.TCP
+    return ProbeMethod.ICMP
+
+
 def _prepare(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful
     target: str,
     times: int,
@@ -59,19 +67,19 @@ def _prepare(  # noqa: PLR0913 - public API: every knob is keyword-only and inde
     interval: float,
     family: AddressFamily | None,
     *,
-    use_tcp: bool,
+    method: ProbeMethod,
 ) -> PingRequest:
     """Resolve the target and validate the parameters into a request."""
 
-    address, resolved_family = resolve_one(target, family=family)
+    resolved = resolve_one(target, family=family)
     return PingRequest(
         target=target,
-        address=address,
-        family=resolved_family,
+        address=resolved.address,
+        family=resolved.family,
         times=times,
         timeout=timeout,
         interval=interval,
-        method=ProbeMethod.TCP if use_tcp else ProbeMethod.ICMP,
+        method=method,
     )
 
 
@@ -143,13 +151,13 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
     """
 
     try:
-        use_tcp = allow_tcp_fallback and not icmp_available(family or AddressFamily.IPV4)
-        request = _prepare(target, times, timeout, interval, family, use_tcp=use_tcp)
+        method = _probe_method(family, allow_tcp_fallback=allow_tcp_fallback)
+        request = _prepare(target, times, timeout, interval, family, method=method)
         with make_transport(
             request.address,
             request.family,
             payload_size=payload_size,
-            use_tcp=use_tcp,
+            method=request.method,
             tcp_port=tcp_port,
         ) as transport:
             return run_ping(request, transport)
@@ -194,13 +202,13 @@ async def aping(  # noqa: PLR0913 - public API: every knob is keyword-only and i
     """
 
     try:
-        use_tcp = allow_tcp_fallback and not icmp_available(family or AddressFamily.IPV4)
-        request = _prepare(target, times, timeout, interval, family, use_tcp=use_tcp)
+        method = _probe_method(family, allow_tcp_fallback=allow_tcp_fallback)
+        request = _prepare(target, times, timeout, interval, family, method=method)
         transport = make_async_transport(
             request.address,
             request.family,
             payload_size=payload_size,
-            use_tcp=use_tcp,
+            method=request.method,
             tcp_port=tcp_port,
         )
         async with transport:
@@ -384,8 +392,8 @@ def is_reachable(
     # would not do it: that only substitutes TCP when ICMP is *unavailable*, and
     # the common case here is ICMP being available but the target not answering it.
     try:
-        address, resolved = resolve_one(target, family=family)
-        with make_transport(address, resolved, use_tcp=True, tcp_port=tcp_port) as transport:
+        resolved = resolve_one(target, family=family)
+        with make_transport(resolved.address, resolved.family, method=ProbeMethod.TCP, tcp_port=tcp_port) as transport:
             return transport.probe(sequence=1, timeout=timeout).answered
     except (IPScoutError, ValueError, OSError):
         return False
@@ -417,8 +425,8 @@ async def ais_reachable(
         return True
 
     try:
-        address, resolved = resolve_one(target, family=family)
-        transport = make_async_transport(address, resolved, use_tcp=True, tcp_port=tcp_port)
+        resolved = resolve_one(target, family=family)
+        transport = make_async_transport(resolved.address, resolved.family, method=ProbeMethod.TCP, tcp_port=tcp_port)
         async with transport:
             return (await transport.probe(sequence=1, timeout=timeout)).answered
     except (IPScoutError, ValueError, OSError):

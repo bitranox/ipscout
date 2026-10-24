@@ -68,6 +68,20 @@ def test_loopback_carries_the_loopback_address() -> None:
     assert "127.0.0.1" in addresses or not addresses
 
 
+def test_loopback_prefix_lengths_follow_each_address_family() -> None:
+    # The netmask bytes sit at a different offset per family, so a family
+    # mix-up reads the wrong bytes: an IPv6 mask read at the IPv4 offset lands
+    # on the zero flowinfo field and reports ::1 as /0.
+    loopbacks = [item for item in local_interfaces() if item.is_loopback]
+
+    v4 = [entry.prefix_len for item in loopbacks for entry in item.ipv4 if entry.address == "127.0.0.1"]
+    v6 = [entry.prefix_len for item in loopbacks for entry in item.ipv6 if entry.address == "::1"]
+
+    assert v4 or v6, "no loopback address to check"
+    assert all(length == 8 for length in v4)
+    assert all(length == 128 for length in v6)
+
+
 def test_an_all_zero_hardware_address_is_reported_as_absent() -> None:
     # Loopback has an all-zero MAC, which is the absence of one rather than a
     # real address; reporting 00:00:00:00:00:00 would be misleading.

@@ -3,6 +3,7 @@
 Contents:
     iter_bpf_frames: Split one BPF read into the frames it holds.
     open_bpf_device: Claim a free /dev/bpf and bind it to an interface.
+    BpfDevice: The descriptor and read size :func:`open_bpf_device` returns.
     BIOCGBLEN, BIOCSETIF, BIOCIMMEDIATE, BIOCSHDRCMPLT, BIOCPROMISC, BIOCGDLT.
 
 Note:
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import os
 import struct
+from typing import NamedTuple
 
 from .unixio import fcntl_module
 
@@ -33,6 +35,7 @@ __all__ = [
     "BIOCSETIF",
     "BIOCSHDRCMPLT",
     "DLT_EN10MB",
+    "BpfDevice",
     "iter_bpf_frames",
     "open_bpf_device",
 ]
@@ -124,7 +127,35 @@ def iter_bpf_frames(buffer: bytes) -> list[bytes]:
     return frames
 
 
-def open_bpf_device(interface: str, *, promiscuous: bool = False, complete_headers: bool = True) -> tuple[int, int]:
+class BpfDevice(NamedTuple):
+    """A claimed BPF device: its descriptor and the size every read must use.
+
+    A ``NamedTuple`` rather than a pydantic model on purpose: it was a plain
+    ``(descriptor, buffer_length)`` tuple first, and callers unpack it. A
+    NamedTuple keeps that working while letting new code name the fields
+    instead of remembering their order - which matters here, because both are
+    bare ints and swapping them type-checks.
+
+    Attributes:
+        descriptor: The open file descriptor of the ``/dev/bpf*`` device. The
+            caller owns it and must close it.
+        buffer_length: The kernel's buffer length (``BIOCGBLEN``). Every read
+            must ask for exactly this many bytes - a shorter read is refused.
+
+    Examples:
+        >>> device = BpfDevice(descriptor=5, buffer_length=4096)
+        >>> device.descriptor, device.buffer_length
+        (5, 4096)
+        >>> device == (5, 4096)
+        True
+
+    """
+
+    descriptor: int
+    buffer_length: int
+
+
+def open_bpf_device(interface: str, *, promiscuous: bool = False, complete_headers: bool = True) -> BpfDevice:
     """Claim a free BPF device bound to one interface.
 
     Args:
@@ -137,8 +168,9 @@ def open_bpf_device(interface: str, *, promiscuous: bool = False, complete_heade
             a caller that writes; a read-only capture can leave it off.
 
     Returns:
-        The descriptor and the kernel's buffer length, which is the size every
-        read must use - a shorter read is refused outright.
+        The claimed device: its ``descriptor`` and the kernel's
+        ``buffer_length``, which is the size every read must use - a shorter
+        read is refused outright.
 
     Raises:
         OSError: No device could be claimed, or a request was refused. The
@@ -178,6 +210,6 @@ def open_bpf_device(interface: str, *, promiscuous: bool = False, complete_heade
         except OSError:
             os.close(descriptor)
             raise
-        return descriptor, int(length)
+        return BpfDevice(descriptor=descriptor, buffer_length=int(length))
 
     raise last or OSError("no BPF device could be opened")

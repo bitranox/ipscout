@@ -12,11 +12,12 @@ from typing import Any
 
 import pytest
 from capture_support import capture_interface
+from click import UsageError
 from click.testing import CliRunner
 
 import ipscout
 from ipscout import cli as cli_module
-from ipscout.cli import EXIT_ERROR, EXIT_NOT_REACHED, EXIT_OK, cli, main
+from ipscout.cli import EXIT_ERROR, EXIT_NOT_REACHED, EXIT_OK, CliContext, OutputMode, cli, main
 
 pytestmark = pytest.mark.os_agnostic
 
@@ -175,16 +176,71 @@ def test_a_failure_in_bare_mode_is_still_json() -> None:
     assert "ok" not in payload, "bare mode drops the envelope on failure too"
 
 
-@pytest.mark.parametrize(("bare", "envelope"), [(True, False), (False, True)])
-def test_an_escaping_failure_keeps_the_shape_that_was_asked_for(*, bare: bool, envelope: bool, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize(("mode", "envelope"), [(OutputMode.BARE, False), (OutputMode.ENVELOPE, True)])
+def test_an_escaping_failure_keeps_the_shape_that_was_asked_for(*, mode: OutputMode, envelope: bool, capsys: pytest.CaptureFixture[str]) -> None:
     # Anything getting past a command's own guard is reported by main()'s
     # handler, which reads the shape from argv because there may be no Click
     # context left to ask. Bare mode used to fall through to the envelope here.
-    cli_module._exception_handler(as_json=True, bare=bare)(RuntimeError("boom"))  # pyright: ignore[reportPrivateUsage] - the handler under test has no public caller taking an exception
+    cli_module._exception_handler(mode)(RuntimeError("boom"))  # pyright: ignore[reportPrivateUsage] - the handler under test has no public caller taking an exception
     payload = json.loads(capsys.readouterr().out)
 
     assert ("ok" in payload) is envelope
     assert "boom" in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["info"], OutputMode.HUMAN),
+        (["--json", "info"], OutputMode.ENVELOPE),
+        (["-j", "info"], OutputMode.ENVELOPE),
+        (["--json-bare", "info"], OutputMode.BARE),
+        (["--json", "--json-bare", "info"], OutputMode.BARE),
+        (["--json-bare", "-j", "info"], OutputMode.BARE),
+    ],
+    ids=["neither", "json", "j", "json-bare", "json-then-bare", "bare-then-j"],
+)
+def test_the_raw_argv_names_one_output_mode(argv: list[str], expected: OutputMode) -> None:
+    # main() reads the mode before Click parses anything, so an error escaping
+    # before the context exists still comes out in the shape asked for. Compared
+    # by identity: a str-Enum equals its value, so == would also pass for a
+    # call site that handed back a plain string.
+    assert OutputMode.from_argv(argv) is expected
+
+
+@pytest.mark.parametrize(
+    ("json_output", "json_bare", "expected"),
+    [(False, False, OutputMode.HUMAN), (True, False, OutputMode.ENVELOPE), (False, True, OutputMode.BARE)],
+    ids=["neither", "json", "json-bare"],
+)
+def test_the_two_flags_name_one_output_mode(*, json_output: bool, json_bare: bool, expected: OutputMode) -> None:
+    assert OutputMode.from_flags(json_output=json_output, json_bare=json_bare) is expected
+
+
+def test_both_flags_are_refused_with_the_documented_message() -> None:
+    with pytest.raises(UsageError, match=r"^--json and --json-bare are mutually exclusive; pick one output shape$"):
+        OutputMode.from_flags(json_output=True, json_bare=True)
+
+
+def test_both_flags_are_refused_end_to_end_in_the_bare_shape() -> None:
+    # The refusal travels through main()'s handler, whose mode came from argv,
+    # where --json-bare wins: the report is the bare error record, not prose.
+    import contextlib
+    import io
+
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        code = main(["--json", "--json-bare", "info"])
+
+    assert code == EXIT_ERROR
+    assert json.loads(stream.getvalue()) == {"type": "UsageError", "message": "--json and --json-bare are mutually exclusive; pick one output shape"}
+
+
+def test_the_context_carries_the_mode_the_flags_chose() -> None:
+    assert CliContext().output is OutputMode.HUMAN
+    assert CliContext().machine_readable is False
+    assert CliContext(output=OutputMode.ENVELOPE).machine_readable is True
+    assert CliContext(output=OutputMode.BARE).machine_readable is True
 
 
 def test_a_network_without_a_scan_is_refused_rather_than_dropped() -> None:

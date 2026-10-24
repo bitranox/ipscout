@@ -223,19 +223,19 @@ def path_mtu(target: str, *, family: AddressFamily | None = None) -> int | None:
 
     """
 
-    address, resolved_family = resolve_one(target, family=family)
+    resolved = resolve_one(target, family=family)
 
     if IS_LINUX:
-        return _linux_mtu(address, resolved_family)
+        return _linux_mtu(resolved.address, resolved.family)
     if IS_WINDOWS:  # pragma: no cover - Windows only
-        if resolved_family is AddressFamily.IPV6:
+        if resolved.family is AddressFamily.IPV6:
             # Icmp6SendEcho2 has no don't-fragment option, so there is nothing
             # to bisect on.
             return None
-        return _windows_mtu(address)
+        return _windows_mtu(resolved.address)
     # macOS and the BSDs: no IP_MTU to query, so the only way to learn this
     # is to probe with don't-fragment set and watch for the refusal, which
     # needs a raw socket.
-    if resolved_family is AddressFamily.IPV6:
+    if resolved.family is AddressFamily.IPV6:
         return None
-    return _bsd_mtu(address)
+    return _bsd_mtu(resolved.address)

@@ -6,14 +6,18 @@ that go wrong silently.
 """
 
 # The per-OS decoders are driven with synthetic buffers built from their own
-# kernel constants (_NUD_*, _NDA_*, _RTM_*), and one refusal is asked directly
+# kernel constants (_NUD_*, _NDA_*, _RTM_*), one refusal is asked directly
 # because reaching it through a real sweep needs a host with an oversized
-# network. Eleven line-level ignores would bury that; the rule is off for the
-# file, and nothing here touches a private outside those two purposes.
+# network, and the Linux raw-socket refusal message and the private record type
+# behind the dump decoder are pinned directly because reaching them needs a
+# host whose privileges a test cannot choose. Line-level ignores would bury
+# that; the rule is off for the file, and nothing here touches a private
+# outside those purposes.
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import socket
 import struct
@@ -26,7 +30,7 @@ from ipscout import neighbours_linux as linux
 from ipscout import neighbours_macos as macos
 from ipscout import neighbours_windows as windows
 from ipscout.models import AddressFamily, Interface, InterfaceAddress, MacScope, Neighbour, NeighbourState, SweepScope
-from ipscout.neighbours import _entry_for, resolve_active
+from ipscout.neighbours import SendingInterface, _entry_for, resolve_active
 from ipscout.resolve import resolve_one
 
 pytestmark = pytest.mark.os_agnostic
@@ -554,6 +558,36 @@ def test_the_end_of_a_linux_dump_is_reported() -> None:
 
 
 @pytest.mark.os_agnostic
+def test_a_linux_dump_chunk_names_its_fields_and_is_still_a_tuple() -> None:
+    chunk = linux.parse_neighbour_dump(struct.pack("=IHHII", 16, 3, 0, 0, 0))
+
+    assert type(chunk) is linux.NeighbourDumpChunk
+    assert linux.NeighbourDumpChunk._fields == ("entries", "done")
+    assert isinstance(chunk, tuple)
+    assert (chunk.entries, chunk.done) == ([], True)
+    assert chunk == ([], True)
+
+
+@pytest.mark.os_agnostic
+def test_a_linux_entry_s_addresses_name_their_fields_and_are_still_a_tuple() -> None:
+    message = _nd_message(
+        family=socket.AF_INET,
+        state=linux._NUD_REACHABLE,
+        ip=socket.inet_aton("192.0.2.5"),
+        mac=bytes.fromhex("00005e005305"),
+    )
+    payload = message[16:]
+
+    addresses = linux._read_address_attributes(payload, socket.AF_INET)
+
+    assert type(addresses) is linux._EntryAddresses
+    assert linux._EntryAddresses._fields == ("ip", "mac")
+    assert isinstance(addresses, tuple)
+    assert (addresses.ip, addresses.mac) == ("192.0.2.5", "00:00:5e:00:53:05")
+    assert addresses == ("192.0.2.5", "00:00:5e:00:53:05")
+
+
+@pytest.mark.os_agnostic
 @pytest.mark.parametrize("size", [0, 1, 15, 20])
 def test_a_truncated_linux_dump_is_refused_rather_than_misread(size: int) -> None:
     message = _nd_message(
@@ -719,6 +753,27 @@ def test_active_resolution_refuses_where_it_would_need_root() -> None:
     assert isinstance(caught.value, (ipscout.IPScoutPermissionError, ipscout.IPScoutUnsupportedError))
 
 
+# The query is spelled out literally rather than read from the member: on 3.11+
+# an f-string of a str enum member renders "_Solicitation.ARP", and only an
+# independent oracle notices that.
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize(
+    ("kind", "query"),
+    [(linux._Solicitation.ARP, "ARP"), (linux._Solicitation.NEIGHBOUR_DISCOVERY, "neighbour discovery")],
+)
+def test_the_linux_raw_socket_refusal_names_the_query_as_plain_text(kind: linux._Solicitation, query: str) -> None:
+    refusal = PermissionError(errno.EPERM, "Operation not permitted")
+
+    error = linux._permission_error(refusal, kind)
+
+    assert isinstance(error, ipscout.IPScoutPermissionError)
+    assert str(error) == (
+        f"active {query} needs a raw socket, so root or CAP_NET_RAW: [Errno 1] Operation not permitted. "
+        "Grant it with 'setcap cap_net_raw+ep $(readlink -f $(which python3))', run as root, "
+        "or use arp_scan(), which resolves the same addresses unprivileged"
+    )
+
+
 @pytest.mark.os_agnostic
 def test_active_resolution_never_quietly_becomes_a_cache_read() -> None:
     # The failure mode worth guarding: a caller asks to resolve actively, the
@@ -743,3 +798,14 @@ def test_active_resolution_never_quietly_becomes_a_cache_read() -> None:
 @pytest.mark.os_agnostic
 def test_the_passive_default_still_does_not_raise() -> None:
     assert ipscout.lookup_mac("203.0.113.199").scope in {MacScope.UNKNOWN, MacScope.NEXT_HOP}
+
+
+def test_the_interface_a_resolution_sends_from_names_its_fields_and_is_still_a_tuple() -> None:
+    # All three fields are strings, so only their names stop a caller sending
+    # from the hardware address it took for the source address.
+    sender = SendingInterface("eth0", "192.0.2.10", "00:00:5e:00:53:01")
+
+    assert isinstance(sender, tuple)
+    assert SendingInterface._fields == ("interface", "source_ip", "source_mac")
+    assert (sender.interface, sender.source_ip, sender.source_mac) == ("eth0", "192.0.2.10", "00:00:5e:00:53:01")
+    assert sender == ("eth0", "192.0.2.10", "00:00:5e:00:53:01")

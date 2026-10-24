@@ -57,6 +57,7 @@ __all__ = [
     "MacScope",
     "MtuReport",
     "Neighbour",
+    "NeighbourChange",
     "NeighbourState",
     "ObserveDhcpReport",
     "PackageInfo",
@@ -179,6 +180,25 @@ class NeighbourState(str, enum.Enum):
     INCOMPLETE = "incomplete"
     FAILED = "failed"
     OTHER = "other"
+
+
+class NeighbourChange(str, enum.Enum):
+    """The change a static neighbour write asks the kernel to make.
+
+    Names the request in the error raised when a platform refuses it ("the
+    kernel refused to add the neighbour entry"). Render a member with
+    ``.value``, never by formatting the member itself: on 3.11 and later an
+    f-string of a ``str`` enum member gives ``NeighbourChange.ADD``, not
+    ``add``, so the message would change with the interpreter.
+
+    Examples:
+        >>> f"refused to {NeighbourChange.REMOVE.value} the entry"
+        'refused to remove the entry'
+
+    """
+
+    ADD = "add"
+    REMOVE = "remove"
 
 
 class CommandName(str, enum.Enum):

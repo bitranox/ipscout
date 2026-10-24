@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ipaddress
 import sys
+from typing import NamedTuple
 
 from .errors import IPScoutUnsupportedError
 from .interfaces import local_interfaces
@@ -48,6 +49,11 @@ _SEPARATORS = str.maketrans("", "", ":-.")
 
 #: An Ethernet address is six octets, so twelve hex digits once stripped.
 _MAC_DIGITS = 12
+
+#: The source handed on when an interface has no IPv4 address. Only an IPv6
+#: solicitation reaches that case, and it never reads the IPv4 source, so
+#: this fills the field rather than naming an address anything sends from.
+_NO_IPV4_SOURCE = str(ipaddress.IPv4Address(0))
 
 
 def normalise_mac(mac: str) -> str | None:
@@ -137,12 +143,48 @@ def neighbours(*, family: AddressFamily | None = None) -> tuple[Neighbour, ...]:
     return of_family(list_neighbours(), family)
 
 
-def _sending_interface(ip: str, family: AddressFamily) -> tuple[str, str, str]:
+class SendingInterface(NamedTuple):
+    """Where an address-resolution request leaves from.
+
+    A ``NamedTuple`` rather than three bare strings: every field is a ``str``,
+    so a caller that unpacked them in the wrong order would type-check and
+    send from the wrong address. Naming them makes the order irrelevant.
+
+    Attributes:
+        interface: The name of the interface the route to the target uses.
+        source_ip: The address to send from - the route's own source when it
+            names one, else the interface's first IPv4 address, else the
+            unspecified ``0.0.0.0``. Only an IPv4 request reads it.
+        source_mac: The interface's hardware address, which the request
+            carries as its sender.
+
+    Examples:
+        >>> sender = SendingInterface("eth0", "192.0.2.10", "00:00:5e:00:53:01")
+        >>> sender.interface, sender.source_mac
+        ('eth0', '00:00:5e:00:53:01')
+        >>> sender == ("eth0", "192.0.2.10", "00:00:5e:00:53:01")
+        True
+
+    """
+
+    interface: str
+    source_ip: str
+    source_mac: str
+
+
+def _sending_interface(ip: str, family: AddressFamily) -> SendingInterface:
     """Return the interface, source address and hardware address to send from.
 
     An ARP request is answered to the address it came from, so a source on the
     wrong subnet gets no reply at all. The route lookup names the interface,
     and its own addresses supply the rest.
+
+    Args:
+        ip: The address the request will ask about.
+        family: The family of ``ip``; only IPv4 needs a source address.
+
+    Returns:
+        A :class:`SendingInterface` naming each of the three.
 
     Raises:
         IPScoutUnsupportedError: No interface on this host can reach that
@@ -166,7 +208,7 @@ def _sending_interface(ip: str, family: AddressFamily) -> tuple[str, str, str]:
         if family is AddressFamily.IPV4 and source is None:
             msg = f"{name} has no IPv4 address to send from"
             raise IPScoutUnsupportedError(msg)
-        return name, source or "0.0.0.0", candidate.mac  # noqa: S104  # nosec B104
+        return SendingInterface(name, source or _NO_IPV4_SOURCE, candidate.mac)
 
     msg = f"the route to {ip} names interface {name!r}, which is not among this host's interfaces"
     raise IPScoutUnsupportedError(msg)
@@ -216,7 +258,7 @@ def resolve_active(ip: str, *, timeout: float = 2.0) -> str | None:
 
         return _windows_resolve(ip)
 
-    interface, source_ip, source_mac = _sending_interface(ip, family)
+    sender = _sending_interface(ip, family)
 
     if IS_MACOS:  # pragma: no cover - exercised on macOS CI only
         from .neighbours_macos import resolve_active_ipv4, resolve_active_ipv6  # noqa: PLC0415 - macOS-only import
@@ -224,8 +266,14 @@ def resolve_active(ip: str, *, timeout: float = 2.0) -> str | None:
         from .neighbours_linux import resolve_active_ipv4, resolve_active_ipv6  # noqa: PLC0415 - Linux-only import
 
     if family is AddressFamily.IPV6:
-        return resolve_active_ipv6(ip, interface=interface, source_mac=source_mac, timeout=timeout)
-    return resolve_active_ipv4(ip, interface=interface, source_ip=source_ip, source_mac=source_mac, timeout=timeout)
+        return resolve_active_ipv6(ip, interface=sender.interface, source_mac=sender.source_mac, timeout=timeout)
+    return resolve_active_ipv4(
+        ip,
+        interface=sender.interface,
+        source_ip=sender.source_ip,
+        source_mac=sender.source_mac,
+        timeout=timeout,
+    )
 
 
 def _entry_for(ip: str, entries: tuple[Neighbour, ...], *, interface: str | None = None) -> Neighbour | None:

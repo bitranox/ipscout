@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import ctypes
 import socket
+from typing import NamedTuple
 
-from .models import Interface, InterfaceAddress
+from .models import AddressFamily, Interface, InterfaceAddress
 from .winapi import iphlpapi
 
 __all__ = ["list_interfaces"]
@@ -54,6 +55,13 @@ _MAX_ADAPTER_ADDRESS = 8
 _INITIAL_BUFFER = 15 * 1024
 
 _MS_LAYOUT = "ms"
+
+#: Where each piece of a raw sockaddr ends, read straight off the wire layout:
+#: the two-byte family every sockaddr opens with, then the address field of a
+#: ``sockaddr_in`` (bytes 4-8) and of a ``sockaddr_in6`` (bytes 8-24).
+_FAMILY_END = 2
+_IPV4_ADDR = slice(4, 8)
+_IPV6_ADDR = slice(8, 24)
 
 
 class _SocketAddress(ctypes.Structure):
@@ -118,19 +126,48 @@ _IpAdapterAddresses._fields_ = (
 )
 
 
-def _sockaddr_text(address: _SocketAddress) -> tuple[int, str] | None:
-    """Return the family and text form of a ``SOCKET_ADDRESS``."""
+class _IpAddress(NamedTuple):
+    """One IP address read out of a ``SOCKET_ADDRESS``.
+
+    The same record :mod:`ipscout.interfaces_posix` reads out of a sockaddr,
+    with the same field names, so the two backends read alike.
+
+    Attributes:
+        family: The address family, decoded from the ``AF_INET`` /
+            ``AF_INET6`` number Windows writes where the sockaddr is read.
+        address: The address in its textual form, without a zone.
+
+    """
+
+    family: AddressFamily
+    address: str
+
+
+def _sockaddr_text(address: _SocketAddress) -> _IpAddress | None:
+    """Return the family and text form of a ``SOCKET_ADDRESS``.
+
+    This is where the raw two-byte family becomes an
+    :class:`~ipscout.models.AddressFamily`; nothing past this point sees the
+    numbering.
+
+    Args:
+        address: One ``SOCKET_ADDRESS`` from the adapter's unicast list.
+
+    Returns:
+        The decoded address, or None for an empty or truncated sockaddr or a
+        family other than ``AF_INET`` or ``AF_INET6``.
+    """
 
     if not address.lpSockaddr or address.iSockaddrLength <= 0:
         return None
     raw = ctypes.string_at(address.lpSockaddr, address.iSockaddrLength)
-    if len(raw) < 2:  # noqa: PLR2004 - needs at least the family field
+    if len(raw) < _FAMILY_END:
         return None
-    family = int.from_bytes(raw[:2], "little")
-    if family == socket.AF_INET and len(raw) >= 8:  # noqa: PLR2004 - sockaddr_in through the address
-        return family, socket.inet_ntop(socket.AF_INET, raw[4:8])
-    if family == socket.AF_INET6 and len(raw) >= 24:  # noqa: PLR2004 - sockaddr_in6 through the address
-        return family, socket.inet_ntop(socket.AF_INET6, raw[8:24])
+    family = int.from_bytes(raw[:_FAMILY_END], "little")
+    if family == socket.AF_INET and len(raw) >= _IPV4_ADDR.stop:
+        return _IpAddress(AddressFamily.IPV4, socket.inet_ntop(socket.AF_INET, raw[_IPV4_ADDR]))
+    if family == socket.AF_INET6 and len(raw) >= _IPV6_ADDR.stop:
+        return _IpAddress(AddressFamily.IPV6, socket.inet_ntop(socket.AF_INET6, raw[_IPV6_ADDR]))
     return None
 
 
@@ -206,9 +243,8 @@ def _to_interface(adapter: _IpAdapterAddresses) -> Interface:  # pragma: no cove
         entry = unicast.contents
         found = _sockaddr_text(entry.Address)
         if found is not None:
-            family, text = found
-            found = InterfaceAddress(address=text, prefix_len=int(entry.OnLinkPrefixLength))
-            (ipv6 if family == socket.AF_INET6 else ipv4).append(found)
+            record = InterfaceAddress(address=found.address, prefix_len=int(entry.OnLinkPrefixLength))
+            (ipv6 if found.family is AddressFamily.IPV6 else ipv4).append(record)
         unicast = entry.Next
 
     return Interface(

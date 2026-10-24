@@ -24,7 +24,7 @@ import ipaddress
 import socket
 
 from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
-from .models import AddressFamily, Neighbour, NeighbourState
+from .models import AddressFamily, Neighbour, NeighbourChange, NeighbourState
 from .winapi import (
     MIB_IPNET_ROW2,
     MIB_IPNET_TABLE2,
@@ -303,12 +303,12 @@ def ipv4_neighbour_row(ip: str, mac: bytes, interface_index: int) -> MIB_IPNET_R
     return row
 
 
-def raise_for_status(status: int, *, action: str) -> None:
+def raise_for_status(status: int, *, action: NeighbourChange) -> None:
     """Raise unless an ``*IpNetEntry2`` call succeeded.
 
     Args:
         status: The Win32 error code the call returned.
-        action: What was asked, for the message (``"add"``, ``"remove"``).
+        action: What was asked, named in the message.
 
     Raises:
         IPScoutPermissionError: ``ERROR_ACCESS_DENIED``: changing the neighbour
@@ -316,8 +316,8 @@ def raise_for_status(status: int, *, action: str) -> None:
         IPScoutError: Any other failure.
 
     Examples:
-        >>> raise_for_status(0, action="add")
-        >>> raise_for_status(5, action="add")
+        >>> raise_for_status(0, action=NeighbourChange.ADD)
+        >>> raise_for_status(5, action=NeighbourChange.ADD)
         Traceback (most recent call last):
         ...
         ipscout.errors.IPScoutPermissionError: ...Administrator...
@@ -329,7 +329,7 @@ def raise_for_status(status: int, *, action: str) -> None:
     if status == _ERROR_ACCESS_DENIED:
         msg = "changing the neighbour table needs Administrator on Windows (ERROR_ACCESS_DENIED). Run elevated"
         raise IPScoutPermissionError(msg)
-    msg = f"Windows refused to {action} the neighbour entry: Win32 error {status}"
+    msg = f"Windows refused to {action.value} the neighbour entry: Win32 error {status}"
     raise IPScoutError(msg)
 
 
@@ -351,7 +351,7 @@ def removed_from_status(status: int) -> bool:
 
     if status == _ERROR_NOT_FOUND:
         return False
-    raise_for_status(status, action="remove")
+    raise_for_status(status, action=NeighbourChange.REMOVE)
     return True
 
 
@@ -379,7 +379,7 @@ def set_static_neighbour(ip: str, mac: bytes, ifindex: int) -> None:  # pragma: 
     if status == _ERROR_OBJECT_ALREADY_EXISTS:
         removed_from_status(library.DeleteIpNetEntry2(ctypes.byref(ipv4_neighbour_row(ip, mac, ifindex))))
         status = library.CreateIpNetEntry2(ctypes.byref(ipv4_neighbour_row(ip, mac, ifindex)))
-    raise_for_status(int(status), action="add")
+    raise_for_status(int(status), action=NeighbourChange.ADD)
 
 
 def remove_static_neighbour(ip: str, ifindex: int) -> bool:  # pragma: no cover - Windows only

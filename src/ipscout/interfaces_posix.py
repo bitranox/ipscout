@@ -40,8 +40,9 @@ import socket
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
-from .models import Interface, InterfaceAddress
+from .models import AddressFamily, Interface, InterfaceAddress
 from .unixio import fcntl_module
 
 __all__ = ["list_interfaces"]
@@ -123,8 +124,34 @@ def _raw_bytes(sockaddr: _SockAddr) -> bytes:
     return bytes(bytearray(ctypes.string_at(ctypes.byref(sockaddr), _SOCKADDR_MAX)))
 
 
-def _address_of(sockaddr: _SockAddr) -> tuple[int, str] | None:
-    """Return the family and text address, or None if it is not IP."""
+class _IpAddress(NamedTuple):
+    """One IP address read out of a sockaddr.
+
+    Attributes:
+        family: The address family, decoded from the platform's raw
+            ``AF_INET`` / ``AF_INET6`` number where the sockaddr is read.
+        address: The address in its textual form, without a zone.
+
+    """
+
+    family: AddressFamily
+    address: str
+
+
+def _address_of(sockaddr: _SockAddr) -> _IpAddress | None:
+    """Return the family and text address, or None if it is not IP.
+
+    This is where the raw ``sa_family`` number becomes an
+    :class:`~ipscout.models.AddressFamily`; nothing past this point sees the
+    platform's numbering.
+
+    Args:
+        sockaddr: One sockaddr out of the ``getifaddrs`` list.
+
+    Returns:
+        The decoded address, or None for a family other than ``AF_INET`` or
+        ``AF_INET6`` (a link-layer entry, say) or a truncated sockaddr.
+    """
 
     family = _family_of(sockaddr)
     raw = _raw_bytes(sockaddr)
@@ -132,27 +159,42 @@ def _address_of(sockaddr: _SockAddr) -> tuple[int, str] | None:
         chunk = raw[_IPV4_ADDR_OFFSET : _IPV4_ADDR_OFFSET + _IPV4_LEN]
         if len(chunk) != _IPV4_LEN:
             return None
-        return family, socket.inet_ntop(socket.AF_INET, chunk)
+        return _IpAddress(AddressFamily.IPV4, socket.inet_ntop(socket.AF_INET, chunk))
     if family == socket.AF_INET6:
         chunk = raw[_IPV6_ADDR_OFFSET : _IPV6_ADDR_OFFSET + _IPV6_LEN]
         if len(chunk) != _IPV6_LEN:
             return None
-        return family, socket.inet_ntop(socket.AF_INET6, chunk)
+        return _IpAddress(AddressFamily.IPV6, socket.inet_ntop(socket.AF_INET6, chunk))
     return None
 
 
-def _prefix_length(netmask: _SockAddr | None, family: int) -> int:
+def _prefix_length(netmask: _SockAddr | None, family: AddressFamily) -> int:
     """Return the prefix length a netmask represents.
 
     Counts set bits rather than assuming a contiguous mask, then reports the
     count. A non-contiguous mask is illegal in modern practice and would be
     misreported by any scheme, so the bit count is the honest summary.
+
+    Args:
+        netmask: The entry's netmask sockaddr, or None when libc gave none.
+        family: The family of the address the netmask belongs to; it decides
+            where the mask bytes sit and the full-length fallback.
+
+    Returns:
+        The number of set bits in the mask, or the family's full length (32 or
+        128) when there is no netmask.
+
+    Examples:
+        >>> _prefix_length(None, AddressFamily.IPV4)
+        32
+        >>> _prefix_length(None, AddressFamily.IPV6)
+        128
     """
 
     if netmask is None:
-        return _IPV6_LEN * 8 if family == socket.AF_INET6 else _IPV4_LEN * 8
+        return _IPV6_LEN * 8 if family is AddressFamily.IPV6 else _IPV4_LEN * 8
     raw = _raw_bytes(netmask)
-    offset, length = (_IPV6_ADDR_OFFSET, _IPV6_LEN) if family == socket.AF_INET6 else (_IPV4_ADDR_OFFSET, _IPV4_LEN)
+    offset, length = (_IPV6_ADDR_OFFSET, _IPV6_LEN) if family is AddressFamily.IPV6 else (_IPV4_ADDR_OFFSET, _IPV4_LEN)
     return sum(bin(byte).count("1") for byte in raw[offset : offset + length])
 
 
@@ -307,10 +349,9 @@ def _absorb(record: _Accumulator, entry: _IfAddrs) -> None:
     found = _address_of(sockaddr)
     if found is None:
         return
-    family, text = found
     netmask = entry.ifa_netmask.contents if entry.ifa_netmask else None
-    found_address = InterfaceAddress(address=text, prefix_len=_prefix_length(netmask, family))
-    if family == socket.AF_INET6:
+    found_address = InterfaceAddress(address=found.address, prefix_len=_prefix_length(netmask, found.family))
+    if found.family is AddressFamily.IPV6:
         record.ipv6.append(found_address)
     else:
         record.ipv4.append(found_address)

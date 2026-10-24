@@ -5,6 +5,50 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `factory.make_transport` and `factory.make_async_transport` take
+  `method: ProbeMethod = ProbeMethod.ICMP` in place of `use_tcp: bool = False`. A caller passing
+  `use_tcp=True` passes `method=ProbeMethod.TCP` instead; a caller passing neither is unaffected.
+- **Breaking:** `packet.build_echo_request`, `packet.is_echo_reply` and `packet.is_time_exceeded`
+  take `family: AddressFamily` in place of `is_ipv6: bool` (`build_echo_request` defaults to
+  `AddressFamily.IPV4`, as `is_ipv6=False` did). The bytes they build and the answers they give are
+  unchanged.
+- **Breaking:** `cli.CliContext` no longer has a `traceback` field. Nothing read it: `main()` takes the
+  setting from the command line, because the error it governs can escape before the context exists.
+  `--traceback` / `--no-traceback` work as before.
+- `neighbours_macos` no longer lists `iter_bpf_frames` in `__all__`; it lives in `ipscout.bpf`.
+- Functions that returned a fixed-shape record as a bare tuple now return a named tuple. Each is
+  still a tuple, so unpacking, indexing and comparison with a plain tuple keep working; only the
+  `repr` changed:
+  - `resolve.resolve_one` returns `ResolvedTarget(address, family)`;
+  - `resolve.split_zone` returns `ScopedAddress(address, zone)`;
+  - `packet.build_echo_request` returns `EchoRequest(datagram, token)`;
+  - `tcpsyn.read_reply` returns `PortReply(port, state)`;
+  - `neighbours_linux.parse_neighbour_dump` returns `NeighbourDumpChunk(entries, done)`;
+  - `bpf.open_bpf_device` returns `BpfDevice(descriptor, buffer_length)`.
+- `trace_path` and `atrace_path` read the transport's `supports_ttl_discovery` property directly. A
+  transport object without it, which the `EchoTransport` protocol already rejects at type-check
+  time, now raises `AttributeError` instead of being treated as unable to discover hops.
+
+### Fixed
+
+- `resolve.zone_index` takes a zone as an index only when it is 1 to 10 ASCII digits no larger than a
+  sockaddr scope can hold. A superscript-digit zone raised a bare `ValueError`, one written in another
+  script's digits (Arabic-Indic two) was silently read as index 2, an index past what a sockaddr holds
+  was probed anyway, so `ipscout ping` reported the host as not reached (exit 1), and a run of
+  thousands of digits hit `int()`'s digit limit. Each is now an `IPScoutResolutionError` naming the
+  zone (CLI exit 2), as is a name with an embedded NUL.
+
+### Internal
+
+- The CLI carries its output shape as one `OutputMode` enum (human, envelope, bare) instead of two
+  booleans; `--json`, `-j` and `--json-bare` and every output they produce are unchanged.
+- The neighbour-write backends name the change they report on (`add`/`remove`) with a
+  `NeighbourChange` enum instead of a string; the error messages are unchanged.
+- Private helpers that returned bare tuples (in `neighbours`, `neighbours_linux`, `tcpsyn`,
+  `bootp`, `interfaces_posix`, `interfaces_windows` and `transport_posix`) return named tuples too.
+
 ## [1.7.0] 2026-10-23 23:14:12
 
 ### Added

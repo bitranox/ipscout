@@ -36,7 +36,7 @@ from __future__ import annotations
 import enum
 import socket
 import struct
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from pydantic import BaseModel, ConfigDict
 
@@ -176,7 +176,21 @@ def _looks_like_bare_ipv4(frame: bytes) -> bool:
     return header_len >= _IPV4_MIN_HEADER and header_len <= len(frame) and header_len <= total_len <= len(frame)
 
 
-def _udp_payload(packet: bytes) -> tuple[str, bytes] | None:
+class _ServerDatagram(NamedTuple):
+    """A UDP datagram that left a DHCP server, split into who sent it and what it says.
+
+    Attributes:
+        server_ip: The IPv4 source address, in dotted-quad form.
+        body: Everything after the UDP header: the BOOTP message, bounded by
+            the captured buffer rather than by the UDP length field.
+
+    """
+
+    server_ip: str
+    body: bytes
+
+
+def _udp_payload(packet: bytes) -> _ServerDatagram | None:
     """Return the server address and BOOTP body of a DHCP reply, or None.
 
     The UDP length field is read but not trusted for slicing: a capture taken
@@ -200,7 +214,7 @@ def _udp_payload(packet: bytes) -> tuple[str, bytes] | None:
     source_port, destination_port = struct.unpack("!HH", packet[header_len : header_len + 4])
     if source_port != DHCP_SERVER_PORT or destination_port not in (DHCP_SERVER_PORT, DHCP_CLIENT_PORT):
         return None
-    return socket.inet_ntoa(packet[12:16]), packet[header_len + _UDP_HEADER_SIZE :]
+    return _ServerDatagram(socket.inet_ntoa(packet[12:16]), packet[header_len + _UDP_HEADER_SIZE :])
 
 
 def _message_type(body: bytes) -> DhcpMessageType | None:
@@ -303,10 +317,10 @@ class DhcpReply(BaseModel):
         packet = _ip_payload(frame)
         if packet is None:
             return None
-        parsed = _udp_payload(packet)
-        if parsed is None:
+        datagram = _udp_payload(packet)
+        if datagram is None:
             return None
-        server_ip, body = parsed
+        body = datagram.body
         if len(body) < BOOTP_FIXED_SIZE:
             return None
 
@@ -324,7 +338,7 @@ class DhcpReply(BaseModel):
         return cls(
             client_mac=client_mac,
             offered_ip=socket.inet_ntoa(yiaddr),
-            server_ip=server_ip,
+            server_ip=datagram.server_ip,
             transaction_id=xid,
             message_type=_message_type(body),
         )

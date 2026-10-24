@@ -6,7 +6,7 @@ import pytest
 
 from ipscout.errors import IPScoutResolutionError
 from ipscout.models import AddressFamily
-from ipscout.resolve import family_of, resolve, resolve_one, reverse_dns
+from ipscout.resolve import ResolvedTarget, ScopedAddress, family_of, resolve, resolve_one, reverse_dns, split_zone, zone_index
 
 #: A name reserved by RFC 6761 to never resolve, so this needs no network.
 NEVER_RESOLVES = "nothing.invalid"
@@ -42,6 +42,34 @@ def test_loopback_resolves_to_itself_in_both_families() -> None:
 def test_resolution_reports_the_family_alongside_the_address() -> None:
     assert resolve_one("127.0.0.1") == ("127.0.0.1", AddressFamily.IPV4)
     assert resolve_one("::1") == ("::1", AddressFamily.IPV6)
+
+
+@pytest.mark.os_agnostic
+def test_the_resolved_target_names_its_fields_and_is_still_a_tuple() -> None:
+    # The fields are the reason the record exists; the tuple-ness is the
+    # promise to every caller that already unpacks or indexes the result.
+    resolved = resolve_one("::1")
+
+    assert isinstance(resolved, ResolvedTarget)
+    assert isinstance(resolved, tuple)
+    assert resolved.address == "::1"
+    assert resolved.family is AddressFamily.IPV6
+    address, family = resolved
+    assert (address, family) == (resolved[0], resolved[1]) == ("::1", AddressFamily.IPV6)
+
+
+@pytest.mark.os_agnostic
+def test_a_split_address_names_its_fields_and_is_still_a_tuple() -> None:
+    # The fields are the reason the record exists; the tuple-ness is the
+    # promise to every caller that already unpacks the pair.
+    scoped = split_zone("fe80::1%eth0")
+
+    assert isinstance(scoped, ScopedAddress)
+    assert isinstance(scoped, tuple)
+    assert ScopedAddress._fields == ("address", "zone")
+    assert (scoped.address, scoped.zone) == ("fe80::1", "eth0")
+    assert scoped == ("fe80::1", "eth0")
+    assert split_zone("192.0.2.1") == ("192.0.2.1", None)
 
 
 @pytest.mark.os_agnostic
@@ -171,3 +199,23 @@ def test_a_literal_is_never_coerced_into_the_other_family(literal: str, wrong_fa
     # the requested family, so the answer must be the same on both.
     with pytest.raises(IPScoutResolutionError, match="has no"):
         resolve(literal, family=wrong_family)
+
+
+@pytest.mark.parametrize(
+    "zone",
+    [
+        "²",  # superscript two: str.isdigit() says yes, int() refuses it
+        "٢",  # Arabic-Indic two: int() reads it as 2, so a typo would pick interface 2
+        "9" * 5000,  # past int()'s digit limit
+        "4294967296",  # one past the largest index a sockaddr can carry
+        "a\x00b",  # if_nametoindex raises ValueError, not OSError, on a NUL
+    ],
+    ids=["superscript-two", "arabic-indic-two", "5000-digits", "past-uint32", "embedded-nul"],
+)
+def test_a_zone_that_is_no_interface_index_or_name_is_refused_as_a_resolution_error(zone: str) -> None:
+    with pytest.raises(IPScoutResolutionError):
+        zone_index(zone)
+
+
+def test_an_ascii_index_still_names_its_interface() -> None:
+    assert zone_index("1") == 1

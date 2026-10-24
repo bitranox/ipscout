@@ -117,7 +117,6 @@ class WindowsEchoTransport:
     def __init__(self, address: str, family: AddressFamily, *, payload_size: int = 56) -> None:
         self._address = address
         self._family = family
-        self._is_ipv6 = family is AddressFamily.IPV6
         self._payload_size = payload_size
         self._library = winapi.iphlpapi()
         self._handle = self._open_handle()
@@ -125,7 +124,7 @@ class WindowsEchoTransport:
     def _open_handle(self) -> int:  # pragma: no cover - Windows only
         """Open the ICMP handle for this transport's address family."""
 
-        opener = self._library.Icmp6CreateFile if self._is_ipv6 else self._library.IcmpCreateFile
+        opener = self._library.Icmp6CreateFile if self._family is AddressFamily.IPV6 else self._library.IcmpCreateFile
         handle = opener()
         if not handle or handle == winapi.INVALID_HANDLE_VALUE:
             msg = f"could not open an ICMP handle via iphlpapi (error {_last_error()})"
@@ -172,14 +171,14 @@ class WindowsEchoTransport:
 
         """
 
-        datagram, _token = packet.build_echo_request(
+        datagram = packet.build_echo_request(
             sequence=sequence,
             payload_size=self._payload_size,
-            is_ipv6=self._is_ipv6,
-        )
+            family=self._family,
+        ).datagram
         payload = datagram[packet.HEADER_SIZE :]
         timeout_ms = max(1, int(timeout * 1000))
-        if self._is_ipv6:  # pragma: no cover - Windows only
+        if self._family is AddressFamily.IPV6:  # pragma: no cover - Windows only
             return self._probe_v6(payload, timeout_ms, ttl)
         return self._probe_v4(payload, timeout_ms, ttl)  # pragma: no cover - Windows only
 

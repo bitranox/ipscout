@@ -7,6 +7,7 @@ particular operating system.
 Contents:
     EchoPayload: The token-bearing payload carried in every request we send.
     build_echo_request: Assemble a complete ICMP or ICMPv6 echo request.
+    EchoRequest: The ``(datagram, token)`` record build_echo_request returns.
     parse_echo_reply: Decode a datagram back into its identifying fields.
     checksum: The RFC 1071 one's-complement sum.
 
@@ -34,8 +35,11 @@ from __future__ import annotations
 
 import secrets
 import struct
+from typing import NamedTuple
 
 from pydantic import BaseModel, ConfigDict
+
+from .models import AddressFamily
 
 __all__ = [
     "ECHO_REPLY_V4",
@@ -46,6 +50,7 @@ __all__ = [
     "MAGIC",
     "TOKEN_SIZE",
     "EchoPayload",
+    "EchoRequest",
     "ParsedReply",
     "build_echo_request",
     "checksum",
@@ -199,14 +204,42 @@ def checksum(data: bytes) -> int:
     return ~total & 0xFFFF
 
 
+class EchoRequest(NamedTuple):
+    """One echo request ready to send, and the token its reply must carry.
+
+    A ``NamedTuple`` rather than a pydantic model on purpose: it was a plain
+    ``(datagram, token)`` tuple first, and callers unpack it and index it. A
+    NamedTuple keeps those working while letting new code name the field it
+    wants - both are ``bytes``, so their order is easy to get backwards and
+    nothing would type-check the mistake.
+
+    Attributes:
+        datagram: The complete ICMP or ICMPv6 message, header included, as it
+            goes on the wire.
+        token: The random bytes embedded in the payload. A reply counts as an
+            answer to this request only if it carries them back intact.
+
+    Examples:
+        >>> request = EchoRequest(b"\\x08\\x00", b"abcdefgh")
+        >>> request.token
+        b'abcdefgh'
+        >>> request == (b"\\x08\\x00", b"abcdefgh")
+        True
+
+    """
+
+    datagram: bytes
+    token: bytes
+
+
 def build_echo_request(
     *,
     sequence: int,
     payload_size: int = 56,
-    is_ipv6: bool = False,
+    family: AddressFamily = AddressFamily.IPV4,
     identifier: int = 0,
     token: bytes | None = None,
-) -> tuple[bytes, bytes]:
+) -> EchoRequest:
     """Build one complete ICMP echo request.
 
     Args:
@@ -214,24 +247,28 @@ def build_echo_request(
             token, is what identifies the reply.
         payload_size: Total payload length in bytes. Raised to the minimum
             needed to hold magic plus token when a smaller value is asked for.
-        is_ipv6: Build an ICMPv6 request rather than an ICMPv4 one.
+        family: Which protocol to build for: ``AddressFamily.IPV6`` builds an
+            ICMPv6 request, ``AddressFamily.IPV4`` an ICMPv4 one.
         identifier: Value for the identifier field. Cosmetic on unprivileged
             sockets, where the kernel overwrites it.
         token: Explicit token, for tests that need determinism. A fresh random
             token is generated when this is ``None``.
 
     Returns:
-        A ``(datagram, token)`` pair. The token is returned so the caller can
-        register it before the reply can possibly arrive.
+        An :class:`EchoRequest`. The token is returned so the caller can
+        register it before the reply can possibly arrive. It is a tuple, so
+        ``datagram, token = build_echo_request(...)`` still unpacks it.
 
     Examples:
         >>> datagram, token = build_echo_request(sequence=1, token=b"abcdefgh")
         >>> datagram[0], len(token)
         (8, 8)
+        >>> build_echo_request(sequence=1, token=b"abcdefgh").token
+        b'abcdefgh'
 
         The checksum is left to the kernel for IPv6:
 
-        >>> v6, _ = build_echo_request(sequence=1, is_ipv6=True, token=b"abcdefgh")
+        >>> v6, _ = build_echo_request(sequence=1, family=AddressFamily.IPV6, token=b"abcdefgh")
         >>> v6[0], v6[2:4]
         (128, b'\\x00\\x00')
 
@@ -247,14 +284,15 @@ def build_echo_request(
     filler_len = max(0, payload_size - MIN_PAYLOAD_SIZE)
     payload = EchoPayload(token=actual_token, filler=bytes(filler_len)).to_bytes()
 
+    is_ipv6 = family is AddressFamily.IPV6
     icmp_type = ECHO_REQUEST_V6 if is_ipv6 else ECHO_REQUEST_V4
     # IPv6 checksums are computed by the kernel over a pseudo-header that
     # includes the source address, which is not known here; send zero.
     if is_ipv6:
-        return _HEADER_STRUCT.pack(icmp_type, 0, 0, identifier, sequence) + payload, actual_token
+        return EchoRequest(_HEADER_STRUCT.pack(icmp_type, 0, 0, identifier, sequence) + payload, actual_token)
 
     blank = _HEADER_STRUCT.pack(icmp_type, 0, 0, identifier, sequence) + payload
-    return _HEADER_STRUCT.pack(icmp_type, 0, checksum(blank), identifier, sequence) + payload, actual_token
+    return EchoRequest(_HEADER_STRUCT.pack(icmp_type, 0, checksum(blank), identifier, sequence) + payload, actual_token)
 
 
 def strip_ip_header(datagram: bytes) -> bytes:
@@ -355,12 +393,12 @@ def parse_echo_reply(datagram: bytes) -> ParsedReply | None:
     )
 
 
-def is_echo_reply(parsed: ParsedReply, *, is_ipv6: bool) -> bool:
+def is_echo_reply(parsed: ParsedReply, *, family: AddressFamily) -> bool:
     """Return whether a parsed datagram is an echo reply for this family.
 
     Args:
         parsed: A decoded datagram.
-        is_ipv6: Which family's type numbers to expect.
+        family: Which family's type numbers to expect.
 
     Returns:
         True when the type byte marks an echo reply.
@@ -368,12 +406,12 @@ def is_echo_reply(parsed: ParsedReply, *, is_ipv6: bool) -> bool:
     Examples:
         >>> datagram, _ = build_echo_request(sequence=1, token=b"abcdefgh")
         >>> request = parse_echo_reply(datagram)
-        >>> is_echo_reply(request, is_ipv6=False)   # an echo REQUEST, not a reply
+        >>> is_echo_reply(request, family=AddressFamily.IPV4)   # an echo REQUEST, not a reply
         False
 
     """
 
-    expected = ECHO_REPLY_V6 if is_ipv6 else ECHO_REPLY_V4
+    expected = ECHO_REPLY_V6 if family is AddressFamily.IPV6 else ECHO_REPLY_V4
     return parsed.icmp_type == expected
 
 
@@ -384,12 +422,12 @@ TIME_EXCEEDED_V4 = 11
 TIME_EXCEEDED_V6 = 3
 
 
-def is_time_exceeded(datagram: bytes, *, is_ipv6: bool) -> bool:
+def is_time_exceeded(datagram: bytes, *, family: AddressFamily) -> bool:
     """Return whether a datagram is an ICMP Time Exceeded message.
 
     Args:
         datagram: The bytes received, with or without a leading IP header.
-        is_ipv6: Which protocol's type numbering applies. The two disagree:
+        family: Which protocol's type numbering applies. The two disagree:
             11 on IPv4 is Time Exceeded, while 3 on IPv6 is - and 3 on IPv4
             means Destination Unreachable instead, so reading it with the
             wrong family inverts the meaning.
@@ -398,13 +436,13 @@ def is_time_exceeded(datagram: bytes, *, is_ipv6: bool) -> bool:
         Whether this is a router reporting that a probe ran out of hops.
 
     Examples:
-        >>> is_time_exceeded(bytes([11, 0]) + bytes(6), is_ipv6=False)
+        >>> is_time_exceeded(bytes([11, 0]) + bytes(6), family=AddressFamily.IPV4)
         True
-        >>> is_time_exceeded(bytes([3, 0]) + bytes(6), is_ipv6=False)
+        >>> is_time_exceeded(bytes([3, 0]) + bytes(6), family=AddressFamily.IPV4)
         False
-        >>> is_time_exceeded(bytes([3, 0]) + bytes(6), is_ipv6=True)
+        >>> is_time_exceeded(bytes([3, 0]) + bytes(6), family=AddressFamily.IPV6)
         True
-        >>> is_time_exceeded(b"", is_ipv6=False)
+        >>> is_time_exceeded(b"", family=AddressFamily.IPV4)
         False
 
     """
@@ -412,5 +450,5 @@ def is_time_exceeded(datagram: bytes, *, is_ipv6: bool) -> bool:
     body = strip_ip_header(datagram)
     if not body:
         return False
-    expected = TIME_EXCEEDED_V6 if is_ipv6 else TIME_EXCEEDED_V4
+    expected = TIME_EXCEEDED_V6 if family is AddressFamily.IPV6 else TIME_EXCEEDED_V4
     return body[0] == expected

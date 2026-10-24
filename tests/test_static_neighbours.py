@@ -29,7 +29,7 @@ from ipscout import neighbours_macos as macos
 from ipscout import neighbours_windows as windows
 from ipscout.cli import EXIT_ERROR, cli
 from ipscout.errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
-from ipscout.models import AddressFamily, Interface, InterfaceAddress, NeighbourState
+from ipscout.models import AddressFamily, Interface, InterfaceAddress, NeighbourChange, NeighbourState
 from ipscout.netlink import parse_ack
 from ipscout.static_neighbours import interface_index, ipv4_station_address, station_mac, subnet_interface_index
 
@@ -117,12 +117,12 @@ def test_a_reply_that_is_not_an_acknowledgement_carries_no_verdict() -> None:
 @pytest.mark.parametrize("code", [errno.EPERM, errno.EACCES])
 def test_a_linux_refusal_for_privilege_names_cap_net_admin(code: int) -> None:
     with pytest.raises(IPScoutPermissionError, match="CAP_NET_ADMIN"):
-        linux.raise_for_ack(code, action="add")
+        linux.raise_for_ack(code, action=NeighbourChange.ADD)
 
 
 def test_a_linux_refusal_for_another_reason_is_not_called_a_permission_problem() -> None:
     with pytest.raises(IPScoutError) as caught:
-        linux.raise_for_ack(errno.ENODEV, action="add")
+        linux.raise_for_ack(errno.ENODEV, action=NeighbourChange.ADD)
 
     assert not isinstance(caught.value, IPScoutPermissionError)
     assert f"errno {errno.ENODEV}" in str(caught.value)
@@ -130,7 +130,25 @@ def test_a_linux_refusal_for_another_reason_is_not_called_a_permission_problem()
 
 def test_no_acknowledgement_is_an_error_rather_than_a_silent_success() -> None:
     with pytest.raises(IPScoutError, match="did not acknowledge"):
-        linux.raise_for_ack(None, action="add")
+        linux.raise_for_ack(None, action=NeighbourChange.ADD)
+
+
+# The verb is spelled out literally rather than read from the member: on 3.11+ an f-string of a
+# str enum member renders "NeighbourChange.ADD", and only an independent oracle notices that.
+@pytest.mark.parametrize(("change", "verb"), [(NeighbourChange.ADD, "add"), (NeighbourChange.REMOVE, "remove")])
+def test_a_refusal_message_names_the_change_as_a_plain_verb(change: NeighbourChange, verb: str) -> None:
+    refused = f"the kernel refused to {verb} the neighbour entry: {os.strerror(errno.ENODEV)} (errno {errno.ENODEV})"
+    cases = [
+        (lambda: linux.raise_for_ack(errno.ENODEV, action=change), refused),
+        (lambda: linux.raise_for_ack(None, action=change), f"the kernel did not acknowledge the request to {verb} the neighbour entry"),
+        (lambda: macos.raise_for_route_errno(errno.ENODEV, action=change), refused),
+        (lambda: windows.raise_for_status(87, action=change), f"Windows refused to {verb} the neighbour entry: Win32 error 87"),
+    ]
+
+    for raise_it, expected in cases:
+        with pytest.raises(IPScoutError) as caught:
+            raise_it()
+        assert str(caught.value) == expected
 
 
 def test_a_linux_delete_of_nothing_is_an_answer_not_an_error() -> None:
@@ -196,12 +214,12 @@ def test_the_link_gateway_is_as_long_as_the_kernel_demands() -> None:
 @pytest.mark.parametrize("code", [errno.EPERM, errno.EACCES])
 def test_a_macos_refusal_for_privilege_names_root(code: int) -> None:
     with pytest.raises(IPScoutPermissionError, match="root"):
-        macos.raise_for_route_errno(code, action="add")
+        macos.raise_for_route_errno(code, action=NeighbourChange.ADD)
 
 
 def test_a_macos_add_onto_an_occupied_address_is_an_error_not_a_permission_problem() -> None:
     with pytest.raises(IPScoutError) as caught:
-        macos.raise_for_route_errno(errno.EEXIST, action="add")
+        macos.raise_for_route_errno(errno.EEXIST, action=NeighbourChange.ADD)
 
     assert not isinstance(caught.value, IPScoutPermissionError)
 
@@ -262,12 +280,12 @@ def test_the_windows_row_carries_a_permanent_ipv4_entry() -> None:
 
 def test_a_windows_refusal_for_privilege_names_administrator() -> None:
     with pytest.raises(IPScoutPermissionError, match="Administrator"):
-        windows.raise_for_status(5, action="add")
+        windows.raise_for_status(5, action=NeighbourChange.ADD)
 
 
 def test_another_windows_failure_carries_its_code() -> None:
     with pytest.raises(IPScoutError, match="Win32 error 87") as caught:
-        windows.raise_for_status(87, action="add")
+        windows.raise_for_status(87, action=NeighbourChange.ADD)
 
     assert not isinstance(caught.value, IPScoutPermissionError)
 

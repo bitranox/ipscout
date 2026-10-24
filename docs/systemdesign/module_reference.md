@@ -211,7 +211,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                  |
 | `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                     |
 | `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                     |
-| `resolve.py`           | `resolve`, `resolve_one`, `reverse_dns`, `family_of`.                                                                             |
+| `resolve.py`           | `resolve`, `resolve_one` (returns a `ResolvedTarget` named tuple), `reverse_dns`, `family_of`.                                    |
 | `factory.py`           | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path.                   |
 
 ### Core

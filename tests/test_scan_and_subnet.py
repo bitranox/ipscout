@@ -21,7 +21,7 @@ import ipscout
 from ipscout.errors import IPScoutPermissionError, IPScoutUnsupportedError
 from ipscout.leases_linux import parse_dhclient_lease, parse_networkd_lease
 from ipscout.models import PortState, ScanMethod
-from ipscout.tcpsyn import ACK, RST, SYN, build_syn, checksum, parse_tcp_reply
+from ipscout.tcpsyn import ACK, RST, SYN, PortReply, build_syn, checksum, parse_tcp_reply, read_reply
 from ipscout.wol import MAGIC_PACKET_SIZE, build_magic_packet
 
 if TYPE_CHECKING:
@@ -540,17 +540,27 @@ def test_a_reply_names_the_port_it_answers() -> None:
     # reads it once and looks it up. Asking "is this about port N?" for every
     # outstanding N is quadratic: measured at 0.26us a parse, a full-range
     # scan would spend about eighteen minutes on that alone.
-    from ipscout.tcpsyn import read_reply
-
     answer = read_reply(_tcp_reply_from("1.2.3.4", source_port=443), source_port=40000, peer_ip="1.2.3.4")
 
     assert answer == (443, PortState.OPEN)
 
 
 @pytest.mark.os_agnostic
-def test_a_reply_to_a_different_scan_names_nothing() -> None:
-    from ipscout.tcpsyn import read_reply
+def test_a_reply_names_its_fields_and_is_still_a_tuple() -> None:
+    # The pair gained names so a caller reads answer.port rather than
+    # answer[0]; it stays a tuple so every caller that unpacks it keeps working.
+    answer = read_reply(_tcp_reply_from("1.2.3.4", source_port=443, flags=RST), source_port=40000, peer_ip="1.2.3.4")
 
+    assert isinstance(answer, PortReply)
+    assert isinstance(answer, tuple)
+    assert PortReply._fields == ("port", "state")
+    assert (answer.port, answer.state) == (443, PortState.CLOSED)
+    port, state = answer
+    assert (port, state) == (443, PortState.CLOSED)
+
+
+@pytest.mark.os_agnostic
+def test_a_reply_to_a_different_scan_names_nothing() -> None:
     other = _tcp_reply_from("1.2.3.4", source_port=443, target_port=55555)
 
     assert read_reply(other, source_port=40000, peer_ip="1.2.3.4") is None

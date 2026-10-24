@@ -27,6 +27,7 @@ from ipscout.bpf import (
     BIOCSETIF,
     BIOCSHDRCMPLT,
     DLT_EN10MB,
+    BpfDevice,
     iter_bpf_frames,
 )
 from ipscout.dhcp_macos import capture_available, open_capture
@@ -71,6 +72,24 @@ def test_the_promiscuous_request_carries_no_argument() -> None:
 
 def test_ethernet_is_the_link_type_the_codec_expects() -> None:
     assert DLT_EN10MB == 1
+
+
+# --------------------------------------------------------------------------
+# The record open_bpf_device returns
+# --------------------------------------------------------------------------
+
+
+def test_the_opened_device_names_its_fields_and_is_still_a_pair() -> None:
+    # Built directly: opening a real device needs root on a Mac. Both fields
+    # are bare ints, so a caller relying on order could swap them silently;
+    # the names are the contract, and the tuple shape keeps old unpacking
+    # callers working.
+    device = BpfDevice(descriptor=7, buffer_length=4096)
+
+    assert BpfDevice._fields == ("descriptor", "buffer_length")
+    assert isinstance(device, tuple)
+    descriptor, buffer_length = device
+    assert (descriptor, buffer_length) == (device.descriptor, device.buffer_length) == (7, 4096)
 
 
 # --------------------------------------------------------------------------

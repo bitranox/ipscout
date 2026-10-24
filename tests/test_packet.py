@@ -7,6 +7,7 @@ import struct
 import pytest
 
 from ipscout import packet
+from ipscout.models import AddressFamily
 
 
 @pytest.mark.os_agnostic
@@ -18,6 +19,20 @@ def test_a_request_survives_the_round_trip_home() -> None:
     assert parsed is not None
     assert parsed.sequence == 7
     assert parsed.token == token
+
+
+@pytest.mark.os_agnostic
+def test_an_echo_request_names_its_fields_and_is_still_a_tuple() -> None:
+    # Both fields are bytes, so only the names keep a caller from reading the
+    # datagram as the token; the tuple-ness keeps every unpacking caller working.
+    request = packet.build_echo_request(sequence=7, token=b"ABCDEFGH")
+
+    assert isinstance(request, packet.EchoRequest)
+    assert isinstance(request, tuple)
+    assert packet.EchoRequest._fields == ("datagram", "token")
+    assert request.token == b"ABCDEFGH"
+    assert request == (request.datagram, b"ABCDEFGH")
+    assert request.datagram[0] == packet.ECHO_REQUEST_V4
 
 
 @pytest.mark.os_agnostic
@@ -41,7 +56,7 @@ def test_an_odd_length_buffer_is_padded_rather_than_rejected() -> None:
 def test_ipv6_leaves_the_checksum_field_to_the_kernel() -> None:
     # The ICMPv6 checksum covers a pseudo-header containing the source address,
     # which user space does not reliably know, so the kernel fills it in.
-    datagram, _ = packet.build_echo_request(sequence=1, is_ipv6=True, token=b"ABCDEFGH")
+    datagram, _ = packet.build_echo_request(sequence=1, family=AddressFamily.IPV6, token=b"ABCDEFGH")
 
     assert datagram[0] == packet.ECHO_REQUEST_V6
     assert datagram[2:4] == b"\x00\x00"
@@ -124,7 +139,7 @@ def test_an_echo_request_is_not_counted_as_an_echo_reply() -> None:
     parsed = packet.parse_echo_reply(datagram)
 
     assert parsed is not None
-    assert not packet.is_echo_reply(parsed, is_ipv6=False)
+    assert not packet.is_echo_reply(parsed, family=AddressFamily.IPV4)
 
 
 @pytest.mark.os_agnostic
@@ -134,10 +149,10 @@ def test_the_two_families_do_not_share_type_numbers() -> None:
 
     assert v4 is not None
     assert v6 is not None
-    assert packet.is_echo_reply(v4, is_ipv6=False)
-    assert not packet.is_echo_reply(v4, is_ipv6=True)
-    assert packet.is_echo_reply(v6, is_ipv6=True)
-    assert not packet.is_echo_reply(v6, is_ipv6=False)
+    assert packet.is_echo_reply(v4, family=AddressFamily.IPV4)
+    assert not packet.is_echo_reply(v4, family=AddressFamily.IPV6)
+    assert packet.is_echo_reply(v6, family=AddressFamily.IPV6)
+    assert not packet.is_echo_reply(v6, family=AddressFamily.IPV4)
 
 
 @pytest.mark.os_agnostic
@@ -177,7 +192,7 @@ def test_a_reply_arriving_with_its_ip_header_is_still_understood() -> None:
     assert parsed is not None
     assert parsed.sequence == 7
     assert parsed.token == token
-    assert packet.is_echo_reply(parsed, is_ipv6=False)
+    assert packet.is_echo_reply(parsed, family=AddressFamily.IPV4)
 
 
 @pytest.mark.os_agnostic

@@ -25,7 +25,7 @@ import pytest
 
 from ipscout import packet
 from ipscout.models import AddressFamily
-from ipscout.transport_posix import AsyncPosixEchoTransport, PosixEchoTransport
+from ipscout.transport_posix import AsyncPosixEchoTransport, ErrorQueueReader, PosixEchoTransport, recvmsg_of
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -271,3 +271,19 @@ def test_the_async_transport_discards_foreign_traffic() -> None:
         assert asyncio.run(attempt()) is True
     finally:
         peer.close()
+
+
+def test_the_error_queue_reader_names_its_fields_and_is_still_a_tuple() -> None:
+    # recvmsg and its flag only work as a pair, so the record names which is
+    # which rather than leaving the reader to remember the order.
+    flag = 0x2000
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        recvmsg = recvmsg_of(sock)
+        assert recvmsg is not None
+        reader = ErrorQueueReader(recvmsg, flag)
+
+        assert isinstance(reader, tuple)
+        assert ErrorQueueReader._fields == ("recvmsg", "flag")
+        assert reader.recvmsg is recvmsg
+        assert reader.flag == flag
+        assert reader == (recvmsg, flag)

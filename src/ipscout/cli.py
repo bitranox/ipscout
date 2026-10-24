@@ -22,6 +22,7 @@ Note:
 
 from __future__ import annotations
 
+import enum
 import sys
 from typing import TYPE_CHECKING
 
@@ -90,6 +91,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CLICK_CONTEXT_SETTINGS",
     "CliContext",
+    "OutputMode",
     "cli",
     "console",
     "error_console",
@@ -118,27 +120,109 @@ EXIT_NOT_REACHED = 1
 EXIT_ERROR = 2
 
 
+class OutputMode(str, enum.Enum):
+    """The shape every command writes its result in.
+
+    One value rather than a pair of flags: the two flags admit a fourth
+    combination - both set - that names no shape at all, and every branch
+    reading them had to decide afresh which one wins.
+
+    Attributes:
+        HUMAN: Readable text for a person at a terminal. The default.
+        ENVELOPE: The JSON envelope ``{"ok", "command", "data"|"error"}``,
+            selected by ``--json``/``-j``.
+        BARE: The JSON payload at top level with no envelope, for ``jq``,
+            selected by ``--json-bare``.
+
+    Examples:
+        >>> OutputMode.from_argv(["--json", "info"]) is OutputMode.ENVELOPE
+        True
+        >>> OutputMode.from_argv(["info"]).value
+        'human'
+
+    """
+
+    HUMAN = "human"
+    ENVELOPE = "envelope"
+    BARE = "bare"
+
+    @classmethod
+    def from_argv(cls, argv: Sequence[str]) -> OutputMode:
+        """Return the mode the raw command line asks for, before Click parses it.
+
+        Args:
+            argv: The arguments after the program name.
+
+        Returns:
+            ``BARE`` when ``--json-bare`` is present, else ``ENVELOPE`` when
+            ``--json`` or ``-j`` is, else ``HUMAN``.
+
+        Note:
+            ``--json-bare`` wins when both are given. That invocation is
+            refused as a usage error, but the refusal is reported through this
+            mode, and it must still come out as JSON rather than prose: either
+            JSON shape satisfies that, so the precedence only has to be fixed.
+
+        Examples:
+            >>> OutputMode.from_argv(["--json", "--json-bare", "info"]).value
+            'bare'
+
+        """
+
+        if "--json-bare" in argv:
+            return cls.BARE
+        if "--json" in argv or "-j" in argv:
+            return cls.ENVELOPE
+        return cls.HUMAN
+
+    @classmethod
+    def from_flags(cls, *, json_output: bool, json_bare: bool) -> OutputMode:
+        """Return the mode the root command's two flags select.
+
+        Args:
+            json_output: Whether ``--json``/``-j`` was given.
+            json_bare: Whether ``--json-bare`` was given.
+
+        Returns:
+            The single mode the flags name.
+
+        Raises:
+            click.UsageError: When both flags are given. A silent precedence
+                rule would leave a caller parsing a shape they never asked for.
+
+        Examples:
+            >>> OutputMode.from_flags(json_output=False, json_bare=True).value
+            'bare'
+
+        """
+
+        if json_output and json_bare:
+            msg = "--json and --json-bare are mutually exclusive; pick one output shape"
+            raise click.UsageError(msg)
+        if json_bare:
+            return cls.BARE
+        if json_output:
+            return cls.ENVELOPE
+        return cls.HUMAN
+
+
 class CliContext(BaseModel):
     """Typed context object for Click's ``ctx.obj``.
 
     Attributes:
-        traceback: Show a full Python traceback on an unexpected error.
-        json_output: Emit the JSON envelope instead of human-readable text.
-        json_bare: Emit the payload at top level, without the envelope.
+        output: The shape results and failures are written in.
 
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    traceback: bool = True
-    json_output: bool = False
-    json_bare: bool = False
+    output: OutputMode = OutputMode.HUMAN
 
     @property
     def machine_readable(self) -> bool:
         """Return whether output should be JSON in either of its two shapes."""
 
-        return self.json_output or self.json_bare
+        return self.output is not OutputMode.HUMAN
 
 
 def _context(ctx: click.Context) -> CliContext:
@@ -176,14 +260,14 @@ def _emit(ctx: click.Context, command: CommandName, payload: EmitPayload, human:
 
     state = _context(ctx)
     _note_skipped(skipped)
-    if state.json_bare:
-        click.echo(dumps(payload))
-        return
-    if state.json_output:
-        envelope = JsonEnvelope(ok=True, command=command, data=to_jsonable(payload), skipped=skipped)
-        click.echo(dumps(envelope))
-        return
-    human()
+    match state.output:
+        case OutputMode.BARE:
+            click.echo(dumps(payload))
+        case OutputMode.ENVELOPE:
+            envelope = JsonEnvelope(ok=True, command=command, data=to_jsonable(payload), skipped=skipped)
+            click.echo(dumps(envelope))
+        case OutputMode.HUMAN:
+            human()
 
 
 def _note_skipped(skipped: tuple[IPNetwork, ...]) -> None:
@@ -221,14 +305,21 @@ def _fail(ctx: click.Context, command: CommandName, exc: Exception, *, skipped: 
     """
 
     state = _context(ctx)
-    error = JsonError(type=type(exc).__name__, message=str(exc))
-    if state.json_bare:
-        click.echo(dumps(error))
-    elif state.json_output:
-        click.echo(dumps(JsonEnvelope(ok=False, command=command, error=error, skipped=skipped)))
-    else:
-        console.print(f"Error: {exc}", style=_ERROR_STYLE, highlight=False)
+    error = _json_error(exc)
+    match state.output:
+        case OutputMode.BARE:
+            click.echo(dumps(error))
+        case OutputMode.ENVELOPE:
+            click.echo(dumps(JsonEnvelope(ok=False, command=command, error=error, skipped=skipped)))
+        case OutputMode.HUMAN:
+            console.print(f"Error: {exc}", style=_ERROR_STYLE, highlight=False)
     ctx.exit(EXIT_ERROR)
+
+
+def _json_error(exc: BaseException) -> JsonError:
+    """Return the machine-readable record of a failure, for either JSON shape."""
+
+    return JsonError(type=type(exc).__name__, message=str(exc))
 
 
 def _family(*, ipv4: bool, ipv6: bool) -> AddressFamily | None:
@@ -256,9 +347,12 @@ def _family(*, ipv4: bool, ipv6: bool) -> AddressFamily | None:
 )
 @option("--json", "-j", "json_output", is_flag=True, default=False, help="Emit a JSON envelope: {ok, command, data|error}.")
 @option("--json-bare", "json_bare", is_flag=True, default=False, help="Emit the JSON payload at top level, without the envelope.")
-@option("--traceback/--no-traceback", is_flag=True, default=True, help="Show a full Python traceback on unexpected errors.")
+# The traceback setting is read from argv by main(), because the exception it
+# governs can escape before this command runs; Click only has to accept the
+# flag, so its value is not handed to the command at all.
+@option("--traceback/--no-traceback", is_flag=True, default=True, expose_value=False, help="Show a full Python traceback on unexpected errors.")
 @click.pass_context
-def cli(ctx: click.Context, *, json_output: bool, json_bare: bool, traceback: bool) -> None:
+def cli(ctx: click.Context, *, json_output: bool, json_bare: bool) -> None:
     """Probe reachability and inspect the local network, without admin rights.
 
     Examples:
@@ -272,11 +366,9 @@ def cli(ctx: click.Context, *, json_output: bool, json_bare: bool, traceback: bo
 
     """
 
-    if json_output and json_bare:
-        msg = "--json and --json-bare are mutually exclusive; pick one output shape"
-        raise click.UsageError(msg)
-
-    ctx.obj = CliContext(traceback=traceback, json_output=json_output, json_bare=json_bare)
+    # The two flags stay on the command line, where they are the documented
+    # surface; inside, they become the one mode that every renderer reads.
+    ctx.obj = CliContext(output=OutputMode.from_flags(json_output=json_output, json_bare=json_bare))
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -892,26 +984,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     # can escape before the context exists, and a traceback would then land in
     # a stream the caller is parsing as JSON. Both shapes count, or bare mode
     # would be the one shape whose failures are not machine-readable.
-    bare = "--json-bare" in argv_list
-    as_json = bare or "--json" in argv_list or "-j" in argv_list
+    output = OutputMode.from_argv(argv_list)
     show_traceback = "--no-traceback" not in argv_list
 
-    lib_cli_exit_tools.config.traceback = show_traceback and not as_json
+    lib_cli_exit_tools.config.traceback = show_traceback and output is OutputMode.HUMAN
 
     return lib_cli_exit_tools.run_cli(
         cli,
         argv_list,
         prog_name=__init__conf__.shell_command,
-        exception_handler=_exception_handler(as_json=as_json, bare=bare),
+        exception_handler=_exception_handler(output),
     )
 
 
-def _exception_handler(*, as_json: bool, bare: bool) -> Callable[[BaseException], int]:
+def _exception_handler(output: OutputMode) -> Callable[[BaseException], int]:
     """Return the handler run_cli should use for an escaping exception.
 
     Keeps ``lib_cli_exit_tools``'s exit-code mapping - signals, broken pipe,
     errno - while making sure that in either JSON mode the report is data
     rather than a traceback, in the shape that mode promised.
+
+    Args:
+        output: The mode read from argv, since an exception can escape before
+            the Click context that would otherwise carry it exists.
+
+    Returns:
+        A handler mapping the exception to the process exit code.
     """
 
     def handle(exc: BaseException) -> int:
@@ -920,11 +1018,13 @@ def _exception_handler(*, as_json: bool, bare: bool) -> Callable[[BaseException]
         # mapping instead returned 1, which a script reads as "host did not
         # answer" - a wrong fact about the network from a typo in the command.
         code = exc.exit_code if isinstance(exc, click.ClickException) else lib_cli_exit_tools.get_system_exit_code(exc)
-        if as_json:
-            error = JsonError(type=type(exc).__name__, message=str(exc))
-            click.echo(dumps(error if bare else JsonEnvelope(ok=False, error=error)))
-            return code
-        lib_cli_exit_tools.print_exception_message()
+        match output:
+            case OutputMode.BARE:
+                click.echo(dumps(_json_error(exc)))
+            case OutputMode.ENVELOPE:
+                click.echo(dumps(JsonEnvelope(ok=False, error=_json_error(exc))))
+            case OutputMode.HUMAN:
+                lib_cli_exit_tools.print_exception_message()
         return code
 
     return handle
