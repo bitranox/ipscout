@@ -54,9 +54,6 @@ _SockAddr = tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes]
 #: length is also what tells the two families apart.
 _IPV6_SOCKADDR_FIELDS = 4
 
-#: Compared against ``ip_address().version``, which speaks numbers.
-_IPV6_VERSION = 6
-
 
 def family_of(address: str) -> AddressFamily | None:
     """Return the family of a literal address, or None if it is not one.
@@ -82,7 +79,7 @@ def family_of(address: str) -> AddressFamily | None:
         parsed = ipaddress.ip_address(address)
     except ValueError:
         return None
-    return AddressFamily.IPV6 if parsed.version == _IPV6_VERSION else AddressFamily.IPV4
+    return AddressFamily.of_version(parsed.version)
 
 
 class ScopedAddress(NamedTuple):
@@ -227,7 +224,7 @@ def _refuse_a_link_local_address_with_no_zone(target: str, address: str) -> None
         parsed = ipaddress.ip_address(bare)
     except ValueError:  # pragma: no cover - the address came from getaddrinfo
         return
-    if parsed.version != _IPV6_VERSION or not parsed.is_link_local:
+    if parsed.version != AddressFamily.IPV6.ip_version or not parsed.is_link_local:
         return
     msg = f"{target!r} is a link-local address, which needs the interface to send on: write it as {bare}%<interface>"
     raise IPScoutResolutionError(msg)

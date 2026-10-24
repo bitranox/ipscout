@@ -39,6 +39,7 @@ from .errors import IPScoutUnsupportedError
 from .factory import make_async_transport, make_transport
 from .models import TraceHop
 from .resolve import resolve_one, reverse_dns
+from .service import DEFAULT_TIMEOUT
 
 if TYPE_CHECKING:
     from .models import AddressFamily
@@ -108,7 +109,7 @@ def trace_path(
     transport: EchoTransport,
     *,
     max_hops: int = DEFAULT_MAX_HOPS,
-    timeout: float = 2.0,
+    timeout: float = DEFAULT_TIMEOUT,
     resolve_names: bool = False,
 ) -> list[TraceHop]:
     """Walk the hop limit upward over ``transport`` until the target answers.
@@ -161,7 +162,7 @@ async def atrace_path(
     transport: AsyncEchoTransport,
     *,
     max_hops: int = DEFAULT_MAX_HOPS,
-    timeout: float = 2.0,
+    timeout: float = DEFAULT_TIMEOUT,
     resolve_names: bool = False,
 ) -> list[TraceHop]:
     """Walk the hop limit upward over an async transport.
@@ -205,7 +206,7 @@ def traceroute(
     target: str,
     *,
     max_hops: int = DEFAULT_MAX_HOPS,
-    timeout: float = 2.0,
+    timeout: float = DEFAULT_TIMEOUT,
     family: AddressFamily | None = None,
     resolve_names: bool = False,
 ) -> list[TraceHop]:
@@ -238,7 +239,7 @@ async def atraceroute(
     target: str,
     *,
     max_hops: int = DEFAULT_MAX_HOPS,
-    timeout: float = 2.0,
+    timeout: float = DEFAULT_TIMEOUT,
     family: AddressFamily | None = None,
     resolve_names: bool = False,
 ) -> list[TraceHop]:

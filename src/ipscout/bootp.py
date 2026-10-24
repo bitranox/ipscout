@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, NamedTuple
 from pydantic import BaseModel, ConfigDict
 
 from .arp import ETH_P_IP, ETH_P_VLAN, ETHERNET, ETHERNET_HEADER_SIZE, MAC_LENGTH, format_mac
+from .models import AddressFamily
+from .packet import IPV4_MIN_HEADER_SIZE
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -64,11 +66,9 @@ __all__ = [
 _BOOTP = struct.Struct("!BBBBIHH4s4s4s4s16s64s128s")
 BOOTP_FIXED_SIZE = _BOOTP.size
 
-#: IPv4 without options, and UDP. Both headers are read by offset rather than
+#: UDP's header. Both it and the IPv4 header are read by offset rather than
 #: unpacked whole, so only their sizes are needed here.
-_IPV4_MIN_HEADER = 20
 _UDP_HEADER_SIZE = 8
-_IPV4_VERSION = 4
 _IPPROTO_UDP = 17
 
 #: DHCP rides on these two ports. A reply always leaves the server port; it
@@ -167,13 +167,13 @@ def _ip_payload(frame: bytes) -> bytes | None:
 def _looks_like_bare_ipv4(frame: bytes) -> bool:
     """Return whether a buffer is an IPv4 UDP packet with no link header."""
 
-    if len(frame) < _IPV4_MIN_HEADER or (frame[0] >> 4) != _IPV4_VERSION:
+    if len(frame) < IPV4_MIN_HEADER_SIZE or (frame[0] >> 4) != AddressFamily.IPV4.ip_version:
         return False
     if frame[9] != _IPPROTO_UDP:
         return False
     header_len = (frame[0] & 0x0F) * 4
     total_len = int.from_bytes(frame[2:4], "big")
-    return header_len >= _IPV4_MIN_HEADER and header_len <= len(frame) and header_len <= total_len <= len(frame)
+    return header_len >= IPV4_MIN_HEADER_SIZE and header_len <= len(frame) and header_len <= total_len <= len(frame)
 
 
 class _ServerDatagram(NamedTuple):
@@ -199,10 +199,10 @@ def _udp_payload(packet: bytes) -> _ServerDatagram | None:
     the fixed-header size check rather than raising here.
     """
 
-    if len(packet) < _IPV4_MIN_HEADER or (packet[0] >> 4) != _IPV4_VERSION:
+    if len(packet) < IPV4_MIN_HEADER_SIZE or (packet[0] >> 4) != AddressFamily.IPV4.ip_version:
         return None
     header_len = (packet[0] & 0x0F) * 4
-    if header_len < _IPV4_MIN_HEADER or packet[9] != _IPPROTO_UDP:
+    if header_len < IPV4_MIN_HEADER_SIZE or packet[9] != _IPPROTO_UDP:
         return None
     # A non-first fragment carries no UDP header. DHCP is a few hundred bytes
     # and is never legitimately fragmented, so this is somebody else's traffic.

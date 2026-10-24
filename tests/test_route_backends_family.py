@@ -115,11 +115,6 @@ def test_a_windows_route_destination_is_packed_in_the_family_it_was_given(family
 
 
 @_FAMILIES
-def test_the_windows_forwarding_table_is_asked_for_the_family_it_was_given(family: AddressFamily) -> None:
-    assert windows._win_family(family) == _WIN_FAMILY[family]
-
-
-@_FAMILIES
 def test_an_address_of_the_other_family_is_not_a_windows_route_destination(family: AddressFamily) -> None:
     other = AddressFamily.IPV4 if family is AddressFamily.IPV6 else AddressFamily.IPV6
 

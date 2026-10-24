@@ -28,10 +28,9 @@ from .winapi import (
     MIB_IPFORWARD_ROW2,
     MIB_IPFORWARD_TABLE2,
     SOCKADDR_INET,
-    WIN_AF_INET,
-    WIN_AF_INET6,
     iphlpapi,
     sockaddr_inet_to_string,
+    win_family,
 )
 
 __all__ = ["default_gateway", "query_route"]
@@ -44,24 +43,13 @@ _NO_ERROR = 0
 _UNSPECIFIED = frozenset({"0.0.0.0", "::"})  # noqa: S104  # nosec B104
 
 
-def _win_family(family: AddressFamily) -> int:
-    """Return the Windows ``AF_*`` number for a family.
-
-    Not :attr:`AddressFamily.socket_family`: Windows numbers ``AF_INET6`` as
-    23, where Linux uses 10 and macOS 30, and the iphlpapi structures carry
-    the Windows number whatever platform builds them.
-    """
-
-    return WIN_AF_INET6 if family is AddressFamily.IPV6 else WIN_AF_INET
-
-
 def _destination(address: str, family: AddressFamily) -> SOCKADDR_INET | None:
     """Pack an address into the union ``GetBestRoute2`` takes."""
 
     sockaddr = SOCKADDR_INET()
     try:
         packed = socket.inet_pton(family.socket_family, address)
-        sockaddr.si_family = _win_family(family)
+        sockaddr.si_family = win_family(family)
         if family is AddressFamily.IPV6:
             sockaddr.Ipv6.sin6_addr[:] = packed
         else:
@@ -152,7 +140,7 @@ def default_gateway(family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | N
         return None
 
     table = ctypes.POINTER(MIB_IPFORWARD_TABLE2)()
-    if library.GetIpForwardTable2(_win_family(family), ctypes.byref(table)) != _NO_ERROR:
+    if library.GetIpForwardTable2(win_family(family), ctypes.byref(table)) != _NO_ERROR:
         return None
 
     try:

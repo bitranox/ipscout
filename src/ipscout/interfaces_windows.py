@@ -25,7 +25,7 @@ import socket
 from typing import NamedTuple
 
 from .models import AddressFamily, Interface, InterfaceAddress
-from .winapi import iphlpapi
+from .winapi import family_from_win, iphlpapi
 
 __all__ = ["list_interfaces"]
 
@@ -163,11 +163,13 @@ def _sockaddr_text(address: _SocketAddress) -> _IpAddress | None:
     raw = ctypes.string_at(address.lpSockaddr, address.iSockaddrLength)
     if len(raw) < _FAMILY_END:
         return None
-    family = int.from_bytes(raw[:_FAMILY_END], "little")
-    if family == socket.AF_INET and len(raw) >= _IPV4_ADDR.stop:
-        return _IpAddress(AddressFamily.IPV4, socket.inet_ntop(socket.AF_INET, raw[_IPV4_ADDR]))
-    if family == socket.AF_INET6 and len(raw) >= _IPV6_ADDR.stop:
-        return _IpAddress(AddressFamily.IPV6, socket.inet_ntop(socket.AF_INET6, raw[_IPV6_ADDR]))
+    # The field holds Windows' AF_* number, not the running host's: they agree
+    # only on Windows, and these bytes may be decoded anywhere.
+    family = family_from_win(int.from_bytes(raw[:_FAMILY_END], "little"))
+    if family is AddressFamily.IPV4 and len(raw) >= _IPV4_ADDR.stop:
+        return _IpAddress(family, socket.inet_ntop(family.socket_family, raw[_IPV4_ADDR]))
+    if family is AddressFamily.IPV6 and len(raw) >= _IPV6_ADDR.stop:
+        return _IpAddress(family, socket.inet_ntop(family.socket_family, raw[_IPV6_ADDR]))
     return None
 
 

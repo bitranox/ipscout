@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
     from .models import Interface, IPNetwork, Neighbour
 
-__all__ = ["arp_scan", "find_ip_by_mac", "local_networks", "sweep_scope"]
+__all__ = ["DEFAULT_CONCURRENCY", "arp_scan", "find_ip_by_mac", "local_networks", "sweep_scope"]
 
 #: The most addresses one sweep covers, counted across every network in it.
 #: A sweep wider than this is a scan of somebody else's network, not of a

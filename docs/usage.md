@@ -50,9 +50,9 @@ ipscout.ping(
     timeout=2.0,                 # seconds to wait per reply
     interval=0.2,                # seconds between the start of consecutive echoes
     family=None,                 # AddressFamily.IPV4 / IPV6, or None for the resolver preference
-    payload_size=56,             # bytes of ICMP payload
+    payload_size=56,             # bytes of ICMP payload, at most 65507 (IPv4) / 65527 (IPv6)
     allow_tcp_fallback=False,    # probe over TCP when ICMP is unavailable
-    tcp_port=443,                # port used only when the TCP fallback engages
+    tcp_port=443,                # port the TCP fallback uses; checked (1-65535) on every call
     raise_on_error=True,         # False reports failures on .error instead of raising
 )
 ```

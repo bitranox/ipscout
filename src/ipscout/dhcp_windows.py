@@ -40,6 +40,7 @@ import socket
 from typing import TYPE_CHECKING, cast
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
+from .models import AddressFamily
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -125,7 +126,8 @@ def _address_for(interface: str) -> str:
     """
 
     with contextlib.suppress(ValueError):
-        if ipaddress.ip_address(interface).version == 4:  # noqa: PLR2004 - IPv4, and DHCPv4 is IPv4 only
+        # DHCPv4 is IPv4 only, so an IPv6 literal is not an interface it can use.
+        if ipaddress.ip_address(interface).version == AddressFamily.IPV4.ip_version:
             return interface
 
     from .interfaces_windows import list_interfaces  # noqa: PLC0415 - Windows-only import

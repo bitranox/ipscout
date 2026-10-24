@@ -38,7 +38,7 @@ import statistics
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import TYPE_CHECKING, Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field, model_validator
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -66,6 +66,7 @@ __all__ = [
     "NeighbourState",
     "ObserveDhcpReport",
     "PackageInfo",
+    "Port",
     "PortResult",
     "PortScanReport",
     "PortState",
@@ -103,11 +104,6 @@ UNKNOWN_IP = "0.0.0.0"  # noqa: S104  # nosec B104
 MIN_PORT = 1
 MAX_PORT = 65535
 
-#: A port number a remote host can be asked about. Every record carrying one
-#: refuses anything else, so a reader never meets a port no producer could
-#: have probed.
-_Port = Annotated[int, Field(ge=MIN_PORT, le=MAX_PORT)]
-
 
 def require_port(value: int) -> int:
     """Return ``value`` if it is a usable port number, or raise saying why not.
@@ -140,8 +136,11 @@ def require_port(value: int) -> int:
     return value
 
 
-#: Compared against ``ip_address().version``, which speaks numbers.
-_IPV6_VERSION = 6
+#: A port number a remote host can be asked about. Every record carrying one
+#: refuses anything else, so a reader never meets a port no producer could
+#: have probed. The check is ``require_port`` itself rather than a field bound,
+#: so a record and a port list refuse the same mistake in the same words.
+Port = Annotated[int, AfterValidator(require_port)]
 
 
 class _Frozen(BaseModel):
@@ -179,6 +178,43 @@ class AddressFamily(str, enum.Enum):
         """
 
         return socket.IPPROTO_IPV6 if self is AddressFamily.IPV6 else socket.IPPROTO_IP
+
+    @property
+    def ip_version(self) -> int:
+        """Return the number ``ipaddress`` reports as ``.version`` for this family.
+
+        Examples:
+            >>> AddressFamily.IPV6.ip_version
+            6
+
+        """
+
+        return 6 if self is AddressFamily.IPV6 else 4
+
+    @classmethod
+    def of_version(cls, version: int) -> AddressFamily:
+        """Return the family whose ``ip_version`` is ``version``.
+
+        Args:
+            version: An ``ip_address().version`` value.
+
+        Returns:
+            The matching family.
+
+        Raises:
+            ValueError: ``version`` is neither 4 nor 6.
+
+        Examples:
+            >>> AddressFamily.of_version(4) is AddressFamily.IPV4
+            True
+
+        """
+
+        for family in cls:
+            if family.ip_version == version:
+                return family
+        msg = f"no address family has IP version {version}"
+        raise ValueError(msg)
 
 
 class ProbeMethod(str, enum.Enum):
@@ -556,7 +592,7 @@ class Neighbour(_Frozen):
             parsed = ip_address(self.ip)
         except ValueError:  # pragma: no cover - the backends only report literals
             return self.ip
-        if parsed.version != _IPV6_VERSION or not parsed.is_link_local:
+        if parsed.version != AddressFamily.IPV6.ip_version or not parsed.is_link_local:
             return self.ip
         return f"{self.ip}%{self.interface}"
 
@@ -622,7 +658,7 @@ class SubnetInfo(_Frozen):
 class PortResult(_Frozen):
     """One port and what the scan found it to be."""
 
-    port: _Port
+    port: Port
     state: PortState
 
 
@@ -655,7 +691,7 @@ class Banner(_Frozen):
 
     #: The host exactly as the caller gave it, so results key back to the input.
     host: str
-    port: _Port
+    port: Port
     state: BannerState
     #: The decoded first line, terminator and surrounding whitespace removed.
     line: str | None = None
@@ -702,7 +738,7 @@ class WakeReport(_Frozen):
 
     mac: str
     broadcast: str
-    port: _Port
+    port: Port
     sent: bool = True
 
 

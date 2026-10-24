@@ -44,12 +44,15 @@ from .routes import query_route
 from .sockerr import is_refusal
 from .tcpsyn import build_syn, read_reply
 
-__all__ = ["DEFAULT_CONCURRENCY", "MAX_PORT", "ascan_ports", "choose_source_port", "parse_ports", "scan_ports", "syn_scan"]
+__all__ = ["DEFAULT_CONCURRENCY", "DEFAULT_TIMEOUT", "MAX_PORT", "ascan_ports", "choose_source_port", "parse_ports", "scan_ports", "syn_scan"]
 
 IS_WINDOWS = sys.platform == "win32"
 
 #: Enough to finish a wide scan quickly without exhausting file handles.
 DEFAULT_CONCURRENCY = 256
+
+#: Default seconds to wait for one port to answer a connect or a SYN.
+DEFAULT_TIMEOUT = 1.0
 
 #: The ephemeral range a SYN scan picks its source port from, at random.
 #: A predictable choice collides with a concurrent scan in the same
@@ -165,7 +168,7 @@ def _source_for(host: str) -> str | None:
     return name[0] if isinstance(name, tuple) and isinstance(name[0], str) else None
 
 
-def syn_scan(host: str, ports: list[int], *, timeout: float = 1.0) -> dict[int, PortState]:
+def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -> dict[int, PortState]:
     """Scan ports half-open, sending a SYN and never completing the handshake.
 
     Args:
@@ -276,7 +279,7 @@ def scan_ports(
     ports: str | list[int],
     *,
     method: ScanMethod = ScanMethod.CONNECT,
-    timeout: float = 1.0,
+    timeout: float = DEFAULT_TIMEOUT,
     concurrency: int = DEFAULT_CONCURRENCY,
 ) -> dict[int, PortState]:
     """Return the state of each of a set of ports.
@@ -323,7 +326,7 @@ def scan_ports(
     raise RuntimeError(msg)
 
 
-async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = 1.0, concurrency: int = DEFAULT_CONCURRENCY) -> dict[int, PortState]:
+async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = DEFAULT_TIMEOUT, concurrency: int = DEFAULT_CONCURRENCY) -> dict[int, PortState]:
     """Return the state of each of a set of ports, by full connect.
 
     Args:

@@ -19,16 +19,23 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .models import MAX_PORT, MIN_PORT, AddressFamily, ProbeMethod, ResponseObject
-from .packet import DEFAULT_PAYLOAD_SIZE
+from .models import AddressFamily, Port, ProbeMethod, ResponseObject
+from .packet import DEFAULT_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE_IPV4, MAX_PAYLOAD_SIZE_IPV6
 from .transport_tcp import DEFAULT_TCP_PORT
 
 if TYPE_CHECKING:
     from .ports import AsyncEchoTransport, EchoResult, EchoTransport
 
-__all__ = ["DEFAULT_INTERVAL", "DEFAULT_TIMEOUT", "DEFAULT_TIMES", "PingRequest", "arun_ping", "run_ping"]
+__all__ = [
+    "DEFAULT_INTERVAL",
+    "DEFAULT_TIMEOUT",
+    "DEFAULT_TIMES",
+    "PingRequest",
+    "arun_ping",
+    "run_ping",
+]
 
 #: Default echoes per ping, the count Windows ping sends unasked.
 DEFAULT_TIMES = 4
@@ -54,16 +61,21 @@ class PingRequest(BaseModel):
         times: How many echoes to send.
         timeout: Seconds to wait for each individual reply.
         interval: Seconds between the start of consecutive echoes.
-        payload_size: Bytes of ICMP payload per echo. Ignored by the TCP transport.
-        tcp_port: Port the TCP transport connects to. Ignored by ICMP.
+        payload_size: Bytes of ICMP payload per echo. Ignored by the TCP
+            transport, but bounded on every request. A size below the minimum,
+            negative included, is raised to it by the packet builder.
+        tcp_port: Port the TCP transport connects to. Ignored by ICMP, but
+            bounded on every request.
         method: Which protocol the chosen transport represents.
 
     Raises:
         pydantic.ValidationError: ``times`` below 1, ``timeout`` not positive,
-            ``interval`` negative, or ``tcp_port`` outside 1-65535. These
-            are caller mistakes, not network conditions, so they raise
-            regardless of ``raise_on_error``. The bounds live on the fields
-            rather than in a hand-written check, so the constraint and the
+            ``interval`` negative, ``tcp_port`` outside 1-65535, or
+            ``payload_size`` above ``MAX_PAYLOAD_SIZE_IPV4`` /
+            ``MAX_PAYLOAD_SIZE_IPV6`` for ``family``. These are caller
+            mistakes, not network conditions: checked whatever the probe
+            method, before any packet moves. The bounds live on the fields
+            rather than in each caller, so the constraint and the
             documentation cannot drift apart.
 
     Examples:
@@ -84,9 +96,22 @@ class PingRequest(BaseModel):
     times: int = Field(default=DEFAULT_TIMES, ge=1, description="Echoes to send; fewer than one describes no probe at all.")
     timeout: float = Field(default=DEFAULT_TIMEOUT, gt=0, description="Seconds to wait per reply; zero would never wait.")
     interval: float = Field(default=DEFAULT_INTERVAL, ge=0, description="Seconds between echoes; negative is meaningless.")
-    payload_size: int = Field(default=DEFAULT_PAYLOAD_SIZE, description="Bytes of ICMP payload per echo; the packet builder raises it to its minimum.")
-    tcp_port: int = Field(default=DEFAULT_TCP_PORT, ge=MIN_PORT, le=MAX_PORT, description="Port for the TCP transport; outside 1-65535 no connect can be made.")
+    payload_size: int = Field(
+        default=DEFAULT_PAYLOAD_SIZE,
+        description="Bytes of ICMP payload per echo; the packet builder raises it to its minimum, and above the family's maximum it cannot be sent.",
+    )
+    tcp_port: Port = Field(default=DEFAULT_TCP_PORT, description="Port for the TCP transport; outside 1-65535 no connect can be made.")
     method: ProbeMethod = ProbeMethod.ICMP
+
+    @model_validator(mode="after")
+    def _payload_fits_the_family(self) -> PingRequest:
+        # After validation, because the bound depends on the resolved family:
+        # a size only IPv6 can carry is a mistake for IPv4 and fine for IPv6.
+        limit = MAX_PAYLOAD_SIZE_IPV6 if self.family is AddressFamily.IPV6 else MAX_PAYLOAD_SIZE_IPV4
+        if self.payload_size > limit:
+            msg = f"payload_size above the {self.family.value} maximum of {limit} bytes: {self.payload_size}"
+            raise ValueError(msg)
+        return self
 
 
 def _build_response(request: PingRequest, results: list[EchoResult]) -> ResponseObject:

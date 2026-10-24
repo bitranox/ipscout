@@ -28,11 +28,11 @@ from .models import AddressFamily, Neighbour, NeighbourChange, NeighbourState
 from .winapi import (
     MIB_IPNET_ROW2,
     MIB_IPNET_TABLE2,
-    WIN_AF_INET,
-    WIN_AF_INET6,
     WIN_AF_UNSPEC,
+    family_from_win,
     iphlpapi,
     sockaddr_inet_to_string,
+    win_family,
 )
 
 __all__ = [
@@ -165,8 +165,9 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
                 continue
 
             ip = sockaddr_inet_to_string(row.Address)
+            family = family_from_win(int(row.Address.si_family))
             mac = format_mac(bytes(row.PhysicalAddress), int(row.PhysicalAddressLength))
-            if ip is None or mac is None:
+            if ip is None or family is None or mac is None:
                 continue
             try:
                 address = ipaddress.ip_address(ip)
@@ -186,7 +187,7 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
                     mac=mac,
                     interface=interface,
                     state=state,
-                    family=AddressFamily.IPV6 if int(row.Address.si_family) == WIN_AF_INET6 else AddressFamily.IPV4,
+                    family=family,
                 )
             )
         return tuple(found)
@@ -203,9 +204,9 @@ def _resolve_ipv6(library: ctypes.CDLL, ip: str) -> str | None:  # pragma: no co
     """
 
     row = MIB_IPNET_ROW2()
-    row.Address.si_family = WIN_AF_INET6
+    row.Address.si_family = win_family(AddressFamily.IPV6)
     try:
-        row.Address.Ipv6.sin6_addr[:] = socket.inet_pton(socket.AF_INET6, ip)
+        row.Address.Ipv6.sin6_addr[:] = socket.inet_pton(AddressFamily.IPV6.socket_family, ip)
     except OSError:
         return None
 
@@ -294,7 +295,7 @@ def ipv4_neighbour_row(ip: str, mac: bytes, interface_index: int) -> MIB_IPNET_R
     """
 
     row = MIB_IPNET_ROW2()
-    row.Address.Ipv4.sin_family = WIN_AF_INET
+    row.Address.Ipv4.sin_family = win_family(AddressFamily.IPV4)
     row.Address.Ipv4.sin_addr[:] = socket.inet_aton(ip)
     row.InterfaceIndex = interface_index
     row.PhysicalAddress[: len(mac)] = mac

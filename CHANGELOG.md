@@ -7,17 +7,27 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Added
 
-- `ipscout.models.require_port`, `MIN_PORT` and `MAX_PORT`: the one port-range check (1-65535)
-  every entry point taking a port number now applies.
+- `ipscout.models.require_port`, `Port`, `MIN_PORT` and `MAX_PORT`: the one port-range check
+  (1-65535) every entry point and record taking a port number now applies.
+- `ipscout.packet.MAX_PAYLOAD_SIZE_IPV4` (65507) and `MAX_PAYLOAD_SIZE_IPV6` (65527): the most ICMP
+  payload one echo can carry.
+- `AddressFamily.ip_version` and `AddressFamily.of_version()`.
+- `ipscout.portscan.DEFAULT_TIMEOUT` (1.0 s per port), and `DEFAULT_CONCURRENCY` exported from
+  `ipscout.api` and `ipscout.scan`; the CLI options take their defaults from these.
 
 ### Changed
 
 - Every port number is held to 1-65535 the same way, with the message
   `port out of range 1-65535: N`. `scan_ports` / `ascan_ports` / `syn_scan` refuse a port LIST
   holding an out-of-range port with `ValueError` (only a specification string was checked);
-  `grab_banners` / `agrab_banners` keep refusing a bad port, now in that wording; `ping` / `aping`
-  refuse an out-of-range `tcp_port`; and `PortResult`, `Banner` and `WakeReport` refuse one at
-  construction.
+  `grab_banners` / `agrab_banners` keep refusing a bad port, now in that wording; and
+  `PortResult`, `Banner` and `WakeReport` refuse one at construction, where pydantic's
+  `greater than or equal to 1` wording used to appear.
+- `ping` / `aping` / `ping_many` check `tcp_port` on every call, also when no TCP fallback is
+  used: out of range it raises, or with `raise_on_error=False` is reported on `.error`. It used
+  to be ignored unless the fallback engaged.
+- On Windows, `path_mtu()` sends its don't-fragment probes with TTL 128, Windows' own default, as
+  `ping` does. It used 64, so a target more than 64 hops away could not be probed.
 - `Banner` requires `error` exactly when the state is `UNREACHABLE` and refuses an empty one. It
   used to forbid `error` on the other states but allowed an `UNREACHABLE` banner without a reason.
 
@@ -33,6 +43,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   for IPv4, and a socket error from either attempt answers `False` instead of escaping. A
   `tcp_port` outside 1-65535 raised an uncaught `OverflowError` from the connect; it now makes only
   the TCP attempt answer `False`, so a host that answers ICMP still reads as reachable.
+- `ping` / `aping` / `ping_many` refuse a `payload_size` above 65507 bytes for an IPv4 target or
+  65527 for IPv6 (raised, or on `.error` with `raise_on_error=False`). Such an echo cannot be sent,
+  and the failed send was reported as a live host that never answered.
 - `wake_on_lan` refuses a port outside 1-65535 with `ValueError`. It raised an uncaught
   `OverflowError` from the socket layer, which the CLI printed as a traceback.
 

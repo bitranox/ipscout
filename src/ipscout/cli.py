@@ -36,6 +36,7 @@ from rich.style import Style
 from rich.table import Table
 
 from . import __init__conf__
+from .api import DEFAULT_CONCURRENCY as DEFAULT_PING_CONCURRENCY
 from .api import is_reachable, ping, ping_many
 from .banner import DEFAULT_CONCURRENCY as DEFAULT_BANNER_CONCURRENCY
 from .banner import DEFAULT_MAX_LINE_BYTES, grab_banners
@@ -73,19 +74,23 @@ from .models import (
 )
 from .mtu import path_mtu
 from .neighbours import get_mac_address, lookup_mac, neighbours
+from .portscan import DEFAULT_CONCURRENCY as DEFAULT_PORTSCAN_CONCURRENCY
+from .portscan import DEFAULT_TIMEOUT as DEFAULT_PORT_TIMEOUT
 from .portscan import scan_ports
 from .resolve import resolve as resolve_target
 from .resolve import reverse_dns
 from .routes import default_gateway, query_route
+from .scan import DEFAULT_CONCURRENCY as DEFAULT_SWEEP_CONCURRENCY
 from .scan import MAX_SWEEP_HOSTS, arp_scan, find_ip_by_mac, sweep_scope
 from .serialize import dumps, to_jsonable
 from .service import DEFAULT_INTERVAL, DEFAULT_TIMES
 from .service import DEFAULT_TIMEOUT as DEFAULT_PING_TIMEOUT
 from .static_neighbours import remove_neighbour, set_neighbour
 from .subnet import subnet_info
-from .traceroute import traceroute
+from .traceroute import DEFAULT_MAX_HOPS, traceroute
 from .transport_tcp import DEFAULT_TCP_PORT
 from .typed_click import argument, option, version_option
+from .wol import DEFAULT_PORT as DEFAULT_WAKE_PORT
 from .wol import wake_on_lan
 
 if TYPE_CHECKING:
@@ -433,7 +438,7 @@ def cli_ping(  # noqa: PLR0913 - one parameter per documented CLI option; collap
 @argument("targets", nargs=-1, required=True)
 @option("--times", "-c", type=int, default=DEFAULT_TIMES, show_default=True, help="Echoes per target.")
 @option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per reply.")
-@option("--concurrency", type=int, default=64, show_default=True, help="Probes in flight at once.")
+@option("--concurrency", type=int, default=DEFAULT_PING_CONCURRENCY, show_default=True, help="Probes in flight at once.")
 @click.pass_context
 def cli_ping_many(ctx: click.Context, targets: tuple[str, ...], *, times: int, timeout: float, concurrency: int) -> None:
     """Ping many hosts concurrently."""
@@ -474,8 +479,8 @@ def cli_reachable(ctx: click.Context, target: str, *, timeout: float, tcp_port: 
 
 @cli.command("traceroute", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("target")
-@option("--max-hops", type=int, default=30, show_default=True, help="Highest hop limit to try.")
-@option("--timeout", type=float, default=2.0, show_default=True, help="Seconds to wait per hop.")
+@option("--max-hops", type=int, default=DEFAULT_MAX_HOPS, show_default=True, help="Highest hop limit to try.")
+@option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per hop.")
 @option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
 @option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
 @option("--resolve-names", is_flag=True, default=False, help="Reverse-resolve each responding hop.")
@@ -687,7 +692,7 @@ def cli_find_ip(  # noqa: PLR0913 - one parameter per documented CLI option; col
 
 @cli.command("arp-scan", context_settings=CLICK_CONTEXT_SETTINGS)
 @option("--network", default=None, help="CIDR to sweep. Defaults to the subnets this host is attached to.")
-@option("--concurrency", type=int, default=64, show_default=True, help="Probes in flight at once.")
+@option("--concurrency", type=int, default=DEFAULT_SWEEP_CONCURRENCY, show_default=True, help="Probes in flight at once.")
 @option("-4", "ipv4", is_flag=True, default=False, help="Report only IPv4.")
 @option("-6", "ipv6", is_flag=True, default=False, help="Report only IPv6.")
 @click.pass_context
@@ -774,8 +779,8 @@ def cli_subnet(ctx: click.Context, *, interface: str | None) -> None:
 @argument("host")
 @option("--ports", required=True, help="Ports and ranges, as in 22,80,443,8000-8100.")
 @option("--syn", is_flag=True, default=False, help="Half-open SYN scan. Needs root or CAP_NET_RAW.")
-@option("--timeout", type=float, default=1.0, show_default=True, help="Seconds to wait per port.")
-@option("--concurrency", type=int, default=256, show_default=True, help="Connects in flight at once.")
+@option("--timeout", type=float, default=DEFAULT_PORT_TIMEOUT, show_default=True, help="Seconds to wait per port.")
+@option("--concurrency", type=int, default=DEFAULT_PORTSCAN_CONCURRENCY, show_default=True, help="Connects in flight at once.")
 @click.pass_context
 def cli_scan_ports(  # noqa: PLR0913 - one parameter per CLI option, which is the point of the command
     ctx: click.Context,
@@ -936,7 +941,7 @@ def cli_mtu(ctx: click.Context, target: str, *, ipv4: bool, ipv6: bool) -> None:
 @cli.command("wake", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("mac")
 @option("--broadcast", default="255.255.255.255", show_default=True, help="Where to send the magic packet.")
-@option("--port", type=int, default=9, show_default=True, help="UDP port. The NIC matches the payload, not the port.")
+@option("--port", type=int, default=DEFAULT_WAKE_PORT, show_default=True, help="UDP port. The NIC matches the payload, not the port.")
 @click.pass_context
 def cli_wake(ctx: click.Context, mac: str, *, broadcast: str, port: int) -> None:
     """Send a wake-on-LAN magic packet."""

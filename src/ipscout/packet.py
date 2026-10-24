@@ -48,7 +48,10 @@ __all__ = [
     "ECHO_REQUEST_V4",
     "ECHO_REQUEST_V6",
     "HEADER_SIZE",
+    "IPV4_MIN_HEADER_SIZE",
     "MAGIC",
+    "MAX_PAYLOAD_SIZE_IPV4",
+    "MAX_PAYLOAD_SIZE_IPV6",
     "TOKEN_SIZE",
     "EchoPayload",
     "EchoRequest",
@@ -84,10 +87,20 @@ MIN_PAYLOAD_SIZE = len(MAGIC) + TOKEN_SIZE
 #: Default bytes of ICMP payload per echo, the size the system ping sends.
 DEFAULT_PAYLOAD_SIZE = 56
 
-#: IPv4 version nibble, and the smallest legal IPv4 header. Used to recognise a
+#: The smallest legal IPv4 header, one without options. Used to recognise a
 #: header that some platforms prepend to a received ICMP datagram.
-_IPV4_VERSION = 4
-_IPV4_MIN_HEADER = 20
+IPV4_MIN_HEADER_SIZE = 20
+
+#: The largest datagram an IP length field can describe.
+_MAX_IP_LENGTH = 65535
+
+#: The most ICMP payload one echo can carry, per family: what the length field
+#: leaves after the headers it counts. IPv4's length counts its own header;
+#: IPv6's payload length does not count IPv6's fixed header, so only IPv4 pays
+#: it. A larger payload cannot be sent at all, and the failed send would read
+#: as a host that never answered.
+MAX_PAYLOAD_SIZE_IPV4 = _MAX_IP_LENGTH - IPV4_MIN_HEADER_SIZE - HEADER_SIZE
+MAX_PAYLOAD_SIZE_IPV6 = _MAX_IP_LENGTH - HEADER_SIZE
 
 
 class EchoPayload(BaseModel):
@@ -339,10 +352,10 @@ def strip_ip_header(datagram: bytes) -> bytes:
 
     """
 
-    if len(datagram) < _IPV4_MIN_HEADER or (datagram[0] >> 4) != _IPV4_VERSION:
+    if len(datagram) < IPV4_MIN_HEADER_SIZE or (datagram[0] >> 4) != AddressFamily.IPV4.ip_version:
         return datagram
     header_len = (datagram[0] & 0x0F) * 4
-    if header_len < _IPV4_MIN_HEADER or header_len >= len(datagram):
+    if header_len < IPV4_MIN_HEADER_SIZE or header_len >= len(datagram):
         return datagram
     return datagram[header_len:]
 

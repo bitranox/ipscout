@@ -8,6 +8,7 @@ here, which is what keeps the no-admin promise on this platform.
 Contents:
     WindowsEchoTransport: Synchronous transport.
     AsyncWindowsEchoTransport: Executor-backed asyncio transport.
+    ipv6_destination: The ``SOCKADDR_IN6`` an IPv6 echo is sent to.
 
 Two honest limitations, stated rather than hidden:
 
@@ -37,7 +38,7 @@ import concurrent.futures
 import ctypes
 import socket
 import time
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING
 
 from . import packet, winapi
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
@@ -48,34 +49,11 @@ from .resolve import split_zone, zone_index
 if TYPE_CHECKING:
     from types import TracebackType
 
-__all__ = ["AsyncWindowsEchoTransport", "WindowsEchoTransport", "windows_icmp_available"]
-
-#: Headroom above the echoed payload, as the API documentation requires: the
-#: reply buffer must also be able to hold an ICMP error message.
-_REPLY_HEADROOM = 64
+__all__ = ["AsyncWindowsEchoTransport", "WindowsEchoTransport", "ipv6_destination", "windows_icmp_available"]
 
 #: Threads serving the async variant. Bounded, because each in-flight probe
 #: occupies one for the duration of its timeout.
 _MAX_WORKERS = 32
-
-
-class _LastErrorGetter(Protocol):
-    """The shape of ``ctypes.get_last_error``."""
-
-    def __call__(self) -> int: ...
-
-
-def _last_error() -> int:
-    """Return the thread's last Win32 error code, or 0 where there is none.
-
-    ``ctypes.get_last_error`` is declared Windows-only in the type stubs, so a
-    direct attribute access would fail type checking on every other platform
-    even though the call is guarded. Reaching it dynamically through a typed
-    facade keeps the call site fully typed without silencing the checker.
-    """
-
-    getter = cast("_LastErrorGetter | None", getattr(ctypes, "get_last_error", None))
-    return getter() if getter is not None else 0
 
 
 def windows_icmp_available() -> bool:
@@ -95,6 +73,30 @@ def windows_icmp_available() -> bool:
         return False
     library.IcmpCloseHandle(handle)  # pragma: no cover - Windows only
     return True  # pragma: no cover - Windows only
+
+
+def ipv6_destination(address: str) -> winapi.SOCKADDR_IN6:
+    """Build the ``SOCKADDR_IN6`` an ``Icmp6SendEcho2`` request is sent to.
+
+    Args:
+        address: An IPv6 literal, optionally with a ``%zone`` suffix.
+
+    Returns:
+        The structure, carrying Windows' ``AF_INET6`` number and the zone's
+        interface index as its scope id.
+
+    Examples:
+        >>> sockaddr = ipv6_destination("2001:db8::1")
+        >>> sockaddr.sin6_family == winapi.WIN_AF_INET6, sockaddr.sin6_scope_id
+        (True, 0)
+
+    """
+
+    # A zone names the link, and only the scope-id field can carry it:
+    # inet_pton parses an address alone and rejects the scoped text.
+    bare, zone = split_zone(address)
+    packed = socket.inet_pton(AddressFamily.IPV6.socket_family, bare)
+    return winapi.sockaddr_in6(packed, scope_id=zone_index(zone) if zone is not None else 0)
 
 
 class WindowsEchoTransport:
@@ -127,7 +129,7 @@ class WindowsEchoTransport:
         opener = self._library.Icmp6CreateFile if self._family is AddressFamily.IPV6 else self._library.IcmpCreateFile
         handle = opener()
         if not handle or handle == winapi.INVALID_HANDLE_VALUE:
-            msg = f"could not open an ICMP handle via iphlpapi (error {_last_error()})"
+            msg = f"could not open an ICMP handle via iphlpapi (error {winapi.last_error()})"
             raise IPScoutPermissionError(msg)
         return int(handle)
 
@@ -147,7 +149,7 @@ class WindowsEchoTransport:
         """Build the request options carrying the requested hop limit."""
 
         return winapi.IP_OPTION_INFORMATION(
-            Ttl=ttl if ttl is not None else 128,
+            Ttl=ttl if ttl is not None else winapi.DEFAULT_TTL,
             Tos=0,
             Flags=0,
             OptionsSize=0,
@@ -186,7 +188,7 @@ class WindowsEchoTransport:
         """Issue an IPv4 echo through ``IcmpSendEcho``."""
 
         request = ctypes.create_string_buffer(payload, len(payload))
-        reply_size = ctypes.sizeof(winapi.ICMP_ECHO_REPLY) + len(payload) + _REPLY_HEADROOM
+        reply_size = winapi.reply_buffer_size(winapi.ICMP_ECHO_REPLY, len(payload))
         reply_buffer = ctypes.create_string_buffer(reply_size)
         options = self._options(ttl)
 
@@ -213,19 +215,12 @@ class WindowsEchoTransport:
         """Issue an IPv6 echo through ``Icmp6SendEcho2``."""
 
         request = ctypes.create_string_buffer(payload, len(payload))
-        reply_size = ctypes.sizeof(winapi.ICMPV6_ECHO_REPLY) + len(payload) + _REPLY_HEADROOM
+        reply_size = winapi.reply_buffer_size(winapi.ICMPV6_ECHO_REPLY, len(payload))
         reply_buffer = ctypes.create_string_buffer(reply_size)
         options = self._options(ttl)
 
-        source_address = winapi.SOCKADDR_IN6(sin6_family=socket.AF_INET6)
-        destination = winapi.SOCKADDR_IN6(sin6_family=socket.AF_INET6)
-        # A zone names the link, and only the scope-id field can carry it:
-        # inet_pton parses an address alone and rejects the scoped text.
-        bare, zone = split_zone(self._address)
-        packed = socket.inet_pton(socket.AF_INET6, bare)
-        ctypes.memmove(destination.sin6_addr, packed, len(packed))
-        if zone is not None:
-            destination.sin6_scope_id = zone_index(zone)
+        source_address = winapi.sockaddr_in6()
+        destination = ipv6_destination(self._address)
 
         started = time.perf_counter()
         replies = self._library.Icmp6SendEcho2(

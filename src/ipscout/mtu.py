@@ -20,6 +20,7 @@ Note:
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import socket
 import sys
 from typing import NamedTuple
@@ -27,6 +28,17 @@ from typing import NamedTuple
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily
 from .resolve import resolve_one
+from .service import DEFAULT_TIMEOUT
+from .winapi import (
+    DEFAULT_TTL,
+    ICMP_ECHO_REPLY,
+    INVALID_HANDLE_VALUE,
+    IP_OPTION_INFORMATION,
+    iphlpapi,
+    last_error,
+    reply_buffer_size,
+    string_to_ipv4,
+)
 
 __all__ = ["path_mtu"]
 
@@ -70,6 +82,10 @@ _IP_FLAG_DF = 0x02
 #: IP_PACKET_TOO_BIG: the reply saying the probe would have to fragment.
 _IP_PACKET_TOO_BIG = 11009
 
+#: How long each Windows probe waits for its reply, in the whole milliseconds
+#: IcmpSendEcho takes: the same per-echo wait a ping uses by default.
+_PROBE_TIMEOUT_MS = round(DEFAULT_TIMEOUT * 1000)
+
 #: The search bounds for the Windows probe. 68 is the smallest IPv4 MTU a host
 #: must support; 9000 covers jumbo frames.
 _MIN_MTU = 68
@@ -111,17 +127,6 @@ def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
     largest payload that is not answered with "packet too big" is the answer.
     """
 
-    import ctypes  # noqa: PLC0415 - used only on this path
-
-    from .winapi import (  # noqa: PLC0415 - Windows-only import
-        ICMP_ECHO_REPLY,
-        INVALID_HANDLE_VALUE,
-        IP_OPTION_INFORMATION,
-        iphlpapi,
-        last_error,
-        string_to_ipv4,
-    )
-
     try:
         library = iphlpapi()
     except IPScoutUnsupportedError:
@@ -132,10 +137,10 @@ def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
         return None
 
     def fits(payload: int) -> bool:
-        options = IP_OPTION_INFORMATION(Ttl=64, Tos=0, Flags=_IP_FLAG_DF, OptionsSize=0, OptionsData=None)
+        options = IP_OPTION_INFORMATION(Ttl=DEFAULT_TTL, Tos=0, Flags=_IP_FLAG_DF, OptionsSize=0, OptionsData=None)
         request = b"\x00" * payload
-        reply = (ctypes.c_uint8 * (payload + ctypes.sizeof(ICMP_ECHO_REPLY) + 64))()
-        count = library.IcmpSendEcho(handle, string_to_ipv4(address), request, payload, ctypes.byref(options), reply, len(reply), 2000)
+        reply = (ctypes.c_uint8 * reply_buffer_size(ICMP_ECHO_REPLY, payload))()
+        count = library.IcmpSendEcho(handle, string_to_ipv4(address), request, payload, ctypes.byref(options), reply, len(reply), _PROBE_TIMEOUT_MS)
         if count:
             return True
         return last_error() != _IP_PACKET_TOO_BIG

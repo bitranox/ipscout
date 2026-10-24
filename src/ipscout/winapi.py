@@ -9,6 +9,7 @@ is the entire reason this module exists rather than reusing the POSIX path.
 Contents:
     Structures mirroring the C layouts in ``ipexport.h`` and ``iphlpapi.h``.
     iphlpapi: Lazily loaded, cached handle to the DLL.
+    win_family / family_from_win: Windows' own ``AF_*`` numbering, both ways.
     status_message: Human-readable text for an ``IP_STATUS`` code.
 
 Fixed-width integers, deliberately:
@@ -37,10 +38,13 @@ import struct
 import sys
 
 from .errors import IPScoutUnsupportedError
+from .models import AddressFamily
 
 __all__ = [
+    "DEFAULT_TTL",
     "ICMPV6_ECHO_REPLY",
     "ICMP_ECHO_REPLY",
+    "ICMP_REPLY_HEADROOM",
     "INVALID_HANDLE_VALUE",
     "IPV6_ADDRESS_EX",
     "IP_ADDRESS_PREFIX",
@@ -61,13 +65,17 @@ __all__ = [
     "WIN_AF_INET",
     "WIN_AF_INET6",
     "WIN_AF_UNSPEC",
+    "family_from_win",
     "iphlpapi",
     "ipv4_to_string",
     "ipv6_words_to_string",
     "last_error",
+    "reply_buffer_size",
+    "sockaddr_in6",
     "sockaddr_inet_to_string",
     "status_message",
     "string_to_ipv4",
+    "win_family",
 ]
 
 #: ``IP_STATUS`` values this library actually distinguishes.
@@ -84,6 +92,16 @@ IP_REQ_TIMED_OUT = 11010
 IP_TTL_EXPIRED_TRANSIT = 11013
 
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+#: Windows' own default IP time-to-live: what ``ping.exe`` sends, and the hop
+#: limit an ``IcmpSendEcho`` request carries when its caller asks for none.
+DEFAULT_TTL = 128
+
+#: Bytes an echo reply buffer holds beyond the reply structure and the echoed
+#: payload. The ``IcmpSendEcho`` documentation requires room for an ICMP error
+#: message as well, which is at least 8 bytes; 64 leaves margin for the IP
+#: options a router may quote back.
+ICMP_REPLY_HEADROOM = 64
 
 _STATUS_TEXT = {
     IP_SUCCESS: "success",
@@ -339,6 +357,103 @@ WIN_AF_INET = 2
 WIN_AF_INET6 = 23
 
 
+def win_family(family: AddressFamily) -> int:
+    """Return the Windows ``AF_*`` number for an address family.
+
+    Not :attr:`AddressFamily.socket_family`: Windows numbers ``AF_INET6`` as
+    23, where Linux uses 10 and macOS 30, and the iphlpapi structures carry
+    the Windows number whatever platform builds them.
+
+    Args:
+        family: The family to encode.
+
+    Returns:
+        :data:`WIN_AF_INET` or :data:`WIN_AF_INET6`.
+
+    Examples:
+        >>> win_family(AddressFamily.IPV6)
+        23
+        >>> win_family(AddressFamily.IPV4)
+        2
+
+    """
+
+    return WIN_AF_INET6 if family is AddressFamily.IPV6 else WIN_AF_INET
+
+
+def family_from_win(value: int) -> AddressFamily | None:
+    """Return the address family a Windows ``AF_*`` number names.
+
+    Args:
+        value: The family field read out of an iphlpapi structure.
+
+    Returns:
+        The family, or ``None`` for any number other than :data:`WIN_AF_INET`
+        and :data:`WIN_AF_INET6`. ``AF_UNSPEC`` is the common case: an
+        on-link next hop comes back with family zero.
+
+    Examples:
+        >>> family_from_win(WIN_AF_INET6)
+        <AddressFamily.IPV6: 'ipv6'>
+        >>> family_from_win(WIN_AF_UNSPEC) is None
+        True
+
+    """
+
+    if value == WIN_AF_INET6:
+        return AddressFamily.IPV6
+    if value == WIN_AF_INET:
+        return AddressFamily.IPV4
+    return None
+
+
+#: ``in6addr_any``, the all-zero IPv6 address.
+_IN6ADDR_ANY = bytes(16)
+
+
+def sockaddr_in6(packed: bytes = _IN6ADDR_ANY, *, scope_id: int = 0) -> SOCKADDR_IN6:
+    """Build a ``SOCKADDR_IN6`` carrying Windows' own ``AF_INET6`` number.
+
+    Args:
+        packed: The 16-byte address; the default is the unspecified address,
+            which is what ``Icmp6SendEcho2`` takes as "any source".
+        scope_id: The interface index a link-local address is scoped to.
+
+    Returns:
+        The structure, its family field set to :data:`WIN_AF_INET6` rather
+        than the host's ``socket.AF_INET6``, which is 10 on Linux.
+
+    Examples:
+        >>> sockaddr_in6().sin6_family
+        23
+
+    """
+
+    sockaddr = SOCKADDR_IN6(sin6_family=WIN_AF_INET6, sin6_scope_id=scope_id)
+    sockaddr.sin6_addr[:] = packed
+    return sockaddr
+
+
+def reply_buffer_size(reply: type[ctypes.Structure], payload_size: int) -> int:
+    """Return the bytes an echo reply buffer needs for one reply.
+
+    Args:
+        reply: The reply structure the call writes, :class:`ICMP_ECHO_REPLY`
+            or :class:`ICMPV6_ECHO_REPLY`.
+        payload_size: Bytes of payload the request echoes.
+
+    Returns:
+        The structure, the echoed payload and :data:`ICMP_REPLY_HEADROOM`.
+
+    Examples:
+        >>> reply_buffer_size(ICMP_ECHO_REPLY, 0) == ctypes.sizeof(ICMP_ECHO_REPLY) + ICMP_REPLY_HEADROOM
+        True
+
+    """
+
+    return ctypes.sizeof(reply) + payload_size + ICMP_REPLY_HEADROOM
+
+
 def last_error() -> int:
     """Return the thread's last Windows error code, or 0 elsewhere.
 
@@ -378,11 +493,11 @@ def sockaddr_inet_to_string(sockaddr: SOCKADDR_INET) -> str | None:
 
     """
 
-    family = sockaddr.si_family
-    if family == WIN_AF_INET:
-        return socket.inet_ntop(socket.AF_INET, bytes(sockaddr.Ipv4.sin_addr))
-    if family == WIN_AF_INET6:
-        return socket.inet_ntop(socket.AF_INET6, bytes(sockaddr.Ipv6.sin6_addr))
+    family = family_from_win(int(sockaddr.si_family))
+    if family is AddressFamily.IPV4:
+        return socket.inet_ntop(family.socket_family, bytes(sockaddr.Ipv4.sin_addr))
+    if family is AddressFamily.IPV6:
+        return socket.inet_ntop(family.socket_family, bytes(sockaddr.Ipv6.sin6_addr))
     return None
 
 
