@@ -37,13 +37,15 @@ import statistics
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, computed_field
+from pydantic import BaseModel, ConfigDict, computed_field, model_validator
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
 __all__ = [
     "AddressFamily",
+    "Banner",
+    "BannerState",
     "CapabilityReport",
     "CommandName",
     "FindIpReport",
@@ -152,6 +154,26 @@ class PortState(str, enum.Enum):
     OPEN = "open"
     CLOSED = "closed"
     FILTERED = "filtered"
+
+
+class BannerState(str, enum.Enum):
+    """What one banner grab got back from one host.
+
+    Four states rather than "a line or None": a host that accepted the
+    connection and said nothing is up, a host that refused is up and has
+    nothing on that port, and only an unreachable host is unaccounted for.
+    A caller that retries wants the second, and a caller that inventories
+    wants the first, so neither may be folded into "no banner".
+    """
+
+    #: Connected, and the server sent at least one byte before the deadline.
+    GREETED = "greeted"
+    #: Connected, but nothing arrived before the deadline or the close.
+    SILENT = "silent"
+    #: The host actively refused the connection.
+    REFUSED = "refused"
+    #: No connection: timed out, unroutable, or the name did not resolve.
+    UNREACHABLE = "unreachable"
 
 
 class ScanMethod(str, enum.Enum):
@@ -544,6 +566,41 @@ class PortScanReport(_Frozen):
     host: str
     method: ScanMethod = ScanMethod.CONNECT
     ports: tuple[PortResult, ...] = ()
+
+
+class Banner(_Frozen):
+    """The first line one host sent on one TCP port, and how the attempt went.
+
+    ``line`` is set exactly when the state is GREETED, and ``error`` only when
+    it is UNREACHABLE; any other pairing is refused at construction, so a
+    reader can trust the state alone instead of re-checking both fields.
+
+    Examples:
+        >>> Banner(host="printer.test", port=21, state=BannerState.GREETED, line="220 ready").line
+        '220 ready'
+        >>> Banner(host="printer.test", port=21, state=BannerState.REFUSED).line is None
+        True
+
+    """
+
+    #: The host exactly as the caller gave it, so results key back to the input.
+    host: str
+    port: int
+    state: BannerState
+    #: The decoded first line, terminator and surrounding whitespace removed.
+    line: str | None = None
+    #: Why the host was unreachable, in the resolver's or the OS's words.
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _fields_agree_with_state(self) -> Banner:
+        if (self.line is not None) != (self.state is BannerState.GREETED):
+            msg = "line is set exactly when state is GREETED"
+            raise ValueError(msg)
+        if self.error is not None and self.state is not BannerState.UNREACHABLE:
+            msg = "error is set only when state is UNREACHABLE"
+            raise ValueError(msg)
+        return self
 
 
 class MtuReport(_Frozen):

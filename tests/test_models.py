@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from ipscout.models import AddressFamily, MacLookup, MacScope, Neighbour, ProbeMethod, ResponseObject
+from ipscout.models import AddressFamily, Banner, BannerState, MacLookup, MacScope, Neighbour, ProbeMethod, ResponseObject
 
 
 def _reply(*rtts: float | None, target: str = "example.test", ip: str = "10.0.0.1") -> ResponseObject:
@@ -206,3 +206,40 @@ def test_the_usable_form_is_serialised_rather_than_dropped() -> None:
     payload = Neighbour(ip="fe80::1", interface="eth0").model_dump(mode="json")
 
     assert payload["scoped"] == "fe80::1%eth0"
+
+
+@pytest.mark.os_agnostic
+def test_a_greeting_is_carried_with_its_line() -> None:
+    banner = Banner(host="printer.test", port=21, state=BannerState.GREETED, line="220 Print Server Ready.")
+
+    assert banner.line == "220 Print Server Ready."
+    assert banner.error is None
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("state", [BannerState.SILENT, BannerState.REFUSED, BannerState.UNREACHABLE])
+def test_only_a_greeting_carries_a_line(state: BannerState) -> None:
+    # A line on a host that never spoke would be read as what it said.
+    with pytest.raises(ValidationError):
+        Banner(host="h.test", port=21, state=state, line="220 ready")
+
+
+@pytest.mark.os_agnostic
+def test_a_greeting_without_a_line_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        Banner(host="h.test", port=21, state=BannerState.GREETED)
+
+
+@pytest.mark.os_agnostic
+@pytest.mark.parametrize("state", [BannerState.GREETED, BannerState.SILENT, BannerState.REFUSED])
+def test_only_an_unreachable_host_carries_an_error(state: BannerState) -> None:
+    line = "220 ready" if state is BannerState.GREETED else None
+    with pytest.raises(ValidationError):
+        Banner(host="h.test", port=21, state=state, line=line, error="boom")
+
+
+@pytest.mark.os_agnostic
+def test_a_banner_serialises_its_state_as_the_enum_value() -> None:
+    payload = Banner(host="h.test", port=22, state=BannerState.UNREACHABLE, error="timed out").model_dump(mode="json")
+
+    assert payload == {"host": "h.test", "port": 22, "state": "unreachable", "line": None, "error": "timed out"}
