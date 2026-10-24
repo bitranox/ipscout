@@ -219,8 +219,24 @@ def test_a_port_scan_of_a_name_that_does_not_resolve_raises_rather_than_reportin
         scan_ports("nothing.invalid", [80], timeout=0.2)
 
 
-def test_a_port_scan_of_a_name_asks_the_address_it_resolves_to(listening_port: int) -> None:
-    assert scan_ports("localhost", [listening_port], timeout=1.0)[listening_port] is ipscout.PortState.OPEN
+@pytest.fixture
+def port_listening_where_localhost_resolves() -> Iterator[int]:
+    # The resolver's first answer for "localhost" differs by host: 127.0.0.1
+    # on some, ::1 on the GitHub runners, so the listener follows it rather
+    # than assuming IPv4.
+    family, _, _, _, sockaddr = socket.getaddrinfo("localhost", None, type=socket.SOCK_STREAM)[0]
+    listener = socket.socket(family, socket.SOCK_STREAM)
+    listener.bind((sockaddr[0], 0))
+    listener.listen(8)
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        listener.close()
+
+
+def test_a_port_scan_of_a_name_asks_the_address_it_resolves_to(port_listening_where_localhost_resolves: int) -> None:
+    port = port_listening_where_localhost_resolves
+    assert scan_ports("localhost", [port], timeout=1.0)[port] is ipscout.PortState.OPEN
 
 
 # --- banners --------------------------------------------------------------------------
