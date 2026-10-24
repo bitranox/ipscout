@@ -38,6 +38,8 @@ from .service import PingRequest, arun_ping, run_ping
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from .resolve import ResolvedTarget
+
 __all__ = [
     "ais_reachable",
     "aping",
@@ -60,18 +62,17 @@ def _probe_method(family: AddressFamily | None, *, allow_tcp_fallback: bool) -> 
     return ProbeMethod.ICMP
 
 
-def _prepare(  # noqa: PLR0913 - public API: every knob is keyword-only and independently useful
+def _request(  # noqa: PLR0913 - mirrors the public API's knobs, every one keyword-only and independently useful
     target: str,
+    resolved: ResolvedTarget,
     times: int,
     timeout: float,
     interval: float,
-    family: AddressFamily | None,
     *,
     method: ProbeMethod,
 ) -> PingRequest:
-    """Resolve the target and validate the parameters into a request."""
+    """Validate the parameters into a request for an already-resolved target."""
 
-    resolved = resolve_one(target, family=family)
     return PingRequest(
         target=target,
         address=resolved.address,
@@ -152,7 +153,8 @@ def ping(  # noqa: PLR0913 - public API: every knob is keyword-only and independ
 
     try:
         method = _probe_method(family, allow_tcp_fallback=allow_tcp_fallback)
-        request = _prepare(target, times, timeout, interval, family, method=method)
+        resolved = resolve_one(target, family=family)
+        request = _request(target, resolved, times, timeout, interval, method=method)
         with make_transport(
             request.address,
             request.family,
@@ -203,7 +205,10 @@ async def aping(  # noqa: PLR0913 - public API: every knob is keyword-only and i
 
     try:
         method = _probe_method(family, allow_tcp_fallback=allow_tcp_fallback)
-        request = _prepare(target, times, timeout, interval, family, method=method)
+        # getaddrinfo blocks for as long as the name server takes; on the loop
+        # thread one slow name would stall every other probe in a sweep.
+        resolved = await asyncio.to_thread(resolve_one, target, family=family)
+        request = _request(target, resolved, times, timeout, interval, method=method)
         transport = make_async_transport(
             request.address,
             request.family,
@@ -425,7 +430,7 @@ async def ais_reachable(
         return True
 
     try:
-        resolved = resolve_one(target, family=family)
+        resolved = await asyncio.to_thread(resolve_one, target, family=family)
         transport = make_async_transport(resolved.address, resolved.family, method=ProbeMethod.TCP, tcp_port=tcp_port)
         async with transport:
             return (await transport.probe(sequence=1, timeout=timeout)).answered

@@ -8,7 +8,9 @@ target answers at hop 1.
 from __future__ import annotations
 
 import asyncio
+import socket
 import sys
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
@@ -183,6 +185,28 @@ def test_the_async_walk_agrees_with_the_sync_one() -> None:
     async_hops = asyncio.run(atrace_path(AsyncScriptedPath(dict(script)), max_hops=5))
 
     assert [(h.ttl, h.address, h.reached) for h in sync_hops] == [(h.ttl, h.address, h.reached) for h in async_hops]
+
+
+def test_the_async_walk_looks_up_hop_names_off_the_event_loop_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    # gethostbyaddr blocks for as long as the name server takes, once per hop;
+    # on the loop thread that stalls every other task for the whole walk.
+    lookup_threads: list[int] = []
+
+    def fake_gethostbyaddr(ip: str) -> tuple[str, list[str], list[str]]:
+        lookup_threads.append(threading.get_ident())
+        return "hop.example", [], [ip]
+
+    monkeypatch.setattr(socket, "gethostbyaddr", fake_gethostbyaddr)
+    script = {1: _router("192.0.2.1", 1.0), 2: _target("192.0.2.9", 2.0)}
+
+    async def walk() -> tuple[list[ipscout.TraceHop], int]:
+        return await atrace_path(AsyncScriptedPath(script), max_hops=5, resolve_names=True), threading.get_ident()
+
+    hops, loop_thread = asyncio.run(walk())
+
+    assert [hop.hostname for hop in hops] == ["hop.example", "hop.example"]
+    assert len(lookup_threads) == 2
+    assert loop_thread not in lookup_threads
 
 
 def test_the_async_walk_refuses_a_transport_that_cannot_observe_expiry() -> None:

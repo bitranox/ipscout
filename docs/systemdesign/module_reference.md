@@ -104,8 +104,11 @@ caller asked for and what the machine could do. A transport reports what happene
 ### Data flow, one ping
 
 1. `api.ping` resolves the target once through `resolve.resolve_one`, which fixes the address
-   family up front rather than guessing it later.
-2. `api._prepare` builds a `service.PingRequest`. Pydantic field bounds reject a bad `times`,
+   family up front rather than guessing it later. The async entry points (`aping`,
+   `ais_reachable`, `atraceroute`, and the hop names of `atrace_path`) run that lookup in a worker
+   thread, because `getaddrinfo` blocks for as long as the name server takes and one slow name on
+   the loop thread would stall every other probe in a sweep.
+2. `api._request` builds a `service.PingRequest`. Pydantic field bounds reject a bad `times`,
    `timeout` or `interval` here, before any packet moves, identically for every caller path.
 3. `factory.make_transport` picks the backend.
 4. `service.run_ping` sends the echoes, paced against the run's start so a slow reply does not push

@@ -5,6 +5,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Fixed
+
+- `aping`, `aping_many`, `ais_reachable` and `atraceroute` resolve their target in a worker
+  thread, and `atrace_path(resolve_names=True)` looks up each hop's name there too. They called
+  `getaddrinfo` / `gethostbyaddr` on the event-loop thread, so one slow name server stalled every
+  other task in the loop: in `aping_many`, one slow name held up the whole sweep.
+
 ## [2.1.0] 2026-10-24 17:18:42
 
 ### Added

@@ -32,6 +32,7 @@ Note:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from .errors import IPScoutUnsupportedError
@@ -63,7 +64,15 @@ def _require_discovery(supports: bool) -> None:  # noqa: FBT001 - a capability a
         raise IPScoutUnsupportedError(_UNSUPPORTED)
 
 
-def _to_hop(ttl: int, result: EchoResult, *, resolve_names: bool) -> TraceHop:
+def _name_to_look_up(result: EchoResult, *, resolve_names: bool) -> str | None:
+    """Return the hop address whose reverse-DNS name is wanted, or None."""
+
+    if resolve_names and result.answered and result.source:
+        return result.source
+    return None
+
+
+def _to_hop(ttl: int, result: EchoResult, *, hostname: str | None) -> TraceHop:
     """Turn one probe outcome into the hop it represents.
 
     A router reporting Time Exceeded is an intermediate hop; anything else that
@@ -74,7 +83,6 @@ def _to_hop(ttl: int, result: EchoResult, *, resolve_names: bool) -> TraceHop:
 
     if not result.answered:
         return TraceHop(ttl=ttl)
-    hostname = reverse_dns(result.source) if (resolve_names and result.source) else None
     return TraceHop(
         ttl=ttl,
         address=result.source,
@@ -131,7 +139,9 @@ def trace_path(
 
     hops: list[TraceHop] = []
     for ttl in range(1, max_hops + 1):
-        hop = _to_hop(ttl, transport.probe(sequence=ttl, timeout=timeout, ttl=ttl), resolve_names=resolve_names)
+        result = transport.probe(sequence=ttl, timeout=timeout, ttl=ttl)
+        source = _name_to_look_up(result, resolve_names=resolve_names)
+        hop = _to_hop(ttl, result, hostname=reverse_dns(source) if source else None)
         hops.append(hop)
         if hop.reached:
             break
@@ -174,7 +184,11 @@ async def atrace_path(
     hops: list[TraceHop] = []
     for ttl in range(1, max_hops + 1):
         result = await transport.probe(sequence=ttl, timeout=timeout, ttl=ttl)
-        hop = _to_hop(ttl, result, resolve_names=resolve_names)
+        source = _name_to_look_up(result, resolve_names=resolve_names)
+        # gethostbyaddr blocks for as long as the name server takes, once per
+        # hop; on the loop thread that stalls every other task for the walk.
+        hostname = await asyncio.to_thread(reverse_dns, source) if source else None
+        hop = _to_hop(ttl, result, hostname=hostname)
         hops.append(hop)
         if hop.reached:
             break
@@ -231,7 +245,7 @@ async def atraceroute(
 
     """
 
-    resolved = resolve_one(target, family=family)
+    resolved = await asyncio.to_thread(resolve_one, target, family=family)
     transport = make_async_transport(resolved.address, resolved.family)
     async with transport:
         return await atrace_path(transport, max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)
