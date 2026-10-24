@@ -23,6 +23,8 @@ Note:
 from __future__ import annotations
 
 import enum
+import ipaddress
+import re
 import sys
 from typing import TYPE_CHECKING
 
@@ -35,12 +37,16 @@ from rich.table import Table
 
 from . import __init__conf__
 from .api import is_reachable, ping, ping_many
+from .banner import DEFAULT_CONCURRENCY as DEFAULT_BANNER_CONCURRENCY
+from .banner import DEFAULT_MAX_LINE_BYTES, grab_banners
+from .banner import DEFAULT_TIMEOUT as DEFAULT_BANNER_TIMEOUT
 from .dhcp import DEFAULT_SETTLE, DEFAULT_TIMEOUT, dhcp_capture_available, observe_dhcp
-from .errors import IPScoutError
+from .errors import IPScoutError, IPScoutSweepTooWideError
 from .factory import icmp_available
 from .interfaces import local_interfaces
 from .models import (
     AddressFamily,
+    BannerState,
     CapabilityReport,
     CommandName,
     FindIpReport,
@@ -71,7 +77,7 @@ from .portscan import scan_ports
 from .resolve import resolve as resolve_target
 from .resolve import reverse_dns
 from .routes import default_gateway, query_route
-from .scan import arp_scan, find_ip_by_mac, sweep_scope
+from .scan import MAX_SWEEP_HOSTS, arp_scan, find_ip_by_mac, sweep_scope
 from .serialize import dumps, to_jsonable
 from .static_neighbours import remove_neighbour, set_neighbour
 from .subnet import subnet_info
@@ -319,7 +325,11 @@ def _fail(ctx: click.Context, command: CommandName, exc: Exception, *, skipped: 
 def _json_error(exc: BaseException) -> JsonError:
     """Return the machine-readable record of a failure, for either JSON shape."""
 
-    return JsonError(type=type(exc).__name__, message=str(exc))
+    # Click keeps the offending option's name in the exception's formatting,
+    # not its text: str() of a bad --timeout says only that "abc" is not a
+    # number, which leaves a JSON reader to guess which option was meant.
+    message = exc.format_message() if isinstance(exc, click.ClickException) else str(exc)
+    return JsonError(type=type(exc).__name__, message=message)
 
 
 def _family(*, ipv4: bool, ipv6: bool) -> AddressFamily | None:
@@ -796,6 +806,105 @@ def cli_scan_ports(  # noqa: PLR0913 - one parameter per CLI option, which is th
 
     _emit(ctx, CommandName.SCAN_PORTS, payload, human)
     if not any(state is PortState.OPEN for state in states.values()):
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+#: What ``--farewell`` may spell with a backslash. A shell hands the CLI the
+#: two characters ``\r``; a protocol line needs the real CR, so these are the
+#: escapes a farewell line can need, and anything else is refused rather than
+#: guessed at.
+_FAREWELL_ESCAPES = {"r": "\r", "n": "\n", "t": "\t", "\\": "\\"}
+
+
+def _farewell_bytes(text: str | None) -> bytes | None:
+    """Return the farewell to send, with its escapes decoded, as ASCII bytes."""
+
+    if text is None:
+        return None
+
+    def unescape(match: re.Match[str]) -> str:
+        try:
+            return _FAREWELL_ESCAPES[match[1]]
+        except KeyError:
+            msg = f"unknown escape \\{match[1]}; use \\r, \\n, \\t or \\\\"
+            raise click.BadParameter(msg, param_hint="--farewell") from None
+
+    decoded = re.sub(r"\\(.)", unescape, text, flags=re.DOTALL)
+    try:
+        return decoded.encode("ascii")
+    except UnicodeEncodeError:
+        msg = "must be ASCII text, since it is sent as-is on the wire"
+        raise click.BadParameter(msg, param_hint="--farewell") from None
+
+
+def _banner_hosts(items: tuple[str, ...]) -> list[str]:
+    """Return the hosts to grab: each item as given, or a network's hosts in its place.
+
+    Raises:
+        ValueError: An item with a ``/`` is not a network.
+        IPScoutSweepTooWideError: The networks together hold more addresses
+            than one sweep covers.
+    """
+
+    networks = [ipaddress.ip_network(item, strict=False) for item in items if "/" in item]
+    total = sum(network.num_addresses for network in networks)
+    if total > MAX_SWEEP_HOSTS:
+        sizes = ", ".join(f"{network} holds {network.num_addresses} addresses" for network in networks)
+        msg = f"{sizes}, more than the {MAX_SWEEP_HOSTS} this will sweep; pass a narrower network"
+        raise IPScoutSweepTooWideError(msg)
+    expanded = iter(networks)
+    hosts: list[str] = []
+    for item in items:
+        if "/" in item:
+            hosts.extend(str(address) for address in next(expanded).hosts())
+        else:
+            hosts.append(item)
+    return hosts
+
+
+@cli.command("banners", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("hosts", nargs=-1, required=True)
+@option("--port", type=int, required=True, help="TCP port to read the greeting on.")
+@option("--timeout", type=float, default=DEFAULT_BANNER_TIMEOUT, show_default=True, help="Seconds per host for connect and read together.")
+@option("--concurrency", type=int, default=DEFAULT_BANNER_CONCURRENCY, show_default=True, help="Connections in flight at once.")
+@option("--max-line-bytes", type=int, default=DEFAULT_MAX_LINE_BYTES, show_default=True, help="Most bytes of greeting kept per host.")
+@option("--farewell", default=None, help="Text to send after a greeting, before closing; \\r \\n \\t \\\\ are decoded (e.g. 'QUIT\\r\\n').")
+@option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
+@click.pass_context
+def cli_banners(  # noqa: PLR0913 - one parameter per CLI option, which is the point of the command
+    ctx: click.Context,
+    hosts: tuple[str, ...],
+    *,
+    port: int,
+    timeout: float,
+    concurrency: int,
+    max_line_bytes: int,
+    farewell: str | None,
+    ipv4: bool,
+    ipv6: bool,
+) -> None:
+    """Read the first line each host sends on a TCP port. HOSTS may include networks, as in 10.0.0.0/24."""
+
+    goodbye = _farewell_bytes(farewell)
+    family = _family(ipv4=ipv4, ipv6=ipv6)
+    try:
+        targets = _banner_hosts(hosts)
+        results = grab_banners(targets, port, timeout=timeout, max_line_bytes=max_line_bytes, farewell=goodbye, concurrency=concurrency, family=family)
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, CommandName.BANNERS, exc)
+        return
+
+    def human() -> None:
+        # One column for the greeting or, when there is none, why: the state
+        # column already says which of the two a row holds.
+        table = Table("host", "state", "line or reason")
+        for host, banner in results.items():
+            table.add_row(host, banner.state.value, banner.line or banner.error or "")
+        console.print(table)
+
+    _emit(ctx, CommandName.BANNERS, results, human)
+    if not any(banner.state is BannerState.GREETED for banner in results.values()):
         ctx.exit(EXIT_NOT_REACHED)
 
 

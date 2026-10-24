@@ -246,6 +246,7 @@ class CommandName(str, enum.Enum):
     REMOVE_NEIGHBOUR = "remove-neighbour"
     SUBNET = "subnet"
     SCAN_PORTS = "scan-ports"
+    BANNERS = "banners"
     MTU = "mtu"
     WAKE = "wake"
     OBSERVE_DHCP = "observe-dhcp"

@@ -6,8 +6,11 @@ these keep their meaning when any message is reworded.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
+import socket
+import threading
 from typing import Any
 
 import pytest
@@ -47,6 +50,7 @@ ALL_COMMANDS: list[list[str]] = [
     ["remove-neighbour", "192.0.2.254"],
     ["subnet"],
     ["scan-ports", "127.0.0.1", "--ports", "1", "--timeout", "0.3"],
+    ["banners", "127.0.0.1", "--port", "1", "--timeout", "0.3"],
     ["mtu", "127.0.0.1"],
     ["wake", "aa:bb:cc:dd:ee:ff", "--broadcast", "127.0.0.1"],
     # A window short enough not to slow the sweep. The interface is chosen per
@@ -292,6 +296,7 @@ def test_a_human_failure_does_not_name_a_python_class(runner: CliRunner) -> None
         (["reverse-dns", NEVER_ANSWERS], "a reserved address has no PTR record"),
         (["find-ip", "aa:bb:cc:dd:ee:ff"], "that hardware address holds nothing here"),
         (["remove-neighbour", "192.0.2.254"], "no entry for a TEST-NET-1 address, so nothing was removed"),
+        (["banners", NEVER_ANSWERS, "--port", "21", "--timeout", "0.5"], "nothing greets from a TEST-NET-3 address"),
         # "mac" is deliberately absent: for a routed address it reports the
         # gateway's MAC labelled next_hop, which is a positive answer and
         # exits 0. That is the documented router-hop behaviour, not a miss.
@@ -492,3 +497,106 @@ def test_the_version_flag_reports_the_package_version(runner: CliRunner) -> None
     from ipscout import __init__conf__
 
     assert __init__conf__.version in _invoke(runner, ["--version"]).output
+
+
+class _OneGreeting:
+    """A loopback server that greets one client, then records what it sends back."""
+
+    def __init__(self, greeting: bytes) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self._listener.settimeout(5.0)
+        self.port = int(self._listener.getsockname()[1])
+        self.received = b""
+        self._thread = threading.Thread(target=self._serve, args=(greeting,), daemon=True)
+        self._thread.start()
+
+    def _serve(self, greeting: bytes) -> None:
+        try:
+            conn, _ = self._listener.accept()
+        except OSError:
+            return
+        with conn:
+            conn.sendall(greeting)
+            conn.settimeout(5.0)
+            chunks: list[bytes] = []
+            with contextlib.suppress(OSError):
+                while chunk := conn.recv(4096):
+                    chunks.append(chunk)
+            self.received = b"".join(chunks)
+
+    def finish(self) -> bytes:
+        """Wait for the session to end and return what the client sent."""
+
+        self._thread.join(timeout=6.0)
+        self._listener.close()
+        return self.received
+
+
+def test_banners_reports_the_greeting_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    server = _OneGreeting(b"220 Print Server Ready.\r\n")
+
+    code = main(["--json", "banners", "127.0.0.1", "--port", str(server.port)])
+    server.finish()
+    data = json.loads(capsys.readouterr().out)["data"]
+
+    assert code == EXIT_OK
+    assert data == {"127.0.0.1": {"host": "127.0.0.1", "port": server.port, "state": "greeted", "line": "220 Print Server Ready.", "error": None}}
+
+
+def test_banners_sends_the_farewell_with_its_escapes_decoded(capsys: pytest.CaptureFixture[str]) -> None:
+    # Typed on a shell, "QUIT\r\n" arrives as backslashes; FTP needs the real CR LF.
+    server = _OneGreeting(b"220 ready\r\n")
+
+    main(["banners", "127.0.0.1", "--port", str(server.port), "--farewell", "QUIT\\r\\n"])
+    capsys.readouterr()
+
+    assert server.finish() == b"QUIT\r\n"
+
+
+@pytest.mark.parametrize("farewell", ["QUIT\\q", "QUIT é"], ids=["unknown-escape", "not-ascii"])
+def test_banners_refuses_a_farewell_it_cannot_send_exactly(farewell: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["--json", "banners", "127.0.0.1", "--port", "21", "--farewell", farewell])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == EXIT_ERROR
+    assert "--farewell" in payload["error"]["message"]
+
+
+@pytest.mark.parametrize("bare", [False, True], ids=["envelope", "bare"])
+def test_a_bad_option_value_names_the_option_in_json(bare: bool, capsys: pytest.CaptureFixture[str]) -> None:
+    # Click keeps the option's name outside the exception's text, so a JSON
+    # reader given only str(exc) learned that some value was not a number,
+    # but not which of the command's options it was.
+    flag = "--json-bare" if bare else "--json"
+    code = main([flag, "scan-ports", "127.0.0.1", "--ports", "1", "--timeout", "abc"])
+    payload = json.loads(capsys.readouterr().out)
+    error = payload if bare else payload["error"]
+
+    assert code == EXIT_ERROR
+    assert "--timeout" in error["message"]
+
+
+def test_banners_expands_a_network_into_its_hosts(capsys: pytest.CaptureFixture[str]) -> None:
+    main(["--json", "banners", "127.0.0.0/30", "--port", "1", "--timeout", "0.3"])
+    data = json.loads(capsys.readouterr().out)["data"]
+
+    assert list(data) == ["127.0.0.1", "127.0.0.2"]
+
+
+def test_banners_refuses_a_network_wider_than_one_sweep(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["--json", "banners", "10.0.0.0/19", "--port", "21"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == EXIT_ERROR
+    assert payload["ok"] is False
+    assert "10.0.0.0/19" in payload["error"]["message"]
+
+
+def test_banners_refuses_a_malformed_network(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["--json", "banners", "10.0.0.0/99", "--port", "21"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == EXIT_ERROR
+    assert "10.0.0.0/99" in payload["error"]["message"]
