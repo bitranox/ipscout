@@ -270,7 +270,7 @@ root_package = "ipscout"
 name = "Layered dependencies point one way only"
 type = "layers"
 layers = [
-  "ipscout.scan : ipscout.subnet : ipscout.portscan : ipscout.banner : ipscout.mtu : ipscout.wol : ipscout.dhcp",
+  "ipscout.scan : ipscout.subnet : ipscout.portscan : ipscout.banner : ipscout.snmp : ipscout.mtu : ipscout.wol : ipscout.dhcp",
   "ipscout.api",
   "ipscout.traceroute",
   "ipscout.static_neighbours",

@@ -78,6 +78,9 @@ from .models import (
     ReverseDnsReport,
     RouteInfo,
     ScanMethod,
+    SnmpState,
+    SnmpSystem,
+    SnmpVersion,
     SubnetInfo,
     SweepScope,
     TraceHop,
@@ -88,6 +91,7 @@ from .portscan import ascan_ports, parse_ports, scan_ports
 from .resolve import resolve, reverse_dns
 from .routes import default_gateway, query_route
 from .scan import arp_scan, find_ip_by_mac, local_networks, sweep_scope
+from .snmp import aread_snmp_system, read_snmp_system
 from .static_neighbours import remove_neighbour, set_neighbour
 from .subnet import subnet_info
 from .traceroute import atrace_path, atraceroute, trace_path, traceroute
@@ -123,6 +127,9 @@ __all__ = [
     "ReverseDnsReport",
     "RouteInfo",
     "ScanMethod",
+    "SnmpState",
+    "SnmpSystem",
+    "SnmpVersion",
     "SubnetInfo",
     "SweepScope",
     "TraceHop",
@@ -130,6 +137,7 @@ __all__ = [
     "ais_reachable",
     "aping",
     "aping_many",
+    "aread_snmp_system",
     "arp_scan",
     "ascan_ports",
     "atrace_path",
@@ -155,6 +163,7 @@ __all__ = [
     "ping_many",
     "print_info",
     "query_route",
+    "read_snmp_system",
     "remove_neighbour",
     "resolve",
     "reverse_dns",
