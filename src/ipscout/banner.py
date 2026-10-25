@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .api import require_host_names
+from .deadline import failure_reason, within
 from .errors import IPScoutError, refused_arguments
 from .models import AddressFamily, Banner, BannerState, Port, Timeout
 from .pool import Concurrency, gather_bounded
@@ -35,7 +36,7 @@ from .resolve import resolve_one
 from .sockerr import is_refusal
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Iterable
+    from collections.abc import Iterable
 
 __all__ = ["DEFAULT_CONCURRENCY", "DEFAULT_MAX_LINE_BYTES", "DEFAULT_TIMEOUT", "BannerSettings", "agrab_banners", "grab_banners"]
 
@@ -50,8 +51,6 @@ DEFAULT_TIMEOUT = 3.0
 #: A greeting is one short line; this bounds what a hostile or chatty server
 #: can make the caller buffer per host.
 DEFAULT_MAX_LINE_BYTES = 512
-
-_T = TypeVar("_T")
 
 
 class BannerSettings(BaseModel):
@@ -91,42 +90,6 @@ class BannerSettings(BaseModel):
     family: AddressFamily | None = None
 
 
-def _reason(exc: BaseException) -> str:
-    """Return why a grab failed, in the exception's own words or by its name.
-
-    An exception can carry an empty message, and an unreachable result must
-    name a reason, so the class name stands in rather than an empty string.
-
-    Examples:
-        >>> _reason(OSError("Network is unreachable"))
-        'Network is unreachable'
-        >>> _reason(IPScoutError())
-        'IPScoutError'
-
-    """
-
-    return str(exc) or type(exc).__name__
-
-
-async def _within(deadline: float, awaitable: Coroutine[object, object, _T]) -> _T:
-    """Await ``awaitable`` with whatever is left until ``deadline``.
-
-    Raises:
-        TimeoutError: The deadline has passed or passes while waiting. Raised
-            as the builtin on every version, so callers need not also catch
-            ``asyncio.TimeoutError``, which is a different class before 3.11.
-    """
-
-    remaining = deadline - asyncio.get_running_loop().time()
-    if remaining <= 0:
-        awaitable.close()
-        raise TimeoutError
-    try:
-        return await asyncio.wait_for(awaitable, remaining)
-    except asyncio.TimeoutError as exc:
-        raise TimeoutError from exc
-
-
 async def _read_line(reader: asyncio.StreamReader, deadline: float, cap: int) -> bytes:
     """Read until a newline, the close, ``cap`` bytes or the deadline - whichever comes first.
 
@@ -137,7 +100,7 @@ async def _read_line(reader: asyncio.StreamReader, deadline: float, cap: int) ->
     received = bytearray()
     while len(received) < cap:
         try:
-            chunk = await _within(deadline, reader.read(cap - len(received)))
+            chunk = await within(deadline, reader.read(cap - len(received)))
         except OSError:  # TimeoutError included: the deadline ends the line too
             break
         if not chunk:
@@ -189,16 +152,16 @@ async def _grab_one(host: str, settings: BannerSettings) -> Banner:
 
     try:
         # In a thread: a slow DNS answer for one name must not stall every other host.
-        target = await _within(deadline, asyncio.to_thread(resolve_one, host, family=settings.family))
-        reader, writer = await _within(deadline, asyncio.open_connection(target.address, settings.port, family=target.family.socket_family))
+        target = await within(deadline, asyncio.to_thread(resolve_one, host, family=settings.family))
+        reader, writer = await within(deadline, asyncio.open_connection(target.address, settings.port, family=target.family.socket_family))
     except IPScoutError as exc:
-        return unreachable(_reason(exc))
+        return unreachable(failure_reason(exc))
     except TimeoutError:
         return unreachable(f"no connection within {settings.timeout:g} s")
     except OSError as exc:
         if is_refusal(exc):
             return Banner(host=host, port=settings.port, state=BannerState.REFUSED)
-        return unreachable(_reason(exc))
+        return unreachable(failure_reason(exc))
     return await _converse(host, reader, writer, settings, deadline)
 
 
