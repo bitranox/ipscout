@@ -58,7 +58,7 @@ The import-linter contract `Layered dependencies point one way only` is enforced
 listed highest first; each may import only from those below it.
 
 ```
-scan : subnet : portscan : banner : mtu : wol : dhcp   sweeps and single-purpose probes
+scan : subnet : portscan : banner : snmp : mtu : wol : dhcp   sweeps and single-purpose probes
 api          ping / aping / ping_many / aping_many / is_reachable / ais_reachable
 traceroute   traceroute / atraceroute / trace_path / atrace_path
 static_neighbours  set_neighbour / remove_neighbour
@@ -72,8 +72,8 @@ transport_posix : transport_windows : transport_tcp
   : routes_linux : routes_macos : routes_windows
   : neighbours_linux : neighbours_macos : neighbours_windows
   : dhcp_linux : dhcp_windows : dhcp_macos
-packet : resolve : ports : winapi : netlink : bsdroute : arp : tcpsyn
-  : pool : sockerr : unixio : bootp : bpf
+packet : deadline : resolve : ports : winapi : netlink : bsdroute : arp : tcpsyn
+  : pool : sockerr : unixio : bootp : bpf : snmpber
 models
 errors
 ```
@@ -201,24 +201,25 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 
 ### Public surface
 
-| Module                 | Role                                                                                                                              |
-|------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
-| `__init__.py`          | Re-exports the public API so importers depend on the package, not its layout.                                                     |
-| `api.py`               | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.                             |
-| `traceroute.py`        | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                                             |
-| `interfaces.py`        | `local_interfaces`, dispatching to the per-OS backend.                                                                            |
-| `routes.py`            | `query_route`, `default_gateway`, dispatching to the per-OS backend.                                                              |
-| `neighbours.py`        | `neighbours`, `lookup_mac`, `get_mac_address`, `resolve_active`, `normalise_mac`.                                                 |
-| `static_neighbours.py` | `set_neighbour`, `remove_neighbour`: write and delete a permanent IPv4 entry, choosing the interface and reading the result back. |
-| `scan.py`              | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.                          |
-| `subnet.py`            | `subnet_info`, composing interfaces, routes and the stored lease.                                                                 |
-| `portscan.py`          | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                                           |
-| `banner.py`            | `grab_banners`, `agrab_banners`: connect, read the first line, say goodbye and close, all on one connection per host.             |
-| `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                  |
-| `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                     |
-| `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                     |
-| `resolve.py`           | `resolve`, `resolve_one` (returns a `ResolvedTarget` named tuple), `reverse_dns`, `family_of`.                                    |
-| `factory.py`           | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path.                   |
+| Module                 | Role                                                                                                                                                              |
+|------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `__init__.py`          | Re-exports the public API so importers depend on the package, not its layout.                                                                                     |
+| `api.py`               | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.                                                             |
+| `traceroute.py`        | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                                                                             |
+| `interfaces.py`        | `local_interfaces`, dispatching to the per-OS backend.                                                                                                            |
+| `routes.py`            | `query_route`, `default_gateway`, dispatching to the per-OS backend.                                                                                              |
+| `neighbours.py`        | `neighbours`, `lookup_mac`, `get_mac_address`, `resolve_active`, `normalise_mac`.                                                                                 |
+| `static_neighbours.py` | `set_neighbour`, `remove_neighbour`: write and delete a permanent IPv4 entry, choosing the interface and reading the result back.                                 |
+| `scan.py`              | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.                                                          |
+| `subnet.py`            | `subnet_info`, composing interfaces, routes and the stored lease.                                                                                                 |
+| `portscan.py`          | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                                                                           |
+| `banner.py`            | `grab_banners`, `agrab_banners`: connect, read the first line, say goodbye and close, all on one connection per host.                                             |
+| `snmp.py`              | `read_snmp_system`, `aread_snmp_system`: one SNMP GET of the system group per host on a connected UDP socket, re-asking under v1 without a value the agent lacks. |
+| `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                                                  |
+| `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                                                     |
+| `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                                                     |
+| `resolve.py`           | `resolve`, `resolve_one` (returns a `ResolvedTarget` named tuple), `reverse_dns`, `family_of`.                                                                    |
+| `factory.py`           | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path.                                                   |
 
 ### Core
 
@@ -235,6 +236,8 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.                                                  |
 | `bpf.py`      | BSD packet filter ioctl encoding and record splitting, shared by two backends.                                          |
 | `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.                                                   |
+| `deadline.py` | `within` and `failure_reason`: one deadline across several awaits, shared by the banner grab and the SNMP read.         |
+| `snmpber.py`  | BER encode of an SNMP GET and a structural parse of the reply. Total functions over bytes, like `packet.py`.            |
 | `pool.py`     | `gather_bounded`: a fixed worker pool, so a long work list never becomes one Task per item.                             |
 | `sockerr.py`  | `is_refusal`: one reading of a refused connect across every platform's spelling, shared by every module that connects.  |
 
@@ -261,13 +264,13 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 
 ### CLI adapter
 
-| Module              | Role                                                                       |
-|---------------------|----------------------------------------------------------------------------|
-| `cli.py`            | The rich-click group, twenty-two subcommands, `_emit` and `_fail`, `main`. |
-| `serialize.py`      | `to_jsonable` and `dumps` at the output boundary.                          |
-| `typed_click.py`    | Typed facade over rich-click's partially-typed decorators.                 |
-| `__main__.py`       | `python -m ipscout`.                                                       |
-| `__init__conf__.py` | Static package metadata, kept in sync with `pyproject.toml` by automation. |
+| Module              | Role                                                                         |
+|---------------------|------------------------------------------------------------------------------|
+| `cli.py`            | The rich-click group, twenty-three subcommands, `_emit` and `_fail`, `main`. |
+| `serialize.py`      | `to_jsonable` and `dumps` at the output boundary.                            |
+| `typed_click.py`    | Typed facade over rich-click's partially-typed decorators.                   |
+| `__main__.py`       | `python -m ipscout`.                                                         |
+| `__init__conf__.py` | Static package metadata, kept in sync with `pyproject.toml` by automation.   |
 
 ---
 
@@ -284,6 +287,8 @@ and mutating it can only make it disagree with reality.
 | `InterfaceAddress`   | `address`, `prefix_len`                                                                                                                                                                                                                                         |
 | `MacLookup`          | `ip`, `mac`, `scope`, `via_ip`, `interface`                                                                                                                                                                                                                     |
 | `SubnetInfo`         | `interface`, `address`, `prefix_len`, `network`, `family`, `broadcast`, `gateway`, `dns_servers`, `domain`, `dhcp_server`, `lease_obtained`, `lease_expires`, `mtu`                                                                                             |
+| `Banner`             | `host`, `port`, `state`, `line`, `error`                                                                                                                                                                                                                        |
+| `SnmpSystem`         | `host`, `state`, `uptime_seconds`, `name`, `description`, `object_id`, `error`                                                                                                                                                                                  |
 | `CapabilityReport`   | `icmp_ipv4`, `icmp_ipv6`, `traceroute`                                                                                                                                                                                                                          |
 | `ReachabilityReport` | `target`, `reachable`                                                                                                                                                                                                                                           |
 | `ResolveReport`      | `target`, `addresses`                                                                                                                                                                                                                                           |

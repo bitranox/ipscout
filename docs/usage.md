@@ -528,6 +528,35 @@ one: `timeout` must be above 0 and at most `MAX_TIMEOUT`, `max_line_bytes` and `
 `farewell` not empty, since an empty one could only be skipped. A refused connection is reported rather than retried; retry it yourself when the device is
 known to need it. `agrab_banners` is the same on the event loop.
 
+## Reading a device's SNMP system group
+
+Most network printers, switches and print servers run an SNMP agent. `read_snmp_system` asks each
+host for four values in one GET: how long the agent has run, the name an administrator gave the
+device, its free-text description and the vendor's identifier for the model.
+
+```python
+results = ipscout.read_snmp_system(["192.0.2.10", "192.0.2.11"])
+for host, system in results.items():
+    if system.state is ipscout.SnmpState.ANSWERED:
+        print(host, system.name, system.uptime_seconds)  # 192.0.2.10 PRINTER 83186.4
+```
+
+The uptime is the restart detector: read it before an action that restarts the device and again
+afterwards, and a smaller value means it restarted. It wraps to 0 after about 497 days.
+
+Each `SnmpSystem` carries one of five states. `ANSWERED` holds the values, each `None` when the
+agent does not have it; `SILENT` means nothing usable arrived before the deadline, which is what a
+host that is down, a host without an agent and a wrong community all look like; `REFUSED` means the
+host answered with ICMP port unreachable, so it is up and has no agent on that port; `ERROR` and
+`UNREACHABLE` put the reason in `error`.
+
+`version` is `SnmpVersion.V1` (the default) or `SnmpVersion.V2C`, and there is no automatic fallback:
+an agent that speaks only the other version stays silent, and silence cannot be told apart from a
+host that is down. Under v1 a GET fails as a whole when the agent lacks one of the values, so the
+read asks again without it and reports it as `None`. The `community` defaults to `public` and never
+appears in an error. `timeout` (3.0 s by default) is one deadline per host for resolving and the
+whole exchange. `aread_snmp_system` is the same on the event loop.
+
 ## Waking a host, and the path to it
 
 ```python
@@ -548,7 +577,7 @@ one produces a silent black hole.
 
 ## The CLI
 
-22 commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
+23 commands. `ipscout`, `python -m ipscout` and `uvx ipscout` are the same entry point.
 
 | Command            | What it does                                                            |
 |--------------------|-------------------------------------------------------------------------|
@@ -569,6 +598,7 @@ one produces a silent black hole.
 | `subnet`           | Show addressing, gateway and stored DHCP facts per subnet.              |
 | `scan-ports`       | Report which ports are open, closed or filtered.                        |
 | `banners`          | Read the first line each host sends on a TCP port.                      |
+| `snmp-system`      | Read uptime, name, description and object id over SNMP.                 |
 | `mtu`              | Show the largest packet that reaches a target unfragmented.             |
 | `wake`             | Send a wake-on-LAN magic packet.                                        |
 | `observe-dhcp`     | Watch a DHCP handshake for the addresses offered to a hardware address. |
@@ -589,21 +619,22 @@ Global options, which live on the group so they compose with every subcommand:
 
 Per-command options:
 
-| Command            | Options                                                                                                          |
-|--------------------|------------------------------------------------------------------------------------------------------------------|
-| `ping`             | `--times/-c` (4), `--timeout` (2.0), `--interval` (0.2), `-4`, `-6`, `--tcp-fallback`, `--tcp-port` (443)        |
-| `ping-many`        | `--times/-c` (4), `--timeout` (2.0), `--concurrency` (64)                                                        |
-| `reachable`        | `--timeout` (2.0), `--tcp-port` (443)                                                                            |
-| `traceroute`       | `--max-hops` (30), `--timeout` (2.0), `-4`, `-6`, `--resolve-names`                                              |
-| `resolve`          | `-4`, `-6`                                                                                                       |
-| `reverse-dns`      | none beyond the global flags                                                                                     |
-| `interfaces`       | none beyond the global flags                                                                                     |
-| `banners`          | `--port` (required), `--timeout` (3.0), `--concurrency` (64), `--max-line-bytes` (512), `--farewell`, `-4`, `-6` |
-| `observe-dhcp`     | `--interface` (the default route's), `--timeout` (60.0), `--settle` (12.0)                                       |
-| `set-neighbour`    | `--interface` (the one whose subnet holds IP)                                                                    |
-| `remove-neighbour` | `--interface` (every interface the cache lists IP on)                                                            |
-| `capabilities`     | none beyond the global flags                                                                                     |
-| `info`             | none beyond the global flags                                                                                     |
+| Command            | Options                                                                                                                                    |
+|--------------------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| `ping`             | `--times/-c` (4), `--timeout` (2.0), `--interval` (0.2), `-4`, `-6`, `--tcp-fallback`, `--tcp-port` (443)                                  |
+| `ping-many`        | `--times/-c` (4), `--timeout` (2.0), `--concurrency` (64)                                                                                  |
+| `reachable`        | `--timeout` (2.0), `--tcp-port` (443)                                                                                                      |
+| `traceroute`       | `--max-hops` (30), `--timeout` (2.0), `-4`, `-6`, `--resolve-names`                                                                        |
+| `resolve`          | `-4`, `-6`                                                                                                                                 |
+| `reverse-dns`      | none beyond the global flags                                                                                                               |
+| `interfaces`       | none beyond the global flags                                                                                                               |
+| `banners`          | `--port` (required), `--timeout` (3.0), `--concurrency` (64), `--max-line-bytes` (512), `--farewell`, `-4`, `-6`                           |
+| `snmp-system`      | `--version` (v1), `--community` (public, or `IPSCOUT_SNMP_COMMUNITY`), `--port` (161), `--timeout` (3.0), `--concurrency` (64), `-4`, `-6` |
+| `observe-dhcp`     | `--interface` (the default route's), `--timeout` (60.0), `--settle` (12.0)                                                                 |
+| `set-neighbour`    | `--interface` (the one whose subnet holds IP)                                                                                              |
+| `remove-neighbour` | `--interface` (every interface the cache lists IP on)                                                                                      |
+| `capabilities`     | none beyond the global flags                                                                                                               |
+| `info`             | none beyond the global flags                                                                                                               |
 
 `-4` and `-6` are mutually exclusive.
 
@@ -630,12 +661,17 @@ ipscout arp-scan --network 192.168.1.0/24 # sweep, then read what was learned
 ipscout subnet                            # addressing, gateway, stored DHCP facts
 ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
 ipscout banners 192.0.2.0/24 --port 21 --farewell 'QUIT\r\n'   # each host's greeting; networks expand
+ipscout snmp-system 192.0.2.10 192.0.2.0/28 --timeout 2          # uptime, name, description, object id
+IPSCOUT_SNMP_COMMUNITY=private ipscout --json snmp-system 192.0.2.10 --version v2c
 ipscout mtu 8.8.8.8
 ipscout wake aa:bb:cc:dd:ee:ff --broadcast 192.168.1.255
 ipscout observe-dhcp 02:00:5e:10:00:00 --interface br0   # needs root; last line is the bound address
 ipscout capabilities
 ipscout info
 ```
+
+Pass an SNMP community through `IPSCOUT_SNMP_COMMUNITY` rather than `--community`: a command-line
+argument is visible to every user in the process list.
 
 Exit codes are independent of the output format:
 
@@ -810,6 +846,7 @@ here or, for the exceptions, in the paragraph below the tables.
 | `ais_reachable`                | coroutine | The same contract, on the event loop.                             |
 | `aping`                        | coroutine | The same, without blocking the event loop.                        |
 | `aping_many`                   | coroutine | Probe many targets concurrently.                                  |
+| `aread_snmp_system`            | coroutine | The same SNMP read, on the event loop.                            |
 | `arp_scan`                     | function  | Sweep a network, then report what the kernel learned.             |
 | `ascan_ports`                  | coroutine | The same, on the event loop.                                      |
 | `atrace_path`                  | coroutine | The same, over an async transport.                                |
@@ -831,6 +868,7 @@ here or, for the exceptions, in the paragraph below the tables.
 | `ping_many`                    | function  | Probe many targets concurrently from synchronous code.            |
 | `print_info`                   | function  | Print the package metadata block.                                 |
 | `query_route`                  | function  | How this host would reach one destination.                        |
+| `read_snmp_system`             | function  | Uptime, name, description and object id of many hosts, over SNMP. |
 | `resolve`                      | function  | Turn a name or literal into a list of addresses.                  |
 | `remove_neighbour`             | function  | Delete an IPv4 neighbour entry. Needs privilege.                  |
 | `reverse_dns`                  | function  | Turn an address back into a name, or None.                        |
@@ -864,6 +902,7 @@ Result models, all frozen Pydantic models with `extra="forbid"`:
 | `ResponseObject`     | ping, aping, ping_many, aping_many               |
 | `ReverseDnsReport`   | the reverse-dns CLI command                      |
 | `RouteInfo`          | query_route, default_gateway                     |
+| `SnmpSystem`         | read_snmp_system, aread_snmp_system              |
 | `SubnetInfo`         | subnet_info                                      |
 | `SweepScope`         | sweep_scope                                      |
 | `TraceHop`           | traceroute, atraceroute, trace_path, atrace_path |
@@ -880,6 +919,8 @@ Enums, all `str` subclasses so their members are already strings on the wire:
 | `PortState`      | OPEN, CLOSED, FILTERED                                 |
 | `ProbeMethod`    | ICMP, TCP                                              |
 | `ScanMethod`     | CONNECT, SYN                                           |
+| `SnmpState`      | ANSWERED, SILENT, REFUSED, ERROR, UNREACHABLE          |
+| `SnmpVersion`    | V1, V2C                                                |
 
 Exceptions: `IPScoutError`, `IPScoutPermissionError`, `IPScoutResolutionError`,
 `IPScoutUnsupportedError`, `IPScoutSweepError` and its two subclasses `IPScoutSweepTooWideError` and

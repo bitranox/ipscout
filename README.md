@@ -156,6 +156,7 @@ ipscout reachable example.com
 ipscout traceroute 1.1.1.1 --max-hops 10
 ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
 ipscout banners 192.0.2.0/24 --port 21 --farewell 'QUIT\r\n'   # what each host says first
+ipscout snmp-system 192.0.2.0/28        # uptime, name and model over SNMP
 ipscout mac 8.8.8.8                     # the gateway's, labelled NEXT_HOP
 ipscout find-ip dc:b2:2f:44:34:59 --scan
 ipscout arp-scan --network 192.168.1.0/24
@@ -190,6 +191,7 @@ ipscout.default_gateway()  # and query_route() for any destination
 ipscout.subnet_info()  # addressing, gateway, stored DHCP facts
 ipscout.scan_ports(host, "22,80,8000-8100")
 ipscout.grab_banners(hosts, 21, farewell=b"QUIT\r\n")  # each host's first line, on one connection
+ipscout.read_snmp_system(hosts)  # uptime, sysName, sysDescr, sysObjectID; a falling uptime is a restart
 ipscout.path_mtu("8.8.8.8")
 ipscout.wake_on_lan(mac, broadcast="192.168.1.255")
 ipscout.observe_dhcp(mac, interface="br0")  # a machine that has no address yet (needs elevation)

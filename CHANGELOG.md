@@ -7,6 +7,12 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Added
 
+- `read_snmp_system` / `aread_snmp_system` and the `ipscout snmp-system` command: the SNMP system
+  group (sysUpTime, sysName, sysDescr, sysObjectID) of many hosts, one GET each, SNMPv1 or v2c as the
+  caller chooses. Each host gets an `SnmpSystem` record with an `SnmpState` (ANSWERED, SILENT,
+  REFUSED, ERROR, UNREACHABLE) instead of an exception; under v1 a value the agent lacks is asked
+  around and reported as `None`. The uptime tells a restart (it fell) from mere reachability.
+- `ipscout.deadline`: the per-host deadline helpers, shared by the banner grab and the SNMP read.
 - `packet.max_payload_size(family)` and `packet.require_payload_size(payload_size, family)`: the
   one per-family payload bound, which `ping` and `build_echo_request` both apply.
 - `models.RoundTrip` (a finite round trip of 0 or more milliseconds), `api.HostNames` /
