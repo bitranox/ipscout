@@ -22,6 +22,7 @@ Note:
 
 from __future__ import annotations
 
+import datetime
 import enum
 import re
 import sys
@@ -71,6 +72,8 @@ from .models import (
     ReverseDnsReport,
     RouteInfo,
     ScanMethod,
+    SnmpState,
+    SnmpVersion,
     SweepScope,
     WakeReport,
 )
@@ -88,6 +91,10 @@ from .scan import MAX_SWEEP_HOSTS, SweepSettings, arp_scan, find_ip_by_mac, refu
 from .serialize import dumps, to_jsonable
 from .service import DEFAULT_INTERVAL, DEFAULT_TIMES, PingRequest
 from .service import DEFAULT_TIMEOUT as DEFAULT_PING_TIMEOUT
+from .snmp import DEFAULT_COMMUNITY, SnmpSettings, read_snmp_system
+from .snmp import DEFAULT_CONCURRENCY as DEFAULT_SNMP_CONCURRENCY
+from .snmp import DEFAULT_PORT as DEFAULT_SNMP_PORT
+from .snmp import DEFAULT_TIMEOUT as DEFAULT_SNMP_TIMEOUT
 from .static_neighbours import remove_neighbour, set_neighbour
 from .subnet import subnet_info
 from .traceroute import DEFAULT_MAX_HOPS, traceroute
@@ -944,13 +951,13 @@ def _farewell_bytes(text: str | None) -> bytes | None:
         raise click.BadParameter(msg, param_hint="--farewell") from None
 
 
-def _banner_hosts(items: tuple[str, ...]) -> list[str]:
-    """Return the hosts to grab: each item as given, or a network's hosts in its place.
+def _hosts_and_networks(items: tuple[str, ...]) -> list[str]:
+    """Return the hosts to probe: each item as given, or a network's hosts in its place.
 
     Raises:
         ValueError: An item with a ``/`` is not a network.
         IPScoutSweepTooWideError: The networks together hold more addresses
-            than one sweep covers. Every host of every network is grabbed, so
+            than one sweep covers. Every host of every network is probed, so
             one left out would be a silently partial answer.
     """
 
@@ -1013,7 +1020,7 @@ def cli_banners(  # noqa: PLR0913 - one parameter per CLI option, which is the p
     goodbye = _farewell_bytes(farewell)
     family = _family(ipv4=ipv4, ipv6=ipv6)
     try:
-        targets = _banner_hosts(hosts)
+        targets = _hosts_and_networks(hosts)
         results = grab_banners(targets, port, timeout=timeout, max_line_bytes=max_line_bytes, farewell=goodbye, concurrency=concurrency, family=family)
     except (IPScoutError, ValueError) as exc:
         _fail(ctx, CommandName.BANNERS, exc)
@@ -1029,6 +1036,72 @@ def cli_banners(  # noqa: PLR0913 - one parameter per CLI option, which is the p
 
     _emit(ctx, CommandName.BANNERS, results, human)
     if not any(banner.state is BannerState.GREETED for banner in results.values()):
+        ctx.exit(EXIT_NOT_REACHED)
+
+
+def _uptime_text(seconds: float) -> str:
+    """Return an uptime as days and clock time, as a person reads it: ``1 day, 2:03:04``."""
+
+    return str(datetime.timedelta(seconds=round(seconds)))
+
+
+@cli.command("snmp-system", context_settings=CLICK_CONTEXT_SETTINGS)
+@argument("hosts", nargs=-1, required=True)
+@option(
+    "--version",
+    "snmp_version",
+    type=click.Choice([version.value for version in SnmpVersion]),
+    default=SnmpVersion.V1.value,
+    show_default=True,
+    help="SNMP version to speak. An agent that speaks only the other one stays silent.",
+)
+@option(
+    "--community",
+    envvar="IPSCOUT_SNMP_COMMUNITY",
+    default=DEFAULT_COMMUNITY,
+    show_default=True,
+    help="Read community. Prefer the IPSCOUT_SNMP_COMMUNITY variable: an argument is visible in the process list.",
+)
+@option("--port", type=_int_field(SnmpSettings, "port"), default=DEFAULT_SNMP_PORT, show_default=True, help="UDP port of the agent.")
+@option("--timeout", type=_float_field(SnmpSettings, "timeout"), default=DEFAULT_SNMP_TIMEOUT, show_default=True, help="Seconds per host for the whole read.")
+@option("--concurrency", type=_int_field(SnmpSettings, "concurrency"), default=DEFAULT_SNMP_CONCURRENCY, show_default=True, help="Hosts read at once.")
+@option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
+@option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
+@click.pass_context
+def cli_snmp_system(  # noqa: PLR0913 - one parameter per CLI option, which is the point of the command
+    ctx: click.Context,
+    hosts: tuple[str, ...],
+    *,
+    snmp_version: str,
+    community: str,
+    port: int,
+    timeout: float,
+    concurrency: int,
+    ipv4: bool,
+    ipv6: bool,
+) -> None:
+    """Read uptime, name, description and object id over SNMP. HOSTS may include networks, as in 10.0.0.0/24."""
+
+    family = _family(ipv4=ipv4, ipv6=ipv6)
+    try:
+        targets = _hosts_and_networks(hosts)
+        results = read_snmp_system(
+            targets, version=SnmpVersion(snmp_version), community=community, port=port, timeout=timeout, concurrency=concurrency, family=family
+        )
+    except (IPScoutError, ValueError) as exc:
+        _fail(ctx, CommandName.SNMP_SYSTEM, exc)
+        return
+
+    def human() -> None:
+        # The last column holds the description or, when there is none, why.
+        table = Table("host", "state", "uptime", "name", "description or reason")
+        for host, system in results.items():
+            uptime = "" if system.uptime_seconds is None else _uptime_text(system.uptime_seconds)
+            table.add_row(host, system.state.value, uptime, system.name or "", system.description or system.error or "")
+        console.print(table)
+
+    _emit(ctx, CommandName.SNMP_SYSTEM, results, human)
+    if not any(system.state is SnmpState.ANSWERED for system in results.values()):
         ctx.exit(EXIT_NOT_REACHED)
 
 

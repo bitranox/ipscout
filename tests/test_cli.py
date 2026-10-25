@@ -17,6 +17,7 @@ import pytest
 from capture_support import capture_interface
 from click import UsageError
 from click.testing import CliRunner
+from snmp_agent import FakeAgent, honest
 
 import ipscout
 from ipscout import cli as cli_module
@@ -51,6 +52,7 @@ ALL_COMMANDS: list[list[str]] = [
     ["subnet"],
     ["scan-ports", "127.0.0.1", "--ports", "1", "--timeout", "0.3"],
     ["banners", "127.0.0.1", "--port", "1", "--timeout", "0.3"],
+    ["snmp-system", "127.0.0.1", "--timeout", "0.3"],
     ["mtu", "127.0.0.1"],
     ["wake", "aa:bb:cc:dd:ee:ff", "--broadcast", "127.0.0.1"],
     # A window short enough not to slow the sweep. The interface is chosen per
@@ -297,6 +299,7 @@ def test_a_human_failure_does_not_name_a_python_class(runner: CliRunner) -> None
         (["find-ip", "aa:bb:cc:dd:ee:ff"], "that hardware address holds nothing here"),
         (["remove-neighbour", "192.0.2.254"], "no entry for a TEST-NET-1 address, so nothing was removed"),
         (["banners", NEVER_ANSWERS, "--port", "21", "--timeout", "0.5"], "nothing greets from a TEST-NET-3 address"),
+        (["snmp-system", NEVER_ANSWERS, "--timeout", "0.5"], "no SNMP agent answers from a TEST-NET-3 address"),
         # "mac" is deliberately absent: for a routed address it reports the
         # gateway's MAC labelled next_hop, which is a positive answer and
         # exits 0. That is the documented router-hop behaviour, not a miss.
@@ -553,6 +556,52 @@ def test_banners_sends_the_farewell_with_its_escapes_decoded(capsys: pytest.Capt
     capsys.readouterr()
 
     assert server.finish() == b"QUIT\r\n"
+
+
+def test_snmp_system_reports_the_values_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    with FakeAgent(honest()) as agent:
+        code = main(["--json", "snmp-system", "127.0.0.1", "--port", str(agent.port), "--timeout", "1"])
+    data = json.loads(capsys.readouterr().out)["data"]
+
+    assert code == EXIT_OK
+    assert data == {
+        "127.0.0.1": {
+            "host": "127.0.0.1",
+            "state": "answered",
+            "uptime_seconds": 123.45,
+            "name": "PRINTER",
+            "description": "A print server",
+            "object_id": "1.3.6.1.4.1.11.2.3.9.1",
+            "error": None,
+        }
+    }
+
+
+def test_snmp_system_takes_the_community_from_the_environment(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # The environment is an external edge (os.environ), not an ipscout internal.
+    monkeypatch.setenv("IPSCOUT_SNMP_COMMUNITY", "from-env")
+    with FakeAgent(honest()) as agent:
+        main(["--json", "snmp-system", "127.0.0.1", "--port", str(agent.port), "--timeout", "1"])
+    capsys.readouterr()
+
+    assert agent.requests[0].community == b"from-env"
+
+
+def test_snmp_system_sends_v2c_when_asked(capsys: pytest.CaptureFixture[str]) -> None:
+    with FakeAgent(honest()) as agent:
+        main(["--json", "snmp-system", "127.0.0.1", "--port", str(agent.port), "--version", "v2c", "--timeout", "1"])
+    capsys.readouterr()
+
+    assert agent.requests[0].version == 1
+
+
+def test_snmp_system_refuses_an_unknown_version(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["snmp-system", "127.0.0.1", "--version", "v3"])
+    said = capsys.readouterr()
+
+    # Naming the option: an unknown COMMAND would also exit EXIT_ERROR.
+    assert code == EXIT_ERROR
+    assert "'--version'" in said.out + said.err
 
 
 @pytest.mark.parametrize("farewell", ["QUIT\\q", "QUIT é"], ids=["unknown-escape", "not-ascii"])
