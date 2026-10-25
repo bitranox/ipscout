@@ -154,3 +154,54 @@ def test_the_fake_agent_answers_a_real_request() -> None:
         reply = parse_message(client.recv(65535))
 
     assert reply.bindings == (VarBind(oid=SYS_UPTIME, tag=TIMETICKS, value=(12345).to_bytes(2, "big")),)
+
+
+def _sub_identifier(number: int) -> bytes:
+    """Base-128 with the continuation bit, written out here so the test does not reuse the encoder."""
+    octets = [number & 0x7F]
+    number >>= 7
+    while number:
+        octets.insert(0, 0x80 | (number & 0x7F))
+        number >>= 7
+    return bytes(octets)
+
+
+#: SMI (RFC 2578, 3.5): at most 128 sub-identifiers, each at most 2**32-1.
+LARGEST_ARC = 2**32 - 1
+
+
+def test_the_largest_arc_and_the_most_arcs_smi_allows_round_trip() -> None:
+    longest = ".".join(["1", "3", *([str(LARGEST_ARC)] * 126)])
+
+    assert decode_oid(encode_oid(longest)) == longest
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        bytes.fromhex("2b") + _sub_identifier(LARGEST_ARC + 1),
+        bytes.fromhex("2b") + b"\xff" * 2100 + b"\x7f",
+        b"\xff" * 2100 + b"\x7f",
+        bytes.fromhex("2b") + b"\x01" * 127,
+    ],
+    ids=["arc-past-2**32-1", "arc-of-thousands-of-digits", "first-arc-of-thousands-of-digits", "129-arcs"],
+)
+def test_an_identifier_past_what_smi_allows_is_refused_as_ber(body: bytes) -> None:
+    # A hostile agent's identifier must fail as BerError, the one error the reader handles, and
+    # fail fast: an unbounded arc is quadratic to build and its str() raises a plain ValueError.
+    with pytest.raises(BerError, match="object identifier"):
+        decode_oid(body)
+
+
+@pytest.mark.parametrize("dotted", [f"1.3.{LARGEST_ARC + 1}", ".".join(["1", "3", *(["1"] * 127)])], ids=["arc-past-2**32-1", "129-arcs"])
+def test_an_identifier_past_what_smi_allows_is_not_encoded(dotted: str) -> None:
+    with pytest.raises(ValueError, match="object identifier"):
+        encode_oid(dotted)
+
+
+@pytest.mark.parametrize(("value", "encoded"), [(-1, "0201ff"), (-128, "020180"), (-129, "0202ff7f"), (-32768, "02028000"), (127, "02017f"), (128, "02020080")])
+def test_integers_take_their_minimal_twos_complement_form(value: int, encoded: str) -> None:
+    message = SnmpMessage(version=0, community=b"", pdu_tag=GET_RESPONSE, request_id=value, error_status=0, error_index=0, bindings=())
+
+    assert encoded in encode_message(message).hex()
+    assert parse_message(encode_message(message)).request_id == value

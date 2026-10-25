@@ -17,11 +17,12 @@ import pytest
 from capture_support import capture_interface
 from click import UsageError
 from click.testing import CliRunner
-from snmp_agent import FakeAgent, honest
+from snmp_agent import DESCRIPTION, SYSTEM, FakeAgent, honest
 
 import ipscout
 from ipscout import cli as cli_module
 from ipscout.cli import EXIT_ERROR, EXIT_NOT_REACHED, EXIT_OK, CliContext, OutputMode, cli, main
+from ipscout.snmpber import OCTET_STRING
 
 pytestmark = pytest.mark.os_agnostic
 
@@ -602,6 +603,49 @@ def test_snmp_system_refuses_an_unknown_version(capsys: pytest.CaptureFixture[st
     # Naming the option: an unknown COMMAND would also exit EXIT_ERROR.
     assert code == EXIT_ERROR
     assert "'--version'" in said.out + said.err
+
+
+def test_snmp_system_prints_what_the_device_said_literally(capsys: pytest.CaptureFixture[str]) -> None:
+    # The description is the device's own text: a "[/]" in it is not rich markup, and must
+    # neither raise MarkupError nor restyle the table.
+    said = b"HP [/] JetDirect [bold]x"
+    with FakeAgent(honest({**SYSTEM, DESCRIPTION: (OCTET_STRING, said)})) as agent:
+        code = main(["snmp-system", "127.0.0.1", "--port", str(agent.port), "--timeout", "1"])
+    out = capsys.readouterr().out
+
+    assert code == EXIT_OK
+    assert said.decode() in out
+    assert "0:02:03" in out  # 12345 ticks, as a person reads an uptime
+
+
+def test_banners_prints_a_greeting_literally(capsys: pytest.CaptureFixture[str]) -> None:
+    server = _OneGreeting(b"220 [/] ready\r\n")
+
+    code = main(["banners", "127.0.0.1", "--port", str(server.port)])
+    out = capsys.readouterr().out
+    server.finish()
+
+    assert code == EXIT_OK
+    assert "220 [/] ready" in out
+
+
+def test_snmp_system_expands_a_network_and_exits_zero_when_one_host_answered(capsys: pytest.CaptureFixture[str]) -> None:
+    with FakeAgent(honest()) as agent:
+        code = main(["--json", "snmp-system", "127.0.0.0/30", "--port", str(agent.port), "--timeout", "0.5"])
+    data = json.loads(capsys.readouterr().out)["data"]
+
+    assert list(data) == ["127.0.0.1", "127.0.0.2"]
+    assert data["127.0.0.1"]["state"] == "answered"
+    assert data["127.0.0.2"]["state"] != "answered"
+    assert code == EXIT_OK
+
+
+def test_snmp_system_passes_the_family_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["--json", "snmp-system", "::1", "-4", "--timeout", "0.5"])
+    record = json.loads(capsys.readouterr().out)["data"]["::1"]
+
+    assert code == EXIT_NOT_REACHED
+    assert (record["state"], "ipv4" in record["error"]) == ("unreachable", True)
 
 
 @pytest.mark.parametrize("farewell", ["QUIT\\q", "QUIT é"], ids=["unknown-escape", "not-ascii"])

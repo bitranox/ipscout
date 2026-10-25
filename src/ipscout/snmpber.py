@@ -73,6 +73,13 @@ _MAX_INTEGER_OCTETS: Final = 5
 #: 0 and 1 hold at most 40 children each; root 2 is the last and has no such limit.
 _ARCS_PER_ROOT: Final = 40
 _LAST_ROOT_ARC: Final = 2
+#: SMI (RFC 2578, 3.5): an identifier has at most 128 arcs, each at most 2**32-1. Enforced on
+#: the way in so a hostile agent cannot make the reader build an unbounded integer, which is
+#: quadratic to accumulate and whose str() raises a plain ValueError past 4300 digits.
+_MAX_ARCS: Final = 128
+_MAX_ARC: Final = 2**32 - 1
+#: The first encoded sub-identifier carries two arcs, so under root 2 it may exceed _MAX_ARC.
+_MAX_FIRST_SUB_IDENTIFIER: Final = _ARCS_PER_ROOT * _LAST_ROOT_ARC + _MAX_ARC
 #: Dotted text: at least two arcs, each a run of ASCII digits.
 _DOTTED: Final = re.compile(r"[0-9]{1,10}(?:\.[0-9]{1,10})+")
 
@@ -122,8 +129,11 @@ def _tlv(tag: int, body: bytes) -> bytes:
 
 
 def _integer(value: int) -> bytes:
-    # One sign bit more than the magnitude needs: the minimal two's complement form.
-    return _tlv(INTEGER, value.to_bytes(value.bit_length() // 8 + 1, "big", signed=True))
+    # One sign bit more than the magnitude needs: the minimal two's complement form. A negative
+    # value's magnitude is that of its complement (-128 needs the 7 bits of 127), else -128
+    # would take a needless 0xff octet.
+    magnitude = ~value if value < 0 else value
+    return _tlv(INTEGER, value.to_bytes(magnitude.bit_length() // 8 + 1, "big", signed=True))
 
 
 def _base128(number: int) -> bytes:
@@ -145,9 +155,9 @@ def encode_oid(dotted: str) -> bytes:
         The identifier's content octets, without tag or length.
 
     Raises:
-        ValueError: The text is not an object identifier: fewer than two arcs,
-            a non-digit, a first arc above 2, or a second arc above 39 under a
-            first arc of 0 or 1.
+        ValueError: The text is not an object identifier: fewer than two or
+            more than 128 arcs, a non-digit, an arc above 2**32-1, a first arc
+            above 2, or a second arc above 39 under a first arc of 0 or 1.
 
     Examples:
         >>> encode_oid("1.3.6.1.2.1.1.3.0").hex()
@@ -158,8 +168,10 @@ def encode_oid(dotted: str) -> bytes:
     if not _DOTTED.fullmatch(dotted):
         msg = f"not an object identifier: {dotted!r}"
         raise ValueError(msg)
-    first, second, *rest = (int(arc) for arc in dotted.split("."))
-    if first > _LAST_ROOT_ARC or (first < _LAST_ROOT_ARC and second >= _ARCS_PER_ROOT):
+    arcs = [int(arc) for arc in dotted.split(".")]
+    first, second, *rest = arcs
+    beyond_smi = len(arcs) > _MAX_ARCS or max(arcs) > _MAX_ARC
+    if beyond_smi or first > _LAST_ROOT_ARC or (first < _LAST_ROOT_ARC and second >= _ARCS_PER_ROOT):
         msg = f"not an object identifier: {dotted!r}"
         raise ValueError(msg)
     return _base128(_ARCS_PER_ROOT * first + second) + b"".join(_base128(arc) for arc in rest)
@@ -175,8 +187,9 @@ def decode_oid(body: bytes) -> str:
         Dotted text, such as ``"1.3.6.1.4.1.11.2.3.9.1"``.
 
     Raises:
-        BerError: The body is empty, ends inside a sub-identifier, or starts
-            one with the padding octet 0x80, which BER forbids.
+        BerError: The body is empty, ends inside a sub-identifier, starts one
+            with the padding octet 0x80, which BER forbids, or goes past what
+            SMI allows: more than 128 arcs, or an arc above 2**32-1.
 
     Examples:
         >>> decode_oid(bytes.fromhex("2b06010201010300"))
@@ -190,19 +203,34 @@ def decode_oid(body: bytes) -> str:
     if body[-1] & _LONG_FORM:
         msg = "object identifier ends inside a sub-identifier"
         raise BerError(msg)
-    arcs: list[int] = []
+    numbers = _sub_identifiers(body)
+    head = min(numbers[0] // _ARCS_PER_ROOT, _LAST_ROOT_ARC)
+    return ".".join(str(arc) for arc in [head, numbers[0] - _ARCS_PER_ROOT * head, *numbers[1:]])
+
+
+def _sub_identifiers(body: bytes) -> list[int]:
+    """Return the encoded sub-identifiers of an identifier body, refusing any SMI does not allow."""
+
+    numbers: list[int] = []
     current, starting = 0, True
     for octet in body:
         if starting and octet == _LONG_FORM:
             msg = "object identifier sub-identifier has a leading 0x80"
             raise BerError(msg)
         current = (current << 7) | (octet & 0x7F)
+        # Checked per octet, so a hostile run of continuation octets stops at the bound.
+        if current > (_MAX_ARC if numbers else _MAX_FIRST_SUB_IDENTIFIER):
+            msg = "object identifier arc exceeds 2**32-1"
+            raise BerError(msg)
         starting = not octet & _LONG_FORM
         if starting:
-            arcs.append(current)
+            numbers.append(current)
             current = 0
-    head = min(arcs[0] // _ARCS_PER_ROOT, _LAST_ROOT_ARC)
-    return ".".join(str(arc) for arc in [head, arcs[0] - _ARCS_PER_ROOT * head, *arcs[1:]])
+    # The first encoded sub-identifier holds two arcs.
+    if len(numbers) + 1 > _MAX_ARCS:
+        msg = f"object identifier of {len(numbers) + 1} arcs, more than {_MAX_ARCS}"
+        raise BerError(msg)
+    return numbers
 
 
 def encode_message(message: SnmpMessage) -> bytes:

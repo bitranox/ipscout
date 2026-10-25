@@ -545,7 +545,7 @@ The uptime is the restart detector: read it before an action that restarts the d
 afterwards, and a smaller value means it restarted. It wraps to 0 after about 497 days.
 
 Each `SnmpSystem` carries one of five states. `ANSWERED` holds the values, each `None` when the
-agent does not have it; `SILENT` means nothing usable arrived before the deadline, which is what a
+agent does not have it; `SILENT` means nothing arrived before the deadline, which is what a
 host that is down, a host without an agent and a wrong community all look like; `REFUSED` means the
 host answered with ICMP port unreachable, so it is up and has no agent on that port; `ERROR` and
 `UNREACHABLE` put the reason in `error`.
@@ -671,7 +671,8 @@ ipscout info
 ```
 
 Pass an SNMP community through `IPSCOUT_SNMP_COMMUNITY` rather than `--community`: a command-line
-argument is visible to every user in the process list.
+argument is visible to every user in the process list. An empty `IPSCOUT_SNMP_COMMUNITY` counts as unset, so
+`public` is sent; an empty `--community` is refused.
 
 Exit codes are independent of the output format:
 

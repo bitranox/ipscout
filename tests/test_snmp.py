@@ -11,7 +11,7 @@ import pytest
 from snmp_agent import DESCRIPTION, NAME, NO_SUCH_NAME, OBJECT_ID, SYSTEM, UPTIME, FakeAgent, answer, honest
 
 from ipscout import SnmpState, SnmpSystem, SnmpVersion, aread_snmp_system, read_snmp_system
-from ipscout.snmpber import END_OF_MIB_VIEW, INTEGER, OCTET_STRING, TIMETICKS
+from ipscout.snmpber import END_OF_MIB_VIEW, GET_RESPONSE, INTEGER, NULL, OBJECT_IDENTIFIER, OCTET_STRING, SEQUENCE, TIMETICKS
 
 if TYPE_CHECKING:
     from snmp_agent import Script
@@ -274,3 +274,82 @@ def test_the_deadline_bounds_a_host_whose_agent_never_answers() -> None:
         _read(agent, timeout=0.4)
 
     assert time.monotonic() - started < 2.0
+
+
+#: An identifier body far past what SMI allows: one arc of thousands of digits.
+HOSTILE_OID = b"\x2b" + b"\xff" * 2100 + b"\x7f"
+
+
+def _tlv(tag: int, body: bytes) -> bytes:
+    """One BER element, built here so a test can send what the library's encoder would refuse."""
+    if len(body) < 0x80:
+        return bytes([tag, len(body)]) + body
+    size = len(body).to_bytes((len(body).bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(size)]) + size + body
+
+
+def _reply_naming(request: SnmpMessage, name_body: bytes) -> bytes:
+    """A GetResponse to ``request`` whose one binding NAME is ``name_body``."""
+    binding = _tlv(SEQUENCE, _tlv(OBJECT_IDENTIFIER, name_body) + _tlv(NULL, b""))
+    integers = b"".join(_tlv(INTEGER, value.to_bytes(4, "big", signed=True)) for value in (request.request_id, 0, 0))
+    pdu = _tlv(GET_RESPONSE, integers + _tlv(SEQUENCE, binding))
+    return _tlv(SEQUENCE, _tlv(INTEGER, b"\x00") + _tlv(OCTET_STRING, request.community) + pdu)
+
+
+def test_an_object_id_value_past_what_smi_allows_is_an_error_not_a_raise() -> None:
+    with FakeAgent(honest({**SYSTEM, OBJECT_ID: (OBJECT_IDENTIFIER, HOSTILE_OID)})) as agent:
+        system = _read(agent)
+
+    assert system.state is SnmpState.ERROR
+    assert system.error is not None and "object_id" in system.error
+
+
+def test_a_binding_name_past_what_smi_allows_is_set_aside_not_raised() -> None:
+    with FakeAgent(lambda request: [_reply_naming(request, HOSTILE_OID)]) as agent:
+        system = _read(agent, timeout=0.5)
+
+    assert system.state is SnmpState.ERROR
+    assert system.error is not None and "malformed" in system.error
+
+
+@pytest.mark.parametrize(("body", "seconds"), [(b"\xff\xff\xff\xff", 42949672.95), (b"\x80\x00\x00\x00", 21474836.48)], ids=["largest", "top-bit"])
+def test_four_timeticks_octets_without_the_leading_zero_are_read_unsigned(body: bytes, seconds: float) -> None:
+    # X.690 reads a set top bit as negative, which TimeTicks never is; embedded agents that drop
+    # the leading zero mean the unsigned value, as net-snmp reads it.
+    with FakeAgent(honest({**SYSTEM, UPTIME: (TIMETICKS, body)})) as agent:
+        assert _read(agent).uptime_seconds == seconds
+
+
+def test_a_shorter_timeticks_with_its_top_bit_set_is_still_an_error() -> None:
+    with FakeAgent(honest({**SYSTEM, UPTIME: (TIMETICKS, b"\xff")})) as agent:
+        system = _read(agent)
+
+    assert system.state is SnmpState.ERROR
+    assert system.error is not None and "uptime" in system.error
+
+
+def test_a_v2c_reply_saying_no_such_name_is_an_error_not_a_re_ask() -> None:
+    with FakeAgent(lambda request: [answer(request, error_status=NO_SUCH_NAME, error_index=1)]) as agent:
+        system = _read(agent, version=SnmpVersion.V2C)
+
+    assert system.state is SnmpState.ERROR
+    assert system.error is not None and "noSuchName" in system.error
+    assert len(agent.requests) == 1
+
+
+def test_one_deadline_covers_every_v1_re_ask() -> None:
+    # Each answer drops one value after a pause; four rounds of 0.3 s would take 1.2 s if each
+    # re-ask got a fresh deadline.
+    delayed = honest({})
+
+    def slow(request: SnmpMessage) -> list[bytes]:
+        time.sleep(0.3)
+        return delayed(request)
+
+    with FakeAgent(slow) as agent:
+        started = time.monotonic()
+        _read(agent, timeout=0.7)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert len(agent.requests) < 4

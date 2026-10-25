@@ -173,7 +173,7 @@ Each value is an `SnmpSystem`; its `state` is an `SnmpState`:
 
 - `ANSWERED` - the agent replied; `uptime_seconds`, `name`, `description`, `object_id` are each
   `None` when the agent lacks that value.
-- `SILENT` - nothing usable before the deadline. A host that is down, no agent, and a WRONG
+- `SILENT` - nothing arrived before the deadline. A host that is down, no agent, and a WRONG
   COMMUNITY all look like this: SNMP answers a bad community with silence.
 - `REFUSED` - ICMP port unreachable: the host is up and nothing listens on that port.
 - `ERROR` - the agent sent an error status or a reply that is not a valid answer; `error` says which.

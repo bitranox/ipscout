@@ -74,6 +74,10 @@ _MAX_REQUEST_ID = 2**31 - 1
 _TICKS_PER_SECOND = 100
 #: A TimeTicks body is at most 5 octets: 4 for the value plus a leading 0 when its top bit is set.
 _MAX_TIMETICKS_OCTETS = 5
+#: The octets of the 32-bit value itself. Some embedded agents send exactly these with the top
+#: bit set and no leading 0; X.690 reads that as negative, which TimeTicks never is, so a body
+#: of this length is read unsigned, as net-snmp reads it.
+_TIMETICKS_VALUE_OCTETS = 4
 #: SNMPv1 error status for an OID the agent does not know (RFC 1157).
 _NO_SUCH_NAME = 2
 #: Windows ERROR_PORT_UNREACHABLE: how its default (proactor) event loop hands a datagram
@@ -190,7 +194,9 @@ def _is_port_unreachable(exc: OSError) -> bool:
     The one ICMP message arrives in three spellings, measured: Linux reports a
     refusal (ECONNREFUSED); on Windows the proactor event loop reports
     ERROR_PORT_UNREACHABLE and the selector loop a connection reset
-    (WSAECONNRESET), which on a datagram socket can mean nothing else. Kept
+    (WSAECONNRESET), which on a datagram socket means exactly that ICMP
+    message (Microsoft's ``recvfrom`` reference; an expired TTL is
+    WSAENETRESET instead, a different exception this does not match). Kept
     here rather than in ``is_refusal`` because a reset on a TCP stream means
     something different.
 
@@ -233,7 +239,8 @@ def _ticks(body: bytes) -> float:
     if not 1 <= len(body) <= _MAX_TIMETICKS_OCTETS:
         msg = f"uptime: TimeTicks of {len(body)} octets"
         raise _BadReplyError(msg)
-    seconds = int.from_bytes(body, "big", signed=True) / _TICKS_PER_SECOND
+    signed = len(body) != _TIMETICKS_VALUE_OCTETS
+    seconds = int.from_bytes(body, "big", signed=signed) / _TICKS_PER_SECOND
     if not 0 <= seconds <= MAX_UPTIME_SECONDS:
         msg = "uptime: TimeTicks outside 0 to 2**32-1"
         raise _BadReplyError(msg)
@@ -343,7 +350,7 @@ async def _read_one(host: str, settings: SnmpSettings) -> SnmpSystem:
     except IPScoutError as exc:
         return unreachable(failure_reason(exc))
     except TimeoutError:
-        return unreachable(f"no address within {settings.timeout:g} s")
+        return unreachable(f"no address and socket within {settings.timeout:g} s")
     except OSError as exc:
         return unreachable(failure_reason(exc))
     try:
@@ -387,7 +394,9 @@ async def aread_snmp_system(  # noqa: PLR0913 - public API: every knob is keywor
             is not an ``SnmpVersion`` member, or ``community`` is empty or
             longer than 255 characters. One message names every bad argument
             as ``<argument>: <reason>``, raised before anything is sent.
-            ``hosts`` being one bare string is refused the same way.
+            ``hosts`` being one bare string or holding a non-``str`` entry is
+            refused the same way, checked after the other arguments so a bad
+            one is reported before any host is taken from ``hosts``.
 
     Examples:
         >>> import asyncio

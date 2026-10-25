@@ -125,12 +125,15 @@ __all__ = [
 #: Shared Click context flags for consistent help output.
 CLICK_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
-#: Console for rich output.
-console = Console()
+#: Console for rich output. Markup is off on both consoles because what they
+#: print is mostly text the network chose - a device's description, a greeting,
+#: a PTR name, an OS error - and rich would read a "[/]" in it as a tag and raise
+#: MarkupError, or a "[bold]" as styling. Styling goes through ``style=``.
+console = Console(markup=False)
 
 #: Console for anything that must not land in the parsed stream: coverage
 #: notes go here in every output mode.
-error_console = Console(stderr=True)
+error_console = Console(stderr=True, markup=False)
 
 #: Style for error messages when traceback is suppressed.
 _ERROR_STYLE = Style(color="red", bold=True)
@@ -1015,7 +1018,7 @@ def cli_banners(  # noqa: PLR0913 - one parameter per CLI option, which is the p
     ipv4: bool,
     ipv6: bool,
 ) -> None:
-    """Read the first line each host sends on a TCP port. HOSTS may include networks, as in 10.0.0.0/24."""
+    """Read the first line each host sends on a TCP port. HOSTS may include networks, as in 192.0.2.0/24."""
 
     goodbye = _farewell_bytes(farewell)
     family = _family(ipv4=ipv4, ipv6=ipv6)
@@ -1080,7 +1083,7 @@ def cli_snmp_system(  # noqa: PLR0913 - one parameter per CLI option, which is t
     ipv4: bool,
     ipv6: bool,
 ) -> None:
-    """Read uptime, name, description and object id over SNMP. HOSTS may include networks, as in 10.0.0.0/24."""
+    """Read uptime, name, description and object id over SNMP. HOSTS may include networks, as in 192.0.2.0/24."""
 
     family = _family(ipv4=ipv4, ipv6=ipv6)
     try:

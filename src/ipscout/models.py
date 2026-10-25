@@ -590,7 +590,7 @@ class SnmpState(str, enum.Enum):
 
     #: The agent replied. Each value may still be None when the agent lacks it.
     ANSWERED = "answered"
-    #: Nothing usable arrived before the deadline.
+    #: Nothing arrived before the deadline. Datagrams that were not a valid reply make it ERROR.
     SILENT = "silent"
     #: ICMP port unreachable: the host is up and nothing listens on the port.
     REFUSED = "refused"
@@ -1199,7 +1199,7 @@ class SnmpSystem(_Frozen):
     #: sysDescr.0, the agent's free-text description of the device.
     description: str | None = None
     #: sysObjectID.0 in dotted form: the vendor's identifier for the device model.
-    object_id: str | None = Field(default=None, pattern=r"\A[0-2](\.[0-9]+)+\z")
+    object_id: str | None = Field(default=None, pattern=r"^[0-2](\.[0-9]+)+$")
     #: Why the read failed. Never empty, and never contains the community.
     error: str | None = Field(default=None, min_length=1)
 
