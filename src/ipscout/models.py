@@ -51,6 +51,7 @@ __all__ = [
     "MAX_PORT",
     "MAX_TIMEOUT",
     "MAX_TIMES",
+    "MAX_UPTIME_SECONDS",
     "MIN_PORT",
     "AddressFamily",
     "Banner",
@@ -85,6 +86,9 @@ __all__ = [
     "RoundTrip",
     "RouteInfo",
     "ScanMethod",
+    "SnmpState",
+    "SnmpSystem",
+    "SnmpVersion",
     "SubnetInfo",
     "SweepScope",
     "Timeout",
@@ -136,6 +140,10 @@ DEFAULT_TIMEOUT = 2.0
 #: ``settimeout(1e10)`` raises ``OverflowError`` mid-probe rather than a
 #: refusal before it. The bound is the smallest of those limits.
 MAX_TIMEOUT = 2147483.0
+
+#: The largest uptime SNMP can express: TimeTicks is an unsigned 32-bit count of hundredths
+#: of a second (RFC 2578), so an agent's uptime wraps to 0 after about 497 days.
+MAX_UPTIME_SECONDS = (2**32 - 1) / 100
 
 #: The most echoes one ping sends. Each echo carries its own sequence number,
 #: counting from 1, in a 16-bit ICMP header field, so one more would fail
@@ -553,6 +561,45 @@ class BannerState(str, enum.Enum):
     UNREACHABLE = "unreachable"
 
 
+class SnmpVersion(str, enum.Enum):
+    """The SNMP version a read speaks.
+
+    The caller chooses: an agent that speaks only one of them ignores the
+    other's request entirely, and silence cannot be told apart from a host
+    that is down, so falling back automatically would double every timeout.
+    """
+
+    V1 = "v1"
+    V2C = "v2c"
+
+    @property
+    def wire_number(self) -> int:
+        """The message's version field: 0 for SNMPv1 (RFC 1157), 1 for SNMPv2c (RFC 1901)."""
+
+        return 0 if self is SnmpVersion.V1 else 1
+
+
+class SnmpState(str, enum.Enum):
+    """How one SNMP read of one host went.
+
+    SILENT is everything SNMP itself cannot tell apart: a host that is down,
+    a host with no agent that drops the datagram, and a wrong community, which
+    an agent answers with silence. REFUSED is the one absence the network does
+    report: the host sent ICMP port unreachable, so it is up with no agent.
+    """
+
+    #: The agent replied. Each value may still be None when the agent lacks it.
+    ANSWERED = "answered"
+    #: Nothing usable arrived before the deadline.
+    SILENT = "silent"
+    #: ICMP port unreachable: the host is up and nothing listens on the port.
+    REFUSED = "refused"
+    #: The agent replied with an error status, or with something that is not a valid reply.
+    ERROR = "error"
+    #: The name did not resolve, or the network reported no route to the host.
+    UNREACHABLE = "unreachable"
+
+
 class ScanMethod(str, enum.Enum):
     """How a port scan asked its question.
 
@@ -624,6 +671,7 @@ class CommandName(str, enum.Enum):
     SUBNET = "subnet"
     SCAN_PORTS = "scan-ports"
     BANNERS = "banners"
+    SNMP_SYSTEM = "snmp-system"
     MTU = "mtu"
     WAKE = "wake"
     OBSERVE_DHCP = "observe-dhcp"
@@ -1121,6 +1169,48 @@ class Banner(_Frozen):
             raise ValueError(msg)
         if (self.error is not None) != (self.state is BannerState.UNREACHABLE):
             msg = "error is set exactly when state is UNREACHABLE"
+            raise ValueError(msg)
+        return self
+
+
+class SnmpSystem(_Frozen):
+    """The SNMP system group of one host, and how the read went.
+
+    The four values are set only when the state is ANSWERED, each None when
+    the agent does not have it; ``error`` is set exactly when the state is
+    ERROR or UNREACHABLE. Any other pairing is refused at construction, so a
+    reader can trust the state alone.
+
+    Examples:
+        >>> SnmpSystem(host="printer.test", state=SnmpState.ANSWERED, uptime_seconds=12.5).uptime_seconds
+        12.5
+        >>> SnmpSystem(host="printer.test", state=SnmpState.SILENT).name is None
+        True
+
+    """
+
+    #: The host exactly as the caller gave it, so results key back to the input.
+    host: str
+    state: SnmpState
+    #: sysUpTime.0 in seconds: how long the agent has run, which falls when the host restarts.
+    uptime_seconds: float | None = Field(default=None, ge=0, le=MAX_UPTIME_SECONDS)
+    #: sysName.0, the name an administrator gave the device.
+    name: str | None = None
+    #: sysDescr.0, the agent's free-text description of the device.
+    description: str | None = None
+    #: sysObjectID.0 in dotted form: the vendor's identifier for the device model.
+    object_id: str | None = Field(default=None, pattern=r"\A[0-2](\.[0-9]+)+\z")
+    #: Why the read failed. Never empty, and never contains the community.
+    error: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _fields_agree_with_state(self) -> SnmpSystem:
+        values = (self.uptime_seconds, self.name, self.description, self.object_id)
+        if self.state is not SnmpState.ANSWERED and any(value is not None for value in values):
+            msg = "values are set only when state is ANSWERED"
+            raise ValueError(msg)
+        if (self.error is not None) != (self.state in {SnmpState.ERROR, SnmpState.UNREACHABLE}):
+            msg = "error is set exactly when state is ERROR or UNREACHABLE"
             raise ValueError(msg)
         return self
 
