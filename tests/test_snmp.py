@@ -168,15 +168,32 @@ def test_an_agent_that_never_answers_is_silent() -> None:
     assert system == SnmpSystem(host="127.0.0.1", state=SnmpState.SILENT)
 
 
-@pytest.mark.os_linux
-def test_a_closed_port_is_refused_on_linux() -> None:
-    # Measured on Linux: a connected UDP socket receives ICMP port unreachable as
-    # ConnectionRefusedError. The other platforms are pinned in Task 6.
+@pytest.mark.parametrize(("host", "family"), [("127.0.0.1", socket.AF_INET), ("::1", socket.AF_INET6)], ids=["ipv4", "ipv6"])
+def test_a_closed_port_is_refused(host: str, family: socket.AddressFamily) -> None:
+    # A connected UDP socket hears the ICMP port unreachable, spelled per platform. Measured
+    # 2026-10-25: Linux ConnectionRefusedError (errno 111); Windows ProactorEventLoop OSError
+    # winerror 1234 and SelectorEventLoop ConnectionResetError 10054. macOS: from CI.
+    with socket.socket(family, socket.SOCK_DGRAM) as probe:
+        probe.bind((host, 0))
+        closed = probe.getsockname()[1]
+
+    assert read_snmp_system([host], port=closed, timeout=1.0)[host].state is SnmpState.REFUSED
+
+
+def test_a_closed_port_is_refused_under_the_selector_loop_too() -> None:
+    # Windows' default loop is the proactor; a caller may run the selector loop instead, which
+    # reports the same ICMP message differently (see the test above).
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         probe.bind(("127.0.0.1", 0))
         closed = probe.getsockname()[1]
 
-    assert read_snmp_system(["127.0.0.1"], port=closed, timeout=1.0)["127.0.0.1"].state is SnmpState.REFUSED
+    loop = asyncio.SelectorEventLoop()
+    try:
+        results = loop.run_until_complete(aread_snmp_system(["127.0.0.1"], port=closed, timeout=1.0))
+    finally:
+        loop.close()
+
+    assert results["127.0.0.1"].state is SnmpState.REFUSED
 
 
 def test_a_name_that_does_not_resolve_is_unreachable_not_raised() -> None:

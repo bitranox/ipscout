@@ -76,6 +76,9 @@ _TICKS_PER_SECOND = 100
 _MAX_TIMETICKS_OCTETS = 5
 #: SNMPv1 error status for an OID the agent does not know (RFC 1157).
 _NO_SUCH_NAME = 2
+#: Windows ERROR_PORT_UNREACHABLE: how its default (proactor) event loop hands a datagram
+#: endpoint the ICMP port unreachable, as a bare OSError rather than a ConnectionError.
+_ERROR_PORT_UNREACHABLE = 1234
 #: Error status names, RFC 1157 and RFC 3416, for error text a person can read.
 _ERROR_STATUS: Final = {
     1: "tooBig",
@@ -184,12 +187,22 @@ class _Inbox(asyncio.DatagramProtocol):
 def _is_port_unreachable(exc: OSError) -> bool:
     """Return whether a datagram socket error is the host's ICMP port unreachable.
 
-    Linux and macOS report it as a refusal. Windows reports it on a UDP socket
-    as a connection reset (WSAECONNRESET), which on a datagram socket can mean
-    nothing else; Task 6 of the implementation plan measures both.
+    The one ICMP message arrives in three spellings, measured: Linux reports a
+    refusal (ECONNREFUSED); on Windows the proactor event loop reports
+    ERROR_PORT_UNREACHABLE and the selector loop a connection reset
+    (WSAECONNRESET), which on a datagram socket can mean nothing else. Kept
+    here rather than in ``is_refusal`` because a reset on a TCP stream means
+    something different.
+
+    Examples:
+        >>> _is_port_unreachable(ConnectionRefusedError())
+        True
+        >>> _is_port_unreachable(OSError(113, "No route to host"))
+        False
+
     """
 
-    return is_refusal(exc) or isinstance(exc, ConnectionResetError)
+    return is_refusal(exc) or isinstance(exc, ConnectionResetError) or getattr(exc, "winerror", None) == _ERROR_PORT_UNREACHABLE
 
 
 async def _listen(inbox: _Inbox, request_id: int, deadline: float) -> _Heard:
