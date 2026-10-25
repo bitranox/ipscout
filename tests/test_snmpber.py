@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import socket
+
 import pytest
+from snmp_agent import FakeAgent, honest
 
 from ipscout.snmpber import (
     GET_REQUEST,
@@ -142,3 +145,12 @@ def test_a_binding_with_more_than_a_name_and_a_value_is_refused() -> None:
 
 def test_an_object_identifier_tag_is_what_names_a_binding() -> None:
     assert OBJECT_IDENTIFIER == 0x06
+
+
+def test_the_fake_agent_answers_a_real_request() -> None:
+    with FakeAgent(honest()) as agent, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+        client.settimeout(2.0)
+        client.sendto(UPTIME_REQUEST, ("127.0.0.1", agent.port))
+        reply = parse_message(client.recv(65535))
+
+    assert reply.bindings == (VarBind(oid=SYS_UPTIME, tag=TIMETICKS, value=(12345).to_bytes(2, "big")),)
