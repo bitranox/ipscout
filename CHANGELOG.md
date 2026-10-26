@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.5.1] 2026-10-26 21:35:48
+
 ### Added
 
 - `tests/test_dhcp_macos_bridge_live.py`: a `host_mutating` test, macOS as root, that runs the real
