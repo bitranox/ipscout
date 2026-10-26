@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.4.0] 2026-10-26 16:19:43
+
 ### Added
 
 - `subnet_info(interfaces=...)`: describe the given interfaces instead of reading this host's,
