@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.2.0] 2026-10-26 11:06:07
+
 ### Added
 
 - `read_snmp_system` / `aread_snmp_system` and the `ipscout snmp-system` command: the SNMP system
