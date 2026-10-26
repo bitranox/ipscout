@@ -12,8 +12,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `winapi.echo_status` and `mtu.fits_unfragmented`: the status one `IcmpSendEcho` call reports,
   from the reply when there is one and from `GetLastError` when not, and what the MTU probe reads
   from it.
-- `packet.parse_echo_request` and `packet.quoted_echo_request`: read the echo request an ICMP
-  error quotes, from an error-queue entry or from a received Time Exceeded message.
+- `packet.parse_echo_request` and `packet.quoted_echo_request` (returning a `QuotedRequest`):
+  read the echo request an ICMP error quotes, and its destination, from an error-queue entry or
+  from a received Time Exceeded message.
 - `InterfaceAddress.cidr` / `.network`, `SubnetInfo.cidr` and `Neighbour.address`: the text and
   parsed views of a record's address as plain properties, so they do not appear in JSON output.
   `models.interface_cidr` / `interface_network` are the one derivation behind them.
@@ -88,11 +89,19 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `atraceroute` / `atrace_path` report the routers along the path. The asyncio ICMP transport
   never read the Linux error queue, so every hop read as silent, and the unread error kept the
   socket readable, so the event loop spun at full CPU for the rest of the walk.
-- An ICMP error is credited only to the probe it quotes, by sequence (and by token where the quote
-  carries it), in the sync and the asyncio transport. Before, an error that arrived after its
-  probe gave up made the next probe's send fail, so that probe read as lost without being sent,
-  and an entry left on the error queue was read as the answer of a later hop that timed out,
-  which then showed an earlier hop's router.
+- An ICMP error is credited only to the probe it quotes, in the sync and the asyncio transport:
+  by sequence, by token where the quote carries it, by the quoted destination, and on a raw
+  socket by identifier (a raw socket sees every ICMP error on the host). Before, an error that
+  arrived after its probe gave up made the next probe's send fail, so that probe read as lost
+  without being sent; an entry left on the error queue was read as the answer of a later hop
+  that timed out, which then showed an earlier hop's router; and on a raw socket another
+  process's Time Exceeded with the same sequence ended a ping's wait, so a healthy host read as
+  lost.
+- A Redirect or Source Quench no longer ends a probe's wait: the redirecting router still
+  forwards the packet, and its reply was dropped. Only Destination Unreachable, Packet Too Big,
+  Parameter Problem and a local error end it; a Time Exceeded ends only a probe sent with a hop
+  limit.
+- A send refused for an error queued between the drain and the send is sent again once.
 - Traceroute over a raw ICMP socket without an error queue (macOS as root) reports the routers:
   the receive loop discarded their Time Exceeded messages as foreign traffic. Checked on Linux
   with a raw socket that refuses `IP_RECVERR`, not yet on a Mac.

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import secrets
 import socket
 import struct
 import sys
@@ -40,7 +41,7 @@ from typing import TYPE_CHECKING, NamedTuple, Protocol, cast
 
 from . import packet
 from .errors import IPScoutPermissionError
-from .models import AddressFamily
+from .models import MAX_ICMP_FIELD16, AddressFamily
 from .ports import EchoResult
 from .resolve import split_zone, zone_index
 
@@ -75,6 +76,10 @@ class _IcmpFamily(NamedTuple):
             it discards a packet whose hop limit ran out, which is the entire
             basis of traceroute.
         hop_option: The ``setsockopt`` option that sets the outgoing hop limit.
+        undelivered: The ICMP types that say a probe was not delivered:
+            Destination Unreachable and Parameter Problem, and on IPv6 Packet
+            Too Big, which IPv4 reports as an unreachable code. A Redirect or
+            Source Quench is not among them: the packet went on.
         offender_address: Where the address sits inside the offender
             ``sockaddr`` that follows ``struct sock_extended_err``:
             ``sockaddr_in`` is family(2) port(2) addr(4), ``sockaddr_in6`` is
@@ -87,6 +92,7 @@ class _IcmpFamily(NamedTuple):
     origin: int
     time_exceeded: int
     hop_option: int
+    undelivered: frozenset[int]
     offender_address: slice
 
 
@@ -97,6 +103,7 @@ _ICMP_FAMILY: dict[AddressFamily, _IcmpFamily] = {
         origin=2,
         time_exceeded=packet.TIME_EXCEEDED_V4,
         hop_option=socket.IP_TTL,
+        undelivered=frozenset({3, 12}),
         offender_address=slice(4, 8),
     ),
     AddressFamily.IPV6: _IcmpFamily(
@@ -105,6 +112,7 @@ _ICMP_FAMILY: dict[AddressFamily, _IcmpFamily] = {
         origin=3,
         time_exceeded=packet.TIME_EXCEEDED_V6,
         hop_option=socket.IPV6_UNICAST_HOPS,
+        undelivered=frozenset({1, 2, 4}),
         offender_address=slice(8, 24),
     ),
 }
@@ -251,6 +259,10 @@ _EXTENDED_ERR = struct.Struct("=IBBBBII")
 #: for that one exactly.
 _ANCILLARY_SIZE = 4096
 
+#: ``SO_EE_ORIGIN_LOCAL``: an error the local stack raised about a send, such
+#: as a datagram larger than the interface allows. Such a probe never left.
+_ORIGIN_LOCAL = 1
+
 
 class _Arrival(NamedTuple):
     """What ends a probe's wait with an answer: a reply, or a router's report.
@@ -268,19 +280,38 @@ class _Arrival(NamedTuple):
     ttl_expired: bool = False
 
 
-class _Waiter(NamedTuple):
-    """One outstanding async probe: what identifies it, and where its answer goes.
+class _Probe(NamedTuple):
+    """What identifies one probe in the ICMP errors that quote it.
 
     Attributes:
-        sequence: The probe's sequence number.
-        token: The probe's payload token.
-        answer: Resolved with the answer, or with ``None`` when an error says
-            no answer will come.
+        sequence: Its sequence number.
+        token: Its payload token, which a quote carries only when the router
+            quoted that far.
+        identifier: The identifier it was sent with, or ``None`` where the
+            kernel rewrites it (a ping socket), so a quote cannot be compared.
+        hop_limited: Whether it was sent with a hop limit. Only then can a
+            Time Exceeded answer it; without one, an expired hop is another
+            probe's or a routing loop's.
 
     """
 
     sequence: int
     token: bytes
+    identifier: int | None
+    hop_limited: bool
+
+
+class _Waiter(NamedTuple):
+    """One outstanding async probe: what identifies it, and where its answer goes.
+
+    Attributes:
+        probe: What identifies it.
+        answer: Resolved with the answer, or with ``None`` when an error says
+            no answer will come.
+
+    """
+
+    probe: _Probe
     answer: asyncio.Future[_Arrival | None]
 
 
@@ -288,15 +319,18 @@ class _IcmpError(NamedTuple):
     """An ICMP error about one of our probes, and what it means for that probe.
 
     Attributes:
-        probe: The echo request the error quotes; it is all that says which
-            probe the error is about.
-        arrival: The router's answer for a Time Exceeded. ``None`` for any
-            other error (unreachable, refused): the probe will get no answer,
+        probe: The echo request the error quotes; with ``destination`` it is
+            all that says which probe the error is about.
+        destination: Where the quoted request was going, packed, or ``None``
+            where the error does not say.
+        arrival: The router's answer for a Time Exceeded. ``None`` for an
+            error saying the probe was not delivered: it will get no answer,
             so its wait ends without one.
 
     """
 
     probe: packet.ParsedReply
+    destination: bytes | None
     arrival: _Arrival | None
 
 
@@ -416,37 +450,79 @@ def _matches(parsed: packet.ParsedReply, *, sequence: int, token: bytes, family:
     return packet.is_echo_reply(parsed, family=family) and parsed.sequence == sequence and parsed.token == token
 
 
-def _quotes(error: _IcmpError, *, sequence: int, token: bytes) -> bool:
-    """Return whether an error quotes this probe.
+def _concerns(error: _IcmpError, probe: _Probe, *, destination: bytes | None) -> bool:
+    """Return whether an error is about this probe.
 
-    The token counts only where the quote reaches it: a Linux ping socket's
-    error queue hands back just the eight header bytes, and RFC 792 routers
-    quote no more, so there the sequence is all there is.
+    A raw socket sees every ICMP error on the host, another process's probes
+    included, so the quote has to match on everything it carries: the
+    sequence, the token where the router quoted that far, the destination,
+    and the identifier where the kernel kept ours.
     """
 
-    return error.probe.sequence == sequence and error.probe.token in (None, token)
+    quoted = error.probe
+    return (
+        quoted.sequence == probe.sequence
+        and quoted.token in (None, probe.token)
+        and (probe.identifier is None or quoted.identifier == probe.identifier)
+        and (destination is None or error.destination in (None, destination))
+        and (probe.hop_limited or error.arrival is None)
+    )
 
 
-def _quoting(errors: list[_IcmpError], *, sequence: int, token: bytes) -> _IcmpError | None:
-    """Return the first of ``errors`` that quotes this probe, or None."""
+def _concerning(errors: list[_IcmpError], probe: _Probe, *, destination: bytes | None) -> _IcmpError | None:
+    """Return the first of ``errors`` that is about this probe, or None."""
 
-    return next((error for error in errors if _quotes(error, sequence=sequence, token=token)), None)
+    return next((error for error in errors if _concerns(error, probe, destination=destination)), None)
 
 
-def _queued_error(data: bytes, ancillary: list[tuple[int, int, bytes]], *, family: AddressFamily) -> _IcmpError | None:
-    """Return the error one error-queue entry reports, or None if it quotes no echo request."""
+def _packed_host(address: object, *, family: AddressFamily) -> bytes | None:
+    """Return the host of a received sockaddr, packed, or None if it holds no address."""
+
+    # The address element type is unknown to the checker, so the tuple is
+    # cast rather than the value read out of it: indexing an untyped tuple
+    # stays untyped however the target is annotated.
+    if not isinstance(address, tuple) or not address:
+        return None
+    host = split_zone(str(cast("tuple[object, ...]", address)[0])).address
+    try:
+        return socket.inet_pton(family.socket_family, host)
+    except (OSError, ValueError):
+        return None
+
+
+def _undelivered(control: bytes, *, family: AddressFamily) -> bool:
+    """Return whether an error-queue control message says the probe was not delivered."""
+
+    if len(control) < _EXTENDED_ERR.size:
+        return False
+    fields = _EXTENDED_ERR.unpack(control[: _EXTENDED_ERR.size])
+    origin, ee_type = fields[1], fields[2]
+    facts = _ICMP_FAMILY[family]
+    return origin == _ORIGIN_LOCAL or (origin == facts.origin and ee_type in facts.undelivered)
+
+
+def _queued_error(data: bytes, ancillary: list[tuple[int, int, bytes]], address: object, *, family: AddressFamily) -> _IcmpError | None:
+    """Return the error one error-queue entry reports, or None if it is no answer to a probe.
+
+    ``address`` is the entry's sockaddr, which names the quoted request's
+    destination. A Redirect or Source Quench reads as None: the probe went
+    on, and so does its wait.
+    """
 
     probe = packet.parse_echo_request(data, family=family)
     if probe is None:
         return None
+    destination = _packed_host(address, family=family)
     for _level, _ctype, control in ancillary:
         router = _offender_address(control, family=family)
         if router is not None:
-            return _IcmpError(probe, _Arrival(finished=time.perf_counter(), source=router, ttl_expired=True))
-    return _IcmpError(probe, None)
+            return _IcmpError(probe, destination, _Arrival(finished=time.perf_counter(), source=router, ttl_expired=True))
+        if _undelivered(control, family=family):
+            return _IcmpError(probe, destination, None)
+    return None
 
 
-def _drain_errors(reader: ErrorQueueReader | None, *, family: AddressFamily) -> list[_IcmpError]:
+def _drain_errors(reader: ErrorQueueReader | None, *, family: AddressFamily) -> list[_IcmpError] | None:
     """Read every entry on the error queue, oldest first, and return the errors they report.
 
     Reading the queue is what clears the socket's pending error. While one
@@ -461,20 +537,24 @@ def _drain_errors(reader: ErrorQueueReader | None, *, family: AddressFamily) -> 
         family: Which family's message numbers apply.
 
     Returns:
-        The errors that quote one of this family's echo requests.
+        The errors that answer a probe, in the order queued, or ``None`` when
+        not a single entry was read. An empty list means entries were read and
+        none of them answers a probe (a Redirect, another protocol's error).
 
     """
 
-    errors: list[_IcmpError] = []
     if reader is None:
-        return errors
+        return None
+    errors: list[_IcmpError] = []
+    read = False
     while True:
         try:
-            data, ancillary, _flags, _addr = reader.recvmsg(packet.MAX_IP_LENGTH, _ANCILLARY_SIZE, reader.flag)
+            data, ancillary, _flags, address = reader.recvmsg(packet.MAX_IP_LENGTH, _ANCILLARY_SIZE, reader.flag)
         except OSError:
             # EAGAIN: the queue is empty.
-            return errors
-        error = _queued_error(data, ancillary, family=family)
+            return errors if read else None
+        read = True
+        error = _queued_error(data, ancillary, address, family=family)
         if error is not None:
             errors.append(error)
 
@@ -486,24 +566,37 @@ def _time_exceeded_datagram(raw: bytes, peer: object, *, family: AddressFamily) 
     router that discarded the probe.
     """
 
-    probe = packet.quoted_echo_request(raw, family=family)
-    # recvfrom's address element type is unknown to the checker, so the
-    # tuple is cast rather than the value read out of it: indexing an
-    # untyped tuple stays untyped however the target is annotated.
-    if probe is None or not isinstance(peer, tuple) or not peer:
+    quoted = packet.quoted_echo_request(raw, family=family)
+    if quoted is None or not isinstance(peer, tuple) or not peer:
         return None
     router = str(cast("tuple[object, ...]", peer)[0])
-    return _IcmpError(probe, _Arrival(finished=time.perf_counter(), source=router, ttl_expired=True))
+    return _IcmpError(quoted.request, quoted.destination, _Arrival(finished=time.perf_counter(), source=router, ttl_expired=True))
 
 
-def _result(arrival: _Arrival | None, *, started: float, ttl: int | None) -> EchoResult:
-    """Turn what ended a probe's wait into its result.
+def _own_destination(destination: tuple[str, int] | tuple[str, int, int, int], *, family: AddressFamily) -> bytes | None:
+    """Return the probe destination packed, as an error's quote is compared with it."""
 
-    A Time Exceeded for a probe sent without a hop limit (a routing loop) is
-    no answer: there was no hop to report.
+    try:
+        return socket.inet_pton(family.socket_family, destination[0])
+    except (OSError, ValueError):
+        return None
+
+
+def _new_identifier() -> int:
+    """Return a random echo identifier for one transport.
+
+    A ping socket overwrites it; a raw socket sends it as it is, and the
+    quote of a router's error echoes it back, which is what tells this
+    transport's probe from another process's with the same sequence.
     """
 
-    if arrival is None or (arrival.ttl_expired and ttl is None):
+    return secrets.randbelow(MAX_ICMP_FIELD16 + 1)
+
+
+def _result(arrival: _Arrival | None, *, started: float) -> EchoResult:
+    """Turn what ended a probe's wait into its result."""
+
+    if arrival is None:
         return EchoResult()
     return EchoResult(rtt_ms=(arrival.finished - started) * 1000.0, source=arrival.source, ttl_expired=arrival.ttl_expired)
 
@@ -543,6 +636,8 @@ class PosixEchoTransport:
         self._socket = (socket_factory or open_socket)(family)
         self._errqueue = _enable_error_queue(self._socket, family=family)
         self._is_raw = _is_raw_socket(self._socket)
+        self._own_destination = _own_destination(self._destination, family=family)
+        self._identifier = _new_identifier()
 
     @property
     def supports_ttl(self) -> bool:
@@ -567,8 +662,8 @@ class PosixEchoTransport:
 
         return self._errqueue is not None or self._is_raw
 
-    def _take_errors(self) -> list[_IcmpError]:
-        """Drain the error queue without blocking."""
+    def _take_errors(self) -> list[_IcmpError] | None:
+        """Drain the error queue without blocking; None when nothing was queued."""
 
         self._socket.settimeout(0)
         return _drain_errors(self._errqueue, family=self._family)
@@ -592,7 +687,7 @@ class PosixEchoTransport:
             host can hold an ICMP socket and have its replies copied to ours,
             and discarding the remaining budget on the first stranger would
             turn a healthy target into a phantom timeout. An ICMP error is
-            treated the same way: it ends the wait only when it quotes this
+            treated the same way: it ends the wait only when it is about this
             probe.
 
         """
@@ -602,21 +697,34 @@ class PosixEchoTransport:
             sequence=sequence,
             payload_size=self._payload_size,
             family=self._family,
+            identifier=self._identifier,
         )
+        probe = _Probe(sequence, token, self._identifier if self._is_raw else None, hop_limited=ttl is not None)
         # Errors still queued are about earlier probes, answered or given up
         # on; one left unread would refuse this send with its errno.
         self._take_errors()
 
         started = time.perf_counter()
-        try:
-            self._socket.sendto(datagram, self._destination)
-        except OSError:
+        if not self._send(datagram, timeout=timeout):
             # An unreachable network refuses at send time; that is a result.
             return EchoResult()
-        arrival = self._await(sequence=sequence, token=token, deadline=started + timeout)
-        return _result(arrival, started=started, ttl=ttl)
+        return _result(self._await(probe, deadline=started + timeout), started=started)
 
-    def _await(self, *, sequence: int, token: bytes, deadline: float) -> _Arrival | None:
+    def _send(self, datagram: bytes, *, timeout: float) -> bool:
+        """Send a request; one refused for an error queued meanwhile is sent again after the drain."""
+
+        for _attempt in range(2):
+            self._socket.settimeout(timeout)
+            try:
+                self._socket.sendto(datagram, self._destination)
+            except OSError:
+                if self._take_errors() is None:
+                    return False
+                continue
+            return True
+        return False
+
+    def _await(self, probe: _Probe, *, deadline: float) -> _Arrival | None:
         """Wait until ``deadline`` for this probe's answer; None is no answer."""
 
         while (remaining := deadline - time.perf_counter()) > 0:
@@ -630,23 +738,25 @@ class PosixEchoTransport:
                 # which probe it is about. An error with no entry behind it
                 # cannot be about another probe, so it ends this wait.
                 errors = self._take_errors()
-                mine = _quoting(errors, sequence=sequence, token=token)
-                if mine is not None or not errors:
+                mine = _concerning(errors or [], probe, destination=self._own_destination)
+                if mine is not None or errors is None:
                     return None if mine is None else mine.arrival
                 continue
-            arrival = self._answer_in(raw, peer, sequence=sequence, token=token)
+            arrival = self._answer_in(raw, peer, probe)
             if arrival is not None:
                 return arrival
         return None
 
-    def _answer_in(self, raw: bytes, peer: object, *, sequence: int, token: bytes) -> _Arrival | None:
+    def _answer_in(self, raw: bytes, peer: object, probe: _Probe) -> _Arrival | None:
         """Return the answer a received datagram gives this probe, or None if it is not one."""
 
         parsed = packet.parse_echo_reply(raw)
-        if parsed is not None and _matches(parsed, sequence=sequence, token=token, family=self._family):
+        if parsed is not None and _matches(parsed, sequence=probe.sequence, token=probe.token, family=self._family):
             return _Arrival(finished=time.perf_counter(), source=str(cast("tuple[object, ...]", peer)[0]))
         error = _time_exceeded_datagram(raw, peer, family=self._family)
-        return error.arrival if error is not None and _quotes(error, sequence=sequence, token=token) else None
+        if error is None or not _concerns(error, probe, destination=self._own_destination):
+            return None
+        return error.arrival
 
     def close(self) -> None:
         """Close the underlying socket."""
@@ -701,6 +811,8 @@ class AsyncPosixEchoTransport:
         self._reader_installed = False
         self._errqueue = _enable_error_queue(self._socket, family=family)
         self._is_raw = _is_raw_socket(self._socket)
+        self._own_destination = _own_destination(self._destination, family=family)
+        self._identifier = _new_identifier()
 
     @property
     def supports_ttl(self) -> bool:
@@ -735,11 +847,13 @@ class AsyncPosixEchoTransport:
                 return
             self._settle_datagram(raw, peer)
 
-    def _settle_errors(self) -> None:
-        """Hand every queued error to the probe it quotes."""
+    def _settle_errors(self) -> bool:
+        """Hand every queued error to the probe it is about; return whether anything was queued."""
 
-        for error in _drain_errors(self._errqueue, family=self._family):
+        errors = _drain_errors(self._errqueue, family=self._family)
+        for error in errors or []:
             self._settle(error)
+        return errors is not None
 
     def _settle_datagram(self, raw: bytes, peer: object) -> None:
         """Hand a received datagram to the probe it answers, if any."""
@@ -757,16 +871,29 @@ class AsyncPosixEchoTransport:
             self._settle(error)
 
     def _settle(self, error: _IcmpError) -> None:
-        """Resolve the one outstanding probe an error quotes.
+        """Resolve the one outstanding probe an error is about.
 
         A quote without the token names a probe by sequence alone; if two
         outstanding probes share that sequence the error cannot say which,
         and it is dropped rather than credited to either.
         """
 
-        named = [waiter for waiter in self._waiters.values() if _quotes(error, sequence=waiter.sequence, token=waiter.token)]
+        named = [waiter for waiter in self._waiters.values() if _concerns(error, waiter.probe, destination=self._own_destination)]
         if len(named) == 1 and not named[0].answer.done():
             named[0].answer.set_result(error.arrival)
+
+    def _send(self, datagram: bytes) -> bool:
+        """Send a request; one refused for an error queued meanwhile is sent again after the drain."""
+
+        for _attempt in range(2):
+            try:
+                self._socket.sendto(datagram, self._destination)
+            except OSError:
+                if not self._settle_errors():
+                    return False
+                continue
+            return True
+        return False
 
     async def probe(self, *, sequence: int, timeout: float, ttl: int | None = None) -> EchoResult:
         """Send one echo and await the matching reply.
@@ -787,25 +914,24 @@ class AsyncPosixEchoTransport:
             sequence=sequence,
             payload_size=self._payload_size,
             family=self._family,
+            identifier=self._identifier,
         )
+        probe = _Probe(sequence, token, self._identifier if self._is_raw else None, hop_limited=ttl is not None)
         # Errors still queued are about earlier probes; one the reader has not
         # reached yet would refuse this send with its errno.
         self._settle_errors()
 
-        waiter = _Waiter(sequence, token, asyncio.get_running_loop().create_future())
+        waiter = _Waiter(probe, asyncio.get_running_loop().create_future())
         self._waiters[token] = waiter
         started = time.perf_counter()
         try:
-            try:
-                self._socket.sendto(datagram, self._destination)
-            except OSError:
+            if not self._send(datagram):
                 return EchoResult()
-
             try:
                 arrival = await asyncio.wait_for(waiter.answer, timeout)
             except (TimeoutError, asyncio.TimeoutError):
                 return EchoResult()
-            return _result(arrival, started=started, ttl=ttl)
+            return _result(arrival, started=started)
         finally:
             # Always unregister, so a timed-out probe cannot leak its entry and
             # a later reply to it cannot resolve a future nobody is awaiting.

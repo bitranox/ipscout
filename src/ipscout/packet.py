@@ -63,6 +63,7 @@ __all__ = [
     "EchoPayload",
     "EchoRequest",
     "ParsedReply",
+    "QuotedRequest",
     "build_echo_request",
     "checksum",
     "ipv4_header_length",
@@ -627,8 +628,8 @@ def parse_echo_request(datagram: bytes, *, family: AddressFamily) -> ParsedReply
     Returns:
         The decoded request, or ``None`` when the bytes are not an echo
         request of this family. A quote cut short after the header still
-        parses, with ``token`` ``None``: a Linux ping socket's error queue
-        hands back only the eight header bytes.
+        parses, with ``token`` ``None``: a router may quote only the eight
+        header bytes RFC 792 requires, and the error queue then holds no more.
 
     Examples:
         >>> datagram, token = build_echo_request(sequence=4, token=b"abcdefgh")
@@ -648,26 +649,54 @@ def parse_echo_request(datagram: bytes, *, family: AddressFamily) -> ParsedReply
     return parsed if parsed is not None and parsed.icmp_type == expected else None
 
 
-def _quoted_datagram(body: bytes, *, family: AddressFamily) -> bytes | None:
-    """Return the IP datagram a Time Exceeded ``body`` quotes, from its IP header on."""
+#: Where the protocol (IPv4) or next-header (IPv6) byte and the destination
+#: address sit inside a quoted IP header, and the value naming ICMP there.
+_IPV4_PROTOCOL_OFFSET = 9
+_IPV4_DESTINATION = slice(16, 20)
+_IPV6_NEXT_HEADER_OFFSET = 6
+_IPV6_DESTINATION = slice(24, 40)
+_ICMP_PROTOCOL = {AddressFamily.IPV4: 1, AddressFamily.IPV6: 58}
+
+
+class QuotedRequest(NamedTuple):
+    """The echo request a Time Exceeded message quotes, and where it was going.
+
+    Attributes:
+        request: The quoted request; its sequence, and its token when the
+            quote reaches that far, say which probe it was.
+        destination: The quoted IP header's destination address, packed. On
+            a raw socket, which sees every ICMP message for the host, it is
+            what tells this transport's probe from another's with the same
+            sequence.
+
+    """
+
+    request: ParsedReply
+    destination: bytes
+
+
+def _quoted_header(body: bytes, *, family: AddressFamily) -> tuple[bytes, int] | None:
+    """Return the IP header a Time Exceeded ``body`` quotes, and its length, or None."""
 
     quoted = body[HEADER_SIZE:]
     if family is AddressFamily.IPV6:
         if len(quoted) < IPV6_HEADER_SIZE or (quoted[0] >> 4) != AddressFamily.IPV6.ip_version:
             return None
-        return quoted[IPV6_HEADER_SIZE:]
+        return quoted, IPV6_HEADER_SIZE
     header_len = ipv4_header_length(quoted)
-    return None if header_len is None else quoted[header_len:]
+    return None if header_len is None else (quoted, header_len)
 
 
-def quoted_echo_request(datagram: bytes, *, family: AddressFamily) -> ParsedReply | None:
+def quoted_echo_request(datagram: bytes, *, family: AddressFamily) -> QuotedRequest | None:
     """Return the echo request a received Time Exceeded message quotes, or None.
 
     A router that discards a probe sends back its own ICMP header, then the
     IP header and at least the first eight bytes of the probe it discarded
-    (RFC 792; RFC 1812 asks for as much as fits). That quote is what ties the
-    message to one probe, which matters on a raw socket: it receives every
-    ICMP message for the host, another process's traceroute included.
+    (RFC 792; RFC 1812 asks for as much as fits, and routers differ). That
+    quote is what ties the message to one probe, which matters on a raw
+    socket: it receives every ICMP message for the host, another process's
+    traceroute included. A quoted packet that is not ICMP (a UDP
+    traceroute's) is refused, since its header can read as an echo request.
 
     Args:
         datagram: The bytes as received, with or without a leading IPv4
@@ -675,21 +704,36 @@ def quoted_echo_request(datagram: bytes, *, family: AddressFamily) -> ParsedRepl
         family: Which family's numbering and headers apply.
 
     Returns:
-        The quoted request, or ``None`` when this is not a Time Exceeded
-        message quoting one of this family's echo requests.
+        The quoted request and its destination, or ``None`` when this is not
+        a Time Exceeded message quoting one of this family's echo requests.
 
     Examples:
         >>> request, _ = build_echo_request(sequence=3, token=b"abcdefgh")
-        >>> inner_ip = b"\\x45" + bytes(19)
+        >>> inner_ip = b"\\x45" + bytes(8) + b"\\x01" + bytes(6) + bytes([192, 0, 2, 1])
         >>> message = bytes([TIME_EXCEEDED_V4]) + bytes(7) + inner_ip + request[:HEADER_SIZE]
-        >>> quoted_echo_request(b"\\x45" + bytes(19) + message, family=AddressFamily.IPV4).sequence
-        3
-        >>> quoted_echo_request(request, family=AddressFamily.IPV4) is None
+        >>> quoted = quoted_echo_request(b"\\x45" + bytes(19) + message, family=AddressFamily.IPV4)
+        >>> quoted.request.sequence, quoted.destination.hex()
+        (3, 'c0000201')
+
+        A quoted UDP datagram (protocol 17) is not one of our requests:
+
+        >>> udp_ip = inner_ip[:9] + b"\\x11" + inner_ip[10:]
+        >>> udp = bytes([TIME_EXCEEDED_V4]) + bytes(7) + udp_ip + request[:HEADER_SIZE]
+        >>> quoted_echo_request(b"\\x45" + bytes(19) + udp, family=AddressFamily.IPV4) is None
         True
 
     """
 
     if not is_time_exceeded(datagram, family=family):
         return None
-    quoted = _quoted_datagram(strip_ip_header(datagram), family=family)
-    return None if quoted is None else parse_echo_request(quoted, family=family)
+    found = _quoted_header(strip_ip_header(datagram), family=family)
+    if found is None:
+        return None
+    header, header_len = found
+    ipv6 = family is AddressFamily.IPV6
+    protocol = header[_IPV6_NEXT_HEADER_OFFSET if ipv6 else _IPV4_PROTOCOL_OFFSET]
+    if protocol != _ICMP_PROTOCOL[family]:
+        return None
+    request = parse_echo_request(header[header_len:], family=family)
+    destination = header[_IPV6_DESTINATION if ipv6 else _IPV4_DESTINATION]
+    return None if request is None else QuotedRequest(request, destination)

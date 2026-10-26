@@ -178,10 +178,20 @@ through the same predicate, having no hop limit to expire at all.
 
 Every ICMP error is credited only to the probe it quotes: the error-queue entry hands back the
 request as sent, and a Time Exceeded datagram carries it after the router's header. The quote
-holds the sequence, and the token when it reaches that far (a Linux ping socket's error queue
-returns only the eight header bytes). Both transports drain the error queue before every send
-and whenever the socket reports an error. An entry left unread keeps the socket readable, which
-spins an event loop, and makes the kernel refuse the next send with its errno.
+holds the sequence, and the token when it reaches that far; a router that quotes only the eight
+header bytes RFC 792 requires leaves the sequence alone. A raw socket sees every ICMP message
+for the host, so the quoted destination must also be the probe's own, and on a raw socket the
+identifier too, which the kernel rewrites only on a ping socket. A Time Exceeded concerns only
+a probe sent with a hop limit.
+
+What an error means is read from its ICMP type. Time Exceeded names the hop. Destination
+Unreachable, Packet Too Big, Parameter Problem and a local error mean the probe was not
+delivered, so its wait ends without an answer. A Redirect or Source Quench says nothing of the
+kind (a redirecting router still forwards the packet), so it is read and ignored.
+
+Both transports drain the error queue before every send and on every readiness. An entry left
+unread keeps the socket readable, which spins an event loop, and makes the kernel refuse the
+next send with its errno; a send refused that way is retried once after the drain.
 
 ### The Linux socket-option fallback
 
