@@ -59,7 +59,8 @@ def seconds_left(deadline: float) -> float:
     Examples:
         >>> seconds_left(time.monotonic() - 5) == MIN_WAIT
         True
-        >>> 9 < seconds_left(time.monotonic() + 10) <= 10
+        >>> start = time.monotonic()
+        >>> 9 < seconds_left(start + 10) <= (start + 10) - start
         True
 
     """

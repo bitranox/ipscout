@@ -123,8 +123,13 @@ def test_a_deadline_just_now_still_leaves_the_floor() -> None:
 
 
 def test_a_future_deadline_leaves_the_time_until_it() -> None:
-    left = seconds_left(time.monotonic() + 30)
-    assert 29 < left <= 30
+    # Bounded by the distance from the clock read BEFORE the call, never by the literal 30: a
+    # coarse clock (Windows ticks every ~15.6 ms) returns one value for both reads, and
+    # (t + 30) - t rounds above 30 for many t, so `<= 30` failed with no time having passed.
+    start = time.monotonic()
+    target = start + 30
+    left = seconds_left(target)
+    assert 29 < left <= target - start
 
 
 # --------------------------------------------------------------------------
