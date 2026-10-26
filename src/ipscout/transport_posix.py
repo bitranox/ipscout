@@ -54,7 +54,15 @@ if TYPE_CHECKING:
     #: hosts where opening an ICMP socket is not permitted at all.
     SocketFactory = Callable[[AddressFamily], socket.socket]
 
-__all__ = ["AsyncPosixEchoTransport", "PosixEchoTransport", "RecvMsg", "open_socket", "recvmsg_of", "socket_const"]
+__all__ = [
+    "AsyncPosixEchoTransport",
+    "PosixEchoTransport",
+    "RecvMsg",
+    "open_hop_socket",
+    "open_socket",
+    "recvmsg_of",
+    "socket_const",
+]
 
 
 class _IcmpFamily(NamedTuple):
@@ -170,6 +178,51 @@ def _is_raw_socket(sock: socket.socket) -> bool:
         return sock.type == socket.SOCK_RAW
     except (AttributeError, OSError):  # pragma: no cover - exotic socket doubles
         return False
+
+
+def open_hop_socket(family: AddressFamily) -> socket.socket:
+    """Return the ICMP socket that can observe expired hops, where any can.
+
+    Linux shows Time Exceeded on a datagram socket's error queue. macOS has no
+    error queue and gives the datagram socket to every process, root included,
+    so :func:`open_socket` alone never reaches the raw socket that receives
+    Time Exceeded there: measured on a macOS runner, traceroute under ``sudo``
+    was refused for want of it. A process allowed a raw socket gets one; any
+    other keeps the datagram socket, and traceroute refuses that one.
+
+    Args:
+        family: Which ICMP flavour to open.
+
+    Returns:
+        An ICMP socket ready for ``sendto``.
+
+    Raises:
+        IPScoutPermissionError: As :func:`open_socket`.
+
+    """
+
+    datagram = open_socket(family)
+    error_queue = _enable_error_queue(datagram, family=family) is not None
+
+    def open_raw() -> socket.socket:
+        return socket.socket(family.socket_family, socket.SOCK_RAW, _ICMP_FAMILY[family].protocol)
+
+    return _hop_socket(datagram, error_queue=error_queue, open_raw=open_raw)
+
+
+def _hop_socket(datagram: socket.socket, *, error_queue: bool, open_raw: Callable[[], socket.socket]) -> socket.socket:
+    """Keep ``datagram`` when it can observe expired hops, else swap in a raw socket if one opens."""
+
+    if error_queue or _is_raw_socket(datagram):
+        return datagram
+    try:
+        raw = open_raw()
+    except OSError:
+        # Not allowed a raw socket: the walk is refused on the datagram
+        # socket's capability, which is the honest answer here.
+        return datagram
+    datagram.close()
+    return raw
 
 
 class RecvMsg(Protocol):

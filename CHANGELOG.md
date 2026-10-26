@@ -5,6 +5,21 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `factory.make_hop_transport` / `make_async_hop_transport`: the ICMP transport a hop walk needs,
+  one that can observe Time Exceeded on this platform.
+
+### Fixed
+
+- `traceroute` / `atraceroute` as root on macOS raised `IPScoutUnsupportedError`. The walk opened
+  the datagram ICMP socket, which macOS hands to root as well and which never surfaces Time
+  Exceeded there; it now takes a raw ICMP socket when the process may open one. Unprivileged macOS
+  still raises, and its message now says to run as root.
+- `path_mtu` on a BSD that refuses `IP_DONTFRAG` raised `IPScoutPermissionError` telling the caller
+  to run as root, which no privilege changes. It now returns `None`, the documented answer for a
+  platform that cannot report the path MTU.
+
 ## [2.4.0] 2026-10-26 16:19:43
 
 ### Added

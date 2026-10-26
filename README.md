@@ -315,11 +315,12 @@ Ask the host itself rather than guessing, with `ipscout capabilities` or `ipscou
 
 ## Limitations worth knowing before you depend on it
 
-**Traceroute does not work on macOS.** This was measured on a macOS runner: `MSG_ERRQUEUE` is not
-defined there, and a plain receive on the ICMP socket surfaces nothing, so an unprivileged process
-never sees ICMP Time Exceeded. `traceroute` raises `IPScoutUnsupportedError` rather than returning a
-column of silent hops that would look like a broken network instead of a missing feature. Running as
-root does not fix it, which is why it is a separate exception type from the permission one.
+**Traceroute on macOS needs root.** This was measured on a macOS runner: `MSG_ERRQUEUE` is not
+defined there, and a plain receive on the unprivileged ICMP socket surfaces nothing, so an
+unprivileged process never sees ICMP Time Exceeded. As root, `traceroute` opens a raw ICMP socket,
+which receives it. Unprivileged, it raises `IPScoutUnsupportedError` rather than returning a column
+of silent hops that would look like a broken network instead of a missing feature. Linux and Windows
+need no privilege.
 
 **Async on Windows is executor-backed.** `IcmpSendEcho` is a blocking C call with no asyncio
 integration. `aping` behaves identically there, but a sweep of thousands is bounded by a thread pool

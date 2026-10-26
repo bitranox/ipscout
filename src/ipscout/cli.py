@@ -1263,10 +1263,10 @@ def _traceroute_available(*, icmp_v4: bool) -> bool:
         return False
     if sys.platform == "win32":  # pragma: no cover - Windows only
         return True
-    from .transport_posix import PosixEchoTransport  # noqa: PLC0415 - POSIX-only import, never reached on Windows
+    from .transport_posix import PosixEchoTransport, open_hop_socket  # noqa: PLC0415 - POSIX-only import, never reached on Windows
 
     try:
-        with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4) as transport:
+        with PosixEchoTransport("127.0.0.1", AddressFamily.IPV4, socket_factory=open_hop_socket) as transport:
             return transport.supports_ttl_discovery
     except IPScoutError:  # pragma: no cover - guarded by icmp_v4 above
         return False

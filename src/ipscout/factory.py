@@ -8,6 +8,8 @@ with an injected fake on any machine.
 Contents:
     make_transport: Build a synchronous transport.
     make_async_transport: Build an asyncio transport.
+    make_hop_transport: Build a synchronous ICMP transport that sees expired hops.
+    make_async_hop_transport: Build an asyncio ICMP transport that sees expired hops.
     icmp_available: Report whether ICMP can be used without raising.
 
 """
@@ -20,14 +22,14 @@ from typing import TYPE_CHECKING
 from .errors import IPScoutPermissionError
 from .models import AddressFamily, ProbeMethod
 from .packet import DEFAULT_PAYLOAD_SIZE
-from .transport_posix import AsyncPosixEchoTransport, PosixEchoTransport, open_socket
+from .transport_posix import AsyncPosixEchoTransport, PosixEchoTransport, open_hop_socket, open_socket
 from .transport_tcp import DEFAULT_TCP_PORT, AsyncTcpEchoTransport, TcpEchoTransport
 from .transport_windows import AsyncWindowsEchoTransport, WindowsEchoTransport, windows_icmp_available
 
 if TYPE_CHECKING:
     from .ports import AsyncEchoTransport, EchoTransport
 
-__all__ = ["icmp_available", "make_async_transport", "make_transport"]
+__all__ = ["icmp_available", "make_async_hop_transport", "make_async_transport", "make_hop_transport", "make_transport"]
 
 #: True on Windows, where ICMP goes through iphlpapi rather than a socket.
 IS_WINDOWS = sys.platform == "win32"
@@ -128,3 +130,50 @@ def make_async_transport(
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
         return AsyncWindowsEchoTransport(address, family, payload_size=payload_size)
     return AsyncPosixEchoTransport(address, family, payload_size=payload_size)
+
+
+def make_hop_transport(address: str, family: AddressFamily) -> EchoTransport:
+    """Return a synchronous ICMP transport that can observe expired hops, for a hop walk.
+
+    On macOS that is a raw socket when the process may open one: the datagram
+    socket there has no error queue, so it never sees Time Exceeded.
+
+    Args:
+        address: Resolved address to walk towards.
+        family: Address family of ``address``.
+
+    Returns:
+        A ready transport. The caller owns it and must close it.
+
+    Raises:
+        IPScoutPermissionError: No ICMP socket can be opened.
+        IPScoutUnsupportedError: No ICMP backend exists for this platform.
+
+    """
+
+    if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
+        return WindowsEchoTransport(address, family)
+    return PosixEchoTransport(address, family, socket_factory=open_hop_socket)
+
+
+def make_async_hop_transport(address: str, family: AddressFamily) -> AsyncEchoTransport:
+    """Return an asyncio ICMP transport that can observe expired hops, for a hop walk.
+
+    As :func:`make_hop_transport`.
+
+    Args:
+        address: Resolved address to walk towards.
+        family: Address family of ``address``.
+
+    Returns:
+        A ready transport. The caller owns it and must close it.
+
+    Raises:
+        IPScoutPermissionError: No ICMP socket can be opened.
+        IPScoutUnsupportedError: No ICMP backend exists for this platform.
+
+    """
+
+    if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
+        return AsyncWindowsEchoTransport(address, family)
+    return AsyncPosixEchoTransport(address, family, socket_factory=open_hop_socket)

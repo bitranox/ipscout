@@ -502,6 +502,10 @@ def set_static_neighbour(ip: str, mac: bytes, ifindex: int) -> None:  # pragma: 
         one the neighbour dump lists is deleted: a host route that is not a
         neighbour is left alone, and the add then fails with ``EEXIST``.
 
+        The add, the replace and the delete were measured end to end as root
+        on a macOS 26 arm64 runner, through the ``host_mutating`` tests in
+        ``tests/test_static_neighbours.py``.
+
     """
 
     pid = os.getpid()

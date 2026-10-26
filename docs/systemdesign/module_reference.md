@@ -216,25 +216,25 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 
 ### Public surface
 
-| Module                 | Role                                                                                                                                                                      |
-|------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `__init__.py`          | Re-exports the public API so importers depend on the package, not its layout.                                                                                             |
-| `api.py`               | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.                                                                     |
-| `traceroute.py`        | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                                                                                     |
-| `interfaces.py`        | `local_interfaces`, dispatching to the per-OS backend.                                                                                                                    |
-| `routes.py`            | `query_route`, `default_gateway`, dispatching to the per-OS backend.                                                                                                      |
-| `neighbours.py`        | `neighbours`, `lookup_mac`, `get_mac_address`, `resolve_active`, `normalise_mac`, and `ask_or_read_cache`, the one rule for falling back from an active ask to the cache. |
-| `static_neighbours.py` | `set_neighbour`, `remove_neighbour`: write and delete a permanent IPv4 entry, choosing the interface and reading the result back.                                         |
-| `scan.py`              | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.                                                                  |
-| `subnet.py`            | `subnet_info`, composing interfaces, routes and the stored lease.                                                                                                         |
-| `portscan.py`          | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                                                                                   |
-| `banner.py`            | `grab_banners`, `agrab_banners`: connect, read the first line, say goodbye and close, all on one connection per host.                                                     |
-| `snmp.py`              | `read_snmp_system`, `aread_snmp_system`: one SNMP GET of the system group per host on a connected UDP socket, re-asking under v1 without a value the agent lacks.         |
-| `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                                                          |
-| `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                                                             |
-| `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                                                             |
-| `resolve.py`           | `resolve`, `resolve_one` (returns a `ResolvedTarget` named tuple), `reverse_dns`, `family_of`.                                                                            |
-| `factory.py`           | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path.                                                           |
+| Module                 | Role                                                                                                                                                                                |
+|------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `__init__.py`          | Re-exports the public API so importers depend on the package, not its layout.                                                                                                       |
+| `api.py`               | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.                                                                               |
+| `traceroute.py`        | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                                                                                               |
+| `interfaces.py`        | `local_interfaces`, dispatching to the per-OS backend.                                                                                                                              |
+| `routes.py`            | `query_route`, `default_gateway`, dispatching to the per-OS backend.                                                                                                                |
+| `neighbours.py`        | `neighbours`, `lookup_mac`, `get_mac_address`, `resolve_active`, `normalise_mac`, and `ask_or_read_cache`, the one rule for falling back from an active ask to the cache.           |
+| `static_neighbours.py` | `set_neighbour`, `remove_neighbour`: write and delete a permanent IPv4 entry, choosing the interface and reading the result back.                                                   |
+| `scan.py`              | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.                                                                            |
+| `subnet.py`            | `subnet_info`, composing interfaces, routes and the stored lease.                                                                                                                   |
+| `portscan.py`          | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                                                                                             |
+| `banner.py`            | `grab_banners`, `agrab_banners`: connect, read the first line, say goodbye and close, all on one connection per host.                                                               |
+| `snmp.py`              | `read_snmp_system`, `aread_snmp_system`: one SNMP GET of the system group per host on a connected UDP socket, re-asking under v1 without a value the agent lacks.                   |
+| `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                                                                    |
+| `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                                                                       |
+| `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                                                                       |
+| `resolve.py`           | `resolve`, `resolve_one` (returns a `ResolvedTarget` named tuple), `reverse_dns`, `family_of`.                                                                                      |
+| `factory.py`           | `make_transport`, `make_async_transport`, `icmp_available`, and the hop-walk `make_hop_transport` / `make_async_hop_transport`. The only `sys.platform` branch in the probing path. |
 
 ### Core
 

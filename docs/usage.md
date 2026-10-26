@@ -152,17 +152,18 @@ If you already own a transport, `trace_path` and `atrace_path` drive it directly
 
 ```python
 import ipscout
-from ipscout.factory import make_transport
+from ipscout.factory import make_hop_transport
 from ipscout.resolve import resolve_one
 
 address, family = resolve_one("127.0.0.1")
-with make_transport(address, family) as transport:
+with make_hop_transport(address, family) as transport:
     hops = ipscout.trace_path(transport, max_hops=3, timeout=1.0)
 print([(h.ttl, h.address, h.reached) for h in hops])
 # [(1, '127.0.0.1', True)]
 ```
 
-**Traceroute is not supported on macOS.** See [Error handling](#error-handling).
+**Traceroute on macOS needs root.** Unprivileged, it raises `IPScoutUnsupportedError`; see
+[Error handling](#error-handling).
 
 ## Is it reachable at all
 
@@ -800,7 +801,7 @@ because no amount of retrying fixes them.
 |-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------|
 | `IPScoutResolutionError`      | The target does not resolve, or has no address in the demanded family.                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Fix the name, or drop the `-4`/`-6` restriction.        |
 | `IPScoutPermissionError`      | Neither an unprivileged nor a raw ICMP socket could be opened.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Apply one of the fixes in the message. Root would help. |
-| `IPScoutUnsupportedError`     | No backend implements this here, such as traceroute on macOS.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Use another capability. Root would not help.            |
+| `IPScoutUnsupportedError`     | No backend implements this here, such as traceroute on unprivileged macOS.                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Use another capability. Root would not help.            |
 | `IPScoutSweepTooWideError`    | Every network a sweep was given holds more addresses than it probes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Name a narrower network.                                |
 | `IPScoutSweepIncompleteError` | A sweep skipped a network and matched nothing in the rest, so "not found" would overstate it.                                                                                                                                                                                                                                                                                                                                                                                                                                       | Name a narrower network inside the skipped one.         |
 | `ValueError`                  | An argument is out of range or not what it names: `times`, `timeout`, `interval`, `payload_size`, `tcp_port`, `concurrency`, `max_hops`, a port, a scan `method` or a sweep `limit`, including a value of the wrong type (`True` for a count, `"1"` for a timeout); one string where a collection of hosts or networks belongs; an address argument that is not an IP literal of the asked-for family (`query_route`, `lookup_mac`, `resolve_active`). The message reads `<operation> refused its arguments: <argument>: <reason>`. | Fix the argument.                                       |

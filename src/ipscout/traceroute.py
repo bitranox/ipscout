@@ -16,11 +16,13 @@ per-platform fact, and it was settled by measurement rather than assumption:
     **Windows** - yes. ``IcmpSendEcho`` reports ``IP_TTL_EXPIRED_TRANSIT`` with
     the router in the reply's address field.
 
-    **macOS - no.** Measured on a macOS runner: ``MSG_ERRQUEUE`` is not defined
-    there, and a plain receive on the ICMP socket returns nothing at all. So
-    traceroute raises :class:`~ipscout.errors.IPScoutUnsupportedError` on macOS
-    rather than returning a column of silent hops that would look like a broken
-    network instead of a missing capability.
+    **macOS - only as root.** Measured on a macOS runner: ``MSG_ERRQUEUE`` is
+    not defined there, and a plain receive on the datagram ICMP socket returns
+    nothing at all. A raw ICMP socket, which root may open, receives Time
+    Exceeded as ordinary packets, so the walk asks for one. An unprivileged
+    process gets :class:`~ipscout.errors.IPScoutUnsupportedError` rather than a
+    column of silent hops that would look like a broken network instead of a
+    missing capability.
 
 Note:
     The decision is taken from the transport's own ``supports_ttl_discovery``
@@ -38,7 +40,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .errors import IPScoutUnsupportedError, refused_arguments
-from .factory import make_async_transport, make_transport
+from .factory import make_async_hop_transport, make_hop_transport
 from .models import DEFAULT_TIMEOUT, MAX_HOP_LIMIT, Timeout, TraceHop
 from .resolve import resolve_one, reverse_dns
 
@@ -54,8 +56,9 @@ DEFAULT_MAX_HOPS = 30
 
 _UNSUPPORTED = (
     "traceroute needs to observe ICMP Time Exceeded, which this platform does not expose to an "
-    "unprivileged process. Measured on macOS: neither MSG_ERRQUEUE nor a plain receive surfaces it. "
-    "Linux and Windows are supported."
+    "unprivileged process. On macOS run as root: a raw ICMP socket receives it, while neither "
+    "MSG_ERRQUEUE nor a plain receive on the unprivileged socket surfaces it. Linux and Windows "
+    "need no privilege."
 )
 
 
@@ -295,7 +298,7 @@ def traceroute(
     # mistake whether or not the name resolves, and must read as one.
     settings = _settings(max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)
     resolved = resolve_one(target, family=family)
-    with make_transport(resolved.address, resolved.family) as transport:
+    with make_hop_transport(resolved.address, resolved.family) as transport:
         return _walk(transport, settings)
 
 
@@ -321,6 +324,6 @@ async def atraceroute(
 
     settings = _settings(max_hops=max_hops, timeout=timeout, resolve_names=resolve_names)
     resolved = await asyncio.to_thread(resolve_one, target, family=family)
-    transport = make_async_transport(resolved.address, resolved.family)
+    transport = make_async_hop_transport(resolved.address, resolved.family)
     async with transport:
         return await _awalk(transport, settings)

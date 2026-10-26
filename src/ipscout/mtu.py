@@ -210,9 +210,12 @@ def _bsd_mtu(address: str) -> int | None:  # pragma: no cover - macOS and the BS
     the answer is the largest packet the kernel will put on that route
     unfragmented, as far as the kernel itself knows the path.
 
+    Returns:
+        The path MTU, or ``None`` when ``IP_DONTFRAG`` is refused, as this
+        platform then cannot ask the question.
+
     Raises:
-        IPScoutPermissionError: No IPv4 datagram socket could be opened, or
-            ``IP_DONTFRAG`` was refused, so the question cannot be asked.
+        IPScoutPermissionError: No IPv4 datagram socket could be opened.
     """
 
     try:
@@ -223,15 +226,13 @@ def _bsd_mtu(address: str) -> int | None:  # pragma: no cover - macOS and the BS
 
     try:
         sock.setsockopt(AddressFamily.IPV4.ip_option_level, _IP_DONTFRAG, 1)
-    except OSError as exc:
-        # No IP_DONTFRAG means there is no way to ask the question at all.
+    except OSError:
+        # No IP_DONTFRAG means this platform cannot ask the question, which is
+        # path_mtu's documented None. It is not a privilege: macOS accepts the
+        # option from an ordinary user and from root alike (measured on a
+        # macOS runner), so no "run as root" would change the answer.
         sock.close()
-        msg = (
-            f"path MTU discovery needs IP_DONTFRAG, which this platform refused: {exc}. "
-            f"Run as root, or read the interface MTU from local_interfaces() instead, "
-            f"which is the link MTU rather than the path's"
-        )
-        raise IPScoutPermissionError(msg) from exc
+        return None
 
     try:
         sock.settimeout(_BSD_SEND_TIMEOUT)
