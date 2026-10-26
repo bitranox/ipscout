@@ -96,6 +96,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - Traceroute over a raw ICMP socket without an error queue (macOS as root) reports the routers:
   the receive loop discarded their Time Exceeded messages as foreign traffic. Checked on Linux
   with a raw socket that refuses `IP_RECVERR`, not yet on a Mac.
+- Windows: `resolve_active` and `lookup_mac(active=True)` resolve a zoned IPv6 address
+  (`fe80::1%12`) on the interface the zone names, as POSIX does. The zone was dropped, so the
+  stack answered from whichever link it picked: measured, a zone naming another interface still
+  returned the first link's neighbour. `neighbours_windows.resolve_active` takes the interface as
+  `interface_index`.
 - Windows: `path_mtu` reads a reply's own status. A router's "packet too big" comes back as a
   reply carrying that status, and any reply used to count as fitting, so the MTU came out too
   large on a path with a smaller link. The local refusal was already read; the router's reply is

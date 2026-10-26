@@ -171,8 +171,27 @@ class _ActiveResolution(BaseModel):
     timeout: Timeout = DEFAULT_TIMEOUT
 
 
+class _ZoneInterface(NamedTuple):
+    """The interface an RFC 4007 zone names.
+
+    Attributes:
+        interface_index: Its interface index, which is what a request is addressed by.
+        name: Its name as the neighbour cache and ``if_nametoindex`` speak it.
+
+    """
+
+    interface_index: int
+    name: str
+
+
 def _zone_interface(zone: str) -> str:
-    """Return the name of the interface an RFC 4007 zone names, by index or by either name.
+    """Return the name of the interface an RFC 4007 zone names; see :func:`_zone`."""
+
+    return _zone(zone).name
+
+
+def _zone(zone: str) -> _ZoneInterface:
+    """Return the interface an RFC 4007 zone names, by index or by either name.
 
     The name returned is the one the neighbour cache and ``if_nametoindex``
     speak, so it can be matched against cache entries. Windows names an
@@ -195,7 +214,7 @@ def _zone_interface(zone: str) -> str:
     if name is None:
         msg = f"no interface with index {index} to send on: name one this host has, or use its index"
         raise IPScoutResolutionError(msg)
-    return name
+    return _ZoneInterface(index, name)
 
 
 def _link_of(zone: str) -> str:
@@ -301,8 +320,7 @@ def resolve_active(ip: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
 
         A zone (``fe80::1%eth0``) names the interface to send on, overriding
         the routing table, which cannot tell one link's ``fe80::1`` from
-        another's. Windows does not yet honour it: the address is resolved
-        without the zone there.
+        another's.
 
         It never falls back to the cache. A caller who asked to resolve
         actively gets a fresh answer or an error, never a stale entry dressed
@@ -335,11 +353,10 @@ def resolve_active(ip: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
         from .neighbours_windows import resolve_active as _windows_resolve  # noqa: PLC0415 - Windows-only import
 
         if zone is not None:
-            # Windows sends without the zone (ResolveIpNetEntry2 and SendARP take
-            # no interface here), but a zone naming no interface is still a typo
-            # to refuse, as POSIX refuses it in _sending_interface.
-            _zone_interface(zone)
-        elif query_route(bare, family) is None:
+            # Only an IPv6 literal carries a zone, and ResolveIpNetEntry2 takes
+            # the interface in its row, so the zone is honoured as on POSIX.
+            return _windows_resolve(bare, family, interface_index=_zone(zone).interface_index)
+        if query_route(bare, family) is None:
             # SendARP answers an unrouted address with the same status as an
             # unanswered one, though nothing was sent, so the missing route is
             # refused here as POSIX refuses it in _sending_interface.

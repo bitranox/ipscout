@@ -228,32 +228,60 @@ def request_address(ip: str, family: AddressFamily) -> bytes:
         >>> request_address("fe80::1%7", AddressFamily.IPV6)
         Traceback (most recent call last):
         ...
-        ValueError: 'fe80::1%7' carries a zone, which active resolution on Windows cannot honour: pass the bare address
+        ValueError: 'fe80::1%7' carries a zone: pass the bare address, and the zone's interface as interface_index
 
     """
 
-    # A zone is refused rather than dropped: neither SendARP nor the
-    # ResolveIpNetEntry2 row is given an interface here, so a dropped zone
-    # would let the request leave by another link than the one it names. The
-    # public resolve_active strips the zone before it calls this backend.
+    # A zone is refused rather than dropped: a dropped zone would let the
+    # request leave by another link than the one it names. The public
+    # resolve_active passes the zone's interface index separately instead.
     if split_zone(ip).zone is not None:
-        msg = f"{ip!r} carries a zone, which active resolution on Windows cannot honour: pass the bare address"
+        msg = f"{ip!r} carries a zone: pass the bare address, and the zone's interface as interface_index"
         raise ValueError(msg)
     return require_address(ip, family).packed
 
 
-def _resolve_ipv6(library: ctypes.CDLL, packed: bytes, ip: str) -> str | None:  # pragma: no cover - Windows only
+def resolution_row(packed: bytes, interface_index: int | None) -> MIB_IPNET_ROW2:
+    """Build the ``MIB_IPNET_ROW2`` that asks ``ResolveIpNetEntry2`` about one IPv6 address.
+
+    Args:
+        packed: The IPv6 address in network byte order.
+        interface_index: The interface to resolve on, as a zone names it, or
+            ``None`` to leave the index 0 and let the stack pick one. The
+            stack does not read a zone out of the address: a link-local
+            address with a zone naming another link was answered from the
+            link the stack chose until the index went into the row.
+
+    Returns:
+        The row, with the address and, when given, the interface set.
+
+    Examples:
+        >>> import socket
+        >>> resolution_row(socket.inet_pton(socket.AF_INET6, "fe80::1"), 7).InterfaceIndex
+        7
+        >>> resolution_row(socket.inet_pton(socket.AF_INET6, "fe80::1"), None).InterfaceIndex
+        0
+
+    """
+
+    row = MIB_IPNET_ROW2()
+    row.Address = sockaddr_inet(packed, AddressFamily.IPV6)
+    if interface_index is not None:
+        row.InterfaceIndex = interface_index
+    return row
+
+
+def _resolve_ipv6(library: ctypes.CDLL, packed: bytes, ip: str, interface_index: int | None) -> str | None:  # pragma: no cover - Windows only
     """Resolve an IPv6 neighbour through ResolveIpNetEntry2.
 
     Unlike SendARP this needs elevation, so a refusal here is reported as a
     permission problem naming the unprivileged alternative rather than being
     swallowed. ``packed`` is ``ip`` as :func:`request_address` returned it;
-    ``ip`` is kept for the messages.
+    ``ip`` is kept for the messages. ``interface_index`` is the interface a
+    zone named; without one the stack picks the interface itself.
     """
 
-    row = MIB_IPNET_ROW2()
-    row.Address = sockaddr_inet(packed, AddressFamily.IPV6)
-
+    row = resolution_row(packed, interface_index)
     status = library.ResolveIpNetEntry2(ctypes.byref(row), None)
     if status == _ERROR_ACCESS_DENIED:
         msg = (
@@ -267,21 +295,25 @@ def _resolve_ipv6(library: ctypes.CDLL, packed: bytes, ip: str) -> str | None:  
     return declared_mac(bytes(row.PhysicalAddress), int(row.PhysicalAddressLength))
 
 
-def resolve_active(ip: str, family: AddressFamily) -> str | None:  # pragma: no cover - Windows only
+def resolve_active(ip: str, family: AddressFamily, *, interface_index: int | None = None) -> str | None:  # pragma: no cover - Windows only
     """Actively resolve one address, sending a real ARP request.
 
     Args:
         ip: The address to resolve.
         family: The family of ``ip``, as the caller already decided it; it
             picks ``SendARP`` or ``ResolveIpNetEntry2``.
+        interface_index: The interface to resolve on, which a zone names.
+            IPv6 only: ``SendARP`` takes no interface, and an IPv4 literal
+            carries no zone.
 
     Returns:
         The hardware address, or ``None`` when nothing answered.
 
     Raises:
-        ValueError: ``ip`` is not an address literal of ``family``, or it
-            carries a zone: the request could not be made, so it is never
-            reported as "nobody answered".
+        ValueError: ``ip`` is not an address literal of ``family``, it
+            carries a zone, or ``interface_index`` is given for IPv4: the
+            request could not be made, so it is never reported as "nobody
+            answered".
         IPScoutPermissionError: IPv6 resolution was refused for want of
             elevation. ``ResolveIpNetEntry2`` requires it; ``SendARP`` does
             not, so IPv4 works either way.
@@ -300,10 +332,13 @@ def resolve_active(ip: str, family: AddressFamily) -> str | None:  # pragma: no 
     # Checked before the library loads, so a malformed argument is refused the
     # same way on every platform.
     packed = request_address(ip, family)
+    if interface_index is not None and family is AddressFamily.IPV4:
+        msg = f"{ip!r} is IPv4, which SendARP resolves without an interface: pass no interface_index"
+        raise ValueError(msg)
     library = iphlpapi()
 
     if family is AddressFamily.IPV6:
-        return _resolve_ipv6(library, packed, ip)
+        return _resolve_ipv6(library, packed, ip, interface_index)
 
     destination = packed_to_ipv4(packed)
     buffer = (ctypes.c_uint8 * MAX_ADAPTER_ADDRESS_LENGTH)()

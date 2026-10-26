@@ -99,6 +99,23 @@ def test_an_active_resolution_refuses_before_loading_anything(ip: str, family: A
         neighbours_windows.resolve_active(ip, family)
 
 
+def test_an_ipv4_resolution_given_an_interface_is_refused_before_loading_anything() -> None:
+    # SendARP takes no interface, so an index for IPv4 could only be dropped.
+    with pytest.raises(ValueError, match="pass no interface_index"):
+        neighbours_windows.resolve_active("192.0.2.1", AddressFamily.IPV4, interface_index=4)
+
+
+def test_a_resolution_row_carries_the_interface_a_zone_names() -> None:
+    row = neighbours_windows.resolution_row(socket.inet_pton(socket.AF_INET6, "fe80::1"), 7)
+
+    assert int(row.InterfaceIndex) == 7
+    assert bytes(row.Address) == bytes(winapi.sockaddr_inet(socket.inet_pton(socket.AF_INET6, "fe80::1"), AddressFamily.IPV6))
+
+
+def test_a_resolution_row_without_a_zone_leaves_the_interface_to_the_stack() -> None:
+    assert int(neighbours_windows.resolution_row(socket.inet_pton(socket.AF_INET6, "fe80::1"), None).InterfaceIndex) == 0
+
+
 def test_the_static_row_carries_the_address_as_the_shared_sockaddr_builder_packs_it() -> None:
     row = neighbours_windows.ipv4_neighbour_row("192.0.2.7", bytes(6), 4)
     expected = winapi.sockaddr_inet(socket.inet_pton(socket.AF_INET, "192.0.2.7"), AddressFamily.IPV4)

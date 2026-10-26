@@ -243,4 +243,7 @@ def test_active_resolution_waits_the_shared_default() -> None:
 
 @pytest.mark.os_agnostic
 def test_the_windows_resolver_takes_the_family_its_caller_decided() -> None:
-    assert list(inspect.signature(neighbours_windows.resolve_active).parameters) == ["ip", "family"]
+    # The zone's interface travels as a keyword of its own; the family is still the caller's.
+    parameters = inspect.signature(neighbours_windows.resolve_active).parameters
+    assert list(parameters) == ["ip", "family", "interface_index"]
+    assert parameters["interface_index"].kind is inspect.Parameter.KEYWORD_ONLY
