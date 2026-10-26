@@ -28,7 +28,6 @@ Note:
 
 from __future__ import annotations
 
-import socket
 import sys
 from ipaddress import IPv4Address, IPv6Address
 from typing import TYPE_CHECKING, Annotated, NamedTuple
@@ -39,7 +38,7 @@ from .arp import normalise_mac
 from .errors import IPScoutPermissionError, IPScoutResolutionError, IPScoutUnsupportedError, refused_arguments
 from .interfaces import local_interfaces
 from .models import DEFAULT_TIMEOUT, AddressFamily, MacLookup, MacMethod, MacScope, Neighbour, Timeout, parse_address
-from .resolve import split_zone, zone_index
+from .resolve import interface_name, split_zone, zone_index
 from .routes import query_route
 
 if TYPE_CHECKING:
@@ -192,11 +191,11 @@ def _zone_interface(zone: str) -> str:
         index = next((entry.index for entry in local_interfaces() if entry.name == zone and entry.index), None)
         if index is None:
             raise
-    try:
-        return socket.if_indextoname(index)
-    except OSError as exc:
+    name = interface_name(index)
+    if name is None:
         msg = f"no interface with index {index} to send on: name one this host has, or use its index"
-        raise IPScoutResolutionError(msg) from exc
+        raise IPScoutResolutionError(msg)
+    return name
 
 
 def _link_of(zone: str) -> str:

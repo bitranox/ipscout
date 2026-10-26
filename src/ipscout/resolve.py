@@ -186,6 +186,14 @@ def interface_name(index: int) -> str | None:
     # the same way before the call; the except keeps the call total anyway.
     if not 1 <= index <= MAX_INTERFACE_INDEX:
         return None
+    if index == MAX_INTERFACE_INDEX:
+        # 0xFFFFFFFF is also (unsigned long)-1, the value CPython's integer
+        # conversion reports failure with. Where an unsigned long is 32 bits
+        # (Windows), some releases take it for a failed conversion and raise
+        # SystemError instead of OSError (measured on CPython 3.10.11; 3.10.20
+        # and 3.11 answer OSError). No interface holds that index, so it is
+        # answered from the interface table, which never passes it through.
+        return dict(socket.if_nameindex()).get(index)
     try:
         return socket.if_indextoname(index)
     except (OSError, ValueError, OverflowError):
