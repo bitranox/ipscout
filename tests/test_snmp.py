@@ -172,7 +172,8 @@ def test_an_agent_that_never_answers_is_silent() -> None:
 def test_a_closed_port_is_refused(host: str, family: socket.AddressFamily) -> None:
     # A connected UDP socket hears the ICMP port unreachable, spelled per platform. Measured
     # 2026-10-25: Linux ConnectionRefusedError (errno 111); Windows ProactorEventLoop OSError
-    # winerror 1234 and SelectorEventLoop ConnectionResetError 10054. macOS: from CI.
+    # winerror 1234 and SelectorEventLoop ConnectionResetError 10054. macOS reads REFUSED too
+    # (GitHub macos-latest, 2026-10-26); which exception it raises there was not recorded.
     with socket.socket(family, socket.SOCK_DGRAM) as probe:
         probe.bind((host, 0))
         closed = probe.getsockname()[1]
