@@ -263,8 +263,10 @@ to and can still hold one that has gone. `active=True` sends a real ARP request 
 solicitation instead. That needs root or `CAP_NET_RAW` on Linux and macOS (Windows IPv4 needs
 nothing), and without them it raises rather than quietly reading the cache. When a caller wants an
 answer either way, `fallback_to_cache=True` reads the cache instead, but only when this host cannot
-ask: no privilege (`IPScoutPermissionError`) or no interface that can carry the request
-(`IPScoutUnsupportedError`). Every record says which one answered in `method`:
+ask: no privilege (`IPScoutPermissionError`), or no interface or route that can carry the request,
+or a send or read that failed (`IPScoutUnsupportedError`). Every record says which one answered in
+`method`. On Windows IPv4 the active path is `SendARP`, which answers from Windows' own ARP table
+when it holds the address and sends a request only when it does not:
 
 ```python
 answer = ipscout.lookup_mac("192.0.2.7", active=True, fallback_to_cache=True)

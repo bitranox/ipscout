@@ -68,6 +68,11 @@ _ERROR_BAD_NET_NAME = 67
 def refuse_unless_unanswered(status: int, *, call: str, ip: str) -> None:
     """Return quietly for "nobody answered"; raise for a request that could not be asked.
 
+    Args:
+        status: The failure status the call returned (not ``NO_ERROR``).
+        call: The Windows function that returned it, named in the refusal.
+        ip: The address that was asked about.
+
     Raises:
         IPScoutUnsupportedError: ``status`` is any failure other than no reply,
             so the caller is told it could not ask rather than that the

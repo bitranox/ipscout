@@ -241,9 +241,9 @@ def test_windows_reads_only_its_no_reply_status_as_nobody_answered() -> None:
 
 @pytest.mark.os_posix
 def test_a_routed_address_that_cannot_be_asked_reads_the_routers_cache_entry() -> None:
-    gateway = ipscout.default_gateway()
-    if gateway is None:
-        pytest.skip("this host has no IPv4 default route")
+    route = ipscout.query_route("203.0.113.199")
+    if route is None or not route.gateway:
+        pytest.skip("this host routes 203.0.113.199 through no gateway")
     try:
         ipscout.lookup_mac("203.0.113.199", active=True)
     except (IPScoutPermissionError, IPScoutUnsupportedError):
@@ -254,20 +254,55 @@ def test_a_routed_address_that_cannot_be_asked_reads_the_routers_cache_entry() -
     answer = ipscout.lookup_mac("203.0.113.199", active=True, fallback_to_cache=True)
 
     assert (answer.method, answer.scope) == (MacMethod.CACHE, MacScope.NEXT_HOP)
-    assert answer.via_ip == gateway.gateway
+    assert answer.via_ip == route.gateway
 
 
 @pytest.mark.os_windows
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows' ResolveIpNetEntry2 status for an unrouted address")
-def test_windows_with_no_route_falls_back_rather_than_reporting_a_miss() -> None:
-    if ipscout.default_gateway(ipscout.AddressFamily.IPV6) is not None:
-        pytest.skip("this host routes IPv6, so 2001:db8::9 has a path")
-    try:
-        answer = ipscout.lookup_mac("2001:db8::9", active=True, fallback_to_cache=True)
-    except IPScoutPermissionError:
-        pytest.skip("not elevated: ResolveIpNetEntry2 is refused before it can report the missing route")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' SendARP and ResolveIpNetEntry2 path")
+def test_windows_refuses_an_unrouted_address_instead_of_reporting_a_miss() -> None:
+    # SendARP answers an unrouted address with the status it gives an
+    # unanswered one, so the missing route is refused before it is called.
+    if ipscout.query_route("2001:db8::9", ipscout.AddressFamily.IPV6) is not None:
+        pytest.skip("this host routes 2001:db8::9")
+    with pytest.raises(IPScoutUnsupportedError, match=r"^no route to 2001:db8::9"):
+        ipscout.lookup_mac("2001:db8::9", active=True)
 
-    assert answer.method is MacMethod.CACHE
+    assert ipscout.lookup_mac("2001:db8::9", active=True, fallback_to_cache=True).method is MacMethod.CACHE
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows names an adapter two ways")
+def test_windows_accepts_the_friendly_interface_name_as_a_zone() -> None:
+    names = _friendly_and_system_name()
+    if names is None:
+        pytest.skip("no adapter here has a friendly name that differs from its if_nametoindex name")
+    friendly, system = names
+
+    answer = ipscout.lookup_mac(f"fe80::1%{friendly}", active=True, fallback_to_cache=True)
+
+    assert answer.interface == system
+
+
+def _friendly_and_system_name() -> tuple[str, str] | None:
+    """Return one adapter's friendly name and its if_nametoindex name, when the two differ."""
+
+    for entry in ipscout.local_interfaces():
+        if entry.index is None:
+            continue
+        system = socket.if_indextoname(entry.index)
+        if entry.name != system:
+            return entry.name, system
+    return None
+
+
+@pytest.mark.os_posix
+def test_a_numeric_zone_is_resolved_to_its_interface_name() -> None:
+    loopback = _loopback_name()
+    index = socket.if_nametoindex(loopback)
+
+    answer = ipscout.lookup_mac(f"fe80::1%{index}", active=True, fallback_to_cache=True)
+
+    assert (answer.method, answer.interface) == (MacMethod.CACHE, loopback)
 
 
 @pytest.mark.os_linux

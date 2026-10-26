@@ -285,7 +285,10 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
         sock.setsockopt(AddressFamily.IPV6.ip_option_level, socket.IPV6_MULTICAST_IF, index)
         sock.settimeout(timeout)
         group = solicited_node_multicast(target_ip)
-        sock.sendto(build_neighbour_solicitation(sender_mac=source_mac, target_ip=target_ip), (group, 0, 0, index))
+        try:
+            sock.sendto(build_neighbour_solicitation(sender_mac=source_mac, target_ip=target_ip), (group, 0, 0, index))
+        except PermissionError as exc:
+            raise IPScoutPermissionError(f"active neighbour discovery was refused: {exc}. {_UNPRIVILEGED_ADVICE}") from exc
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

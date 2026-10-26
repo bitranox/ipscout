@@ -9,8 +9,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 - `lookup_mac(ip, active=True, fallback_to_cache=True)` (and the same on `get_mac_address`, plus
   `ipscout mac --active --fallback-to-cache`): ask actively, and read the neighbour cache instead
-  only when this host cannot ask, meaning no privilege (`IPScoutPermissionError`) or no interface
-  that can carry the request (`IPScoutUnsupportedError`). An active ask nobody answered stays an
+  only when this host cannot ask, meaning no privilege (`IPScoutPermissionError`), or no interface
+  or route that can carry the request, or a send or read that failed (`IPScoutUnsupportedError`). An active ask nobody answered stays an
   active answer and is never replaced by a cache entry; a host name and a zone naming no interface
   still raise. `fallback_to_cache=True` without `active=True` raises `ValueError`.
 - `MacMethod` (`ACTIVE`, `CACHE`) and `MacLookup.method`: every MAC answer says whether it was asked
@@ -25,9 +25,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
     They used to return `None`. Only `ERROR_BAD_NET_NAME` reads as no reply.
   - On Linux and macOS, a send or receive that fails after the socket opens (the interface went
     away, the link is down) now raises `IPScoutUnsupportedError` too, instead of returning `None`.
-- `lookup_mac(..., active=True)` checks a zone before anything is sent on every platform, and
-  raises `IPScoutResolutionError` when it names no interface. Before, the routed branch and
-  Windows never looked at the zone, so a typo passed unseen.
+- `lookup_mac(..., active=True)` resolves a zone before anything is sent on every platform, by
+  index or by either Windows name (the friendly one `local_interfaces()` reports, or the
+  `if_nametoindex` one), and raises `IPScoutResolutionError` when it names no interface. Before,
+  the routed branch and Windows never looked at the zone, so a typo passed unseen. The cache read
+  now matches on the interface the zone resolves to, so a numeric zone such as `%2` finds the
+  entry on that link rather than whichever link holds the address.
+- On Windows, an active lookup of an address with no route raises `IPScoutUnsupportedError`
+  instead of reporting nobody answered: `SendARP` gives the same status for both.
 
 ## [2.2.0] 2026-10-26 11:06:07
 

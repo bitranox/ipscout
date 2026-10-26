@@ -192,18 +192,43 @@ class _ActiveResolution(BaseModel):
 
 
 def _zone_interface(zone: str) -> str:
-    """Return the name of the interface an RFC 4007 zone names, by name or by index.
+    """Return the name of the interface an RFC 4007 zone names, by index or by either name.
+
+    The name returned is the one the neighbour cache and ``if_nametoindex``
+    speak, so it can be matched against cache entries. Windows names an
+    adapter two ways - the friendly name ``local_interfaces()`` reports
+    ("Ethernet 4") and the ``if_nametoindex`` one ("ethernet_32768") - and a
+    caller may hold either, so the friendly name is tried when the other
+    spelling is unknown.
 
     Raises:
         IPScoutResolutionError: No interface here goes by that name or index.
     """
 
-    index = zone_index(zone)
+    try:
+        index = zone_index(zone)
+    except IPScoutResolutionError:
+        index = next((entry.index for entry in local_interfaces() if entry.name == zone and entry.index), None)
+        if index is None:
+            raise
     try:
         return socket.if_indextoname(index)
     except OSError as exc:
         msg = f"no interface with index {index} to send on: name one this host has, or use its index"
         raise IPScoutResolutionError(msg) from exc
+
+
+def _link_of(zone: str) -> str:
+    """Return the interface a zone names for a passive read, or the zone's text when it names none.
+
+    The passive path never raises for an address it cannot place, so an
+    unknown zone is kept as written and simply matches no cache entry.
+    """
+
+    try:
+        return _zone_interface(zone)
+    except IPScoutResolutionError:
+        return zone
 
 
 def _sending_interface(ip: str, family: AddressFamily, *, zone: str | None = None) -> SendingInterface:
@@ -279,8 +304,10 @@ def resolve_active(ip: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
         IPScoutPermissionError: The process lacks the privilege the send
             needs - root or ``CAP_NET_RAW`` on Linux, root on macOS. The
             message names the remedy, including the unprivileged alternative.
-        IPScoutUnsupportedError: There is no interface that can carry the
-            request, or the platform has no active path for that family.
+        IPScoutUnsupportedError: There is no interface or route that can carry
+            the request, the platform has no active path for that family, or
+            the request could not be sent or its reply read. Never a ``None``
+            answer: ``None`` means a request went out and nothing answered.
         IPScoutResolutionError: The address carries a zone that names no
             interface this host has.
 
@@ -324,6 +351,12 @@ def resolve_active(ip: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
         from .neighbours_windows import resolve_active as _windows_resolve  # noqa: PLC0415 - Windows-only import
 
+        if zone is None and query_route(bare, family) is None:
+            # SendARP answers an unrouted address with the same status as an
+            # unanswered one, though nothing was sent, so the missing route is
+            # refused here as POSIX refuses it in _sending_interface.
+            msg = f"no route to {bare}, so no interface to send a resolution request on"
+            raise IPScoutUnsupportedError(msg)
         return _windows_resolve(bare, family)
 
     sender = _sending_interface(bare, family, zone=zone)
@@ -521,17 +554,17 @@ def lookup_mac(ip: str, *, active: bool = False, fallback_to_cache: bool = False
     family = AddressFamily.of_version(parse_address(ip).version)
     bare, zone = split_zone(ip)
     route = query_route(bare, family)
-    on_interface = zone if zone is not None else (route.interface if route else None)
 
     if not active:
+        on_interface = _link_of(zone) if zone is not None else (route.interface if route else None)
         return _cached_lookup(ip, bare, route, on_interface)
-    if zone is not None:
-        # Checked here, before anything is sent and on every platform: the
-        # routed branch asks the gateway and never looks at the zone, and
-        # Windows sends without one, so a zone naming no interface would
-        # otherwise pass unseen - and with the fallback on, turn into a cache
-        # read of whichever link holds that address.
-        _zone_interface(zone)
+    # The zone is resolved here, before anything is sent and on every
+    # platform: the routed branch asks the gateway and never looks at it, and
+    # Windows sends without one, so a zone naming no interface would otherwise
+    # pass unseen. The resolved name, not the zone's text, is what the cache
+    # read matches on: "2" names no cache entry's interface, so a numeric zone
+    # would fall through to whichever link holds that address.
+    on_interface = _zone_interface(zone) if zone is not None else (route.interface if route else None)
     return ask_or_read_cache(
         lambda: _active_lookup(ip, route, on_interface),
         lambda: _cached_lookup(ip, bare, route, on_interface),

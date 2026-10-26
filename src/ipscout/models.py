@@ -536,8 +536,10 @@ class MacMethod(str, enum.Enum):
     address is free needs to know which of the two it was given.
     """
 
-    #: A resolution request was sent: to the host itself, or to the next-hop router for a
-    #: routed address. ``scope`` still says whose ``mac`` is, if any.
+    #: Asked through the platform's active path: to the host itself, or to the next-hop router
+    #: for a routed address; ``scope`` still says whose ``mac`` is, if any. On Windows IPv4 that
+    #: path is SendARP, which answers from Windows' own ARP table when it holds the address and
+    #: sends a request only when it does not (Microsoft's SendARP documentation).
     ACTIVE = "active"
     #: Read from the neighbour cache.
     CACHE = "cache"
