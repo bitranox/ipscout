@@ -19,6 +19,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `path_mtu` on a BSD that refuses `IP_DONTFRAG` raised `IPScoutPermissionError` telling the caller
   to run as root, which no privilege changes. It now returns `None`, the documented answer for a
   platform that cannot report the path MTU.
+- An echo whose reply did not fit the socket's receive buffer read as a host that never answered.
+  macOS gives an ICMP socket 8192 bytes, so every `payload_size` above about 8100 went unanswered
+  there. The POSIX transports now raise the receive buffer to hold replies of the payload size.
 
 ## [2.4.0] 2026-10-26 16:19:43
 

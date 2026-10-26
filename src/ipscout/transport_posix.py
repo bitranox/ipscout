@@ -180,6 +180,21 @@ def _is_raw_socket(sock: socket.socket) -> bool:
         return False
 
 
+def _fit_receive_buffer(sock: socket.socket, *, payload_size: int) -> None:
+    """Raise ``sock``'s receive buffer to hold replies of ``payload_size``; never lower it.
+
+    The kernel drops a reply that does not fit the receive buffer, and the
+    probe then reads as a host that never answered. macOS gives an ICMP socket
+    8192 bytes (``net.inet.raw.recvspace``), so without this every payload
+    above about 8100 bytes went unanswered there; measured on a macOS runner,
+    where a raised buffer received replies up to the protocol maximum.
+    """
+
+    wanted = _REPLIES_BUFFERED * (payload_size + _REPLY_OVERHEAD)
+    if sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) < wanted:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, wanted)
+
+
 def open_hop_socket(family: AddressFamily) -> socket.socket:
     """Return the ICMP socket that can observe expired hops, where any can.
 
@@ -298,6 +313,19 @@ def recvmsg_of(sock: socket.socket) -> RecvMsg | None:
     """
 
     return cast("RecvMsg | None", getattr(sock, "recvmsg", None))
+
+
+#: Replies the receive buffer is sized to hold at once, so a reply arriving
+#: while an earlier one is still unread is not dropped.
+_REPLIES_BUFFERED = 4
+
+#: Bytes one queued reply takes beyond its ICMP payload: the ICMP header, the
+#: IP header a raw socket delivers, and the kernel's per-datagram bookkeeping
+#: (sender address, ancillary data), which counts against the buffer too.
+#: Measured on a macOS runner: an 8192-byte buffer held at most 8132 payload
+#: bytes over IPv4 and 8124 over IPv6 on a bare socket, and less on this
+#: transport's, which asks for ancillary data. Generous rather than tight.
+_REPLY_OVERHEAD = 1024
 
 
 #: ``struct sock_extended_err``: errno, origin, type, code, pad, info, data.
@@ -687,6 +715,7 @@ class PosixEchoTransport:
         self._destination = _destination_for(address, family=family)
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
+        _fit_receive_buffer(self._socket, payload_size=payload_size)
         self._errqueue = _enable_error_queue(self._socket, family=family)
         self._is_raw = _is_raw_socket(self._socket)
         self._own_destination = _own_destination(self._destination, family=family)
@@ -858,6 +887,7 @@ class AsyncPosixEchoTransport:
         self._destination = _destination_for(address, family=family)
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
+        _fit_receive_buffer(self._socket, payload_size=payload_size)
         # settimeout(0) is setblocking(False) without a boolean positional arg.
         self._socket.settimeout(0)
         self._waiters: dict[bytes, _Waiter] = {}

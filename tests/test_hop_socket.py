@@ -49,11 +49,21 @@ def test_without_an_error_queue_and_no_raw_socket_the_datagram_one_is_kept_open(
         assert datagram.fileno() != -1
 
 
-def test_on_this_host_the_hop_socket_can_observe_expired_hops() -> None:
+def _raw_socket_allowed() -> bool:
+    try:
+        socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP).close()
+    except OSError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(hasattr(socket, "MSG_ERRQUEUE"), reason="with an error queue the walk keeps whichever ICMP socket opened")
+def test_without_an_error_queue_the_hop_socket_is_raw_exactly_when_the_process_may_open_one() -> None:
+    # Unprivileged on macOS neither socket can see Time Exceeded, and the
+    # datagram one is kept so the walk refuses on its capability.
     try:
         sock = open_hop_socket(AddressFamily.IPV4)
     except IPScoutPermissionError as exc:
         pytest.skip(f"no ICMP socket here: {exc}")
     with sock:
-        has_error_queue = hasattr(socket, "MSG_ERRQUEUE")
-        assert has_error_queue or sock.type == socket.SOCK_RAW
+        assert (sock.type == socket.SOCK_RAW) is _raw_socket_allowed()
