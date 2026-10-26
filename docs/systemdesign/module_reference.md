@@ -273,7 +273,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `dhcp_linux.py`         | `AF_PACKET` bound to `ETH_P_IP`, plus the `PACKET_ADD_MEMBERSHIP` promiscuous join that drops with the socket.                                        |
 | `dhcp_windows.py`       | A raw IPv4 socket put into promiscuous receive with `SIO_RCVALL`; no driver, but a weaker promise.                                                    |
 | `dhcp_macos.py`         | A `/dev/bpf` device bound to one interface, buffering the several frames each read returns.                                                           |
-| `neighbours_macos.py`   | `NET_RT_FLAGS` sysctl dump; BPF for the active path; `RTM_ADD` / `RTM_DELETE` for a static entry (untested on hardware).                              |
+| `neighbours_macos.py`   | `NET_RT_FLAGS` sysctl dump; BPF for the active path; `RTM_ADD` / `RTM_DELETE` for a static entry (measured as root on a macOS runner VM).             |
 | `neighbours_windows.py` | `GetIpNetTable2`; `SendARP` and `ResolveIpNetEntry2` for the active path; `CreateIpNetEntry2` / `DeleteIpNetEntry2` for a static entry.               |
 | `leases_linux.py`       | systemd-networkd and dhclient lease stores. Reads a file; sends no DHCP traffic.                                                                      |
 
