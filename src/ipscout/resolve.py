@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
 __all__ = [
+    "INTERFACE_INDEX_DIGITS",
     "MAX_INTERFACE_INDEX",
     "ResolvedTarget",
     "ScopedAddress",
@@ -147,7 +148,7 @@ def split_zone(address: str) -> ScopedAddress:
 
 
 #: The digits an interface index may be written with: ASCII only, as many as a uint32 needs.
-_ZONE_INDEX = re.compile(r"[0-9]{1,10}")
+INTERFACE_INDEX_DIGITS = re.compile(r"[0-9]{1,10}")
 
 #: A sockaddr carries the scope as an unsigned 32-bit field.
 MAX_INTERFACE_INDEX = 2**32 - 1
@@ -213,7 +214,7 @@ def zone_index(zone: str) -> int:
     # superscripts (which int() then refuses with a bare ValueError) and other
     # scripts' digits (which int() silently reads, so a typo picks a real
     # interface), and an unbounded run would hit int()'s digit limit.
-    if _ZONE_INDEX.fullmatch(zone):
+    if INTERFACE_INDEX_DIGITS.fullmatch(zone):
         index = int(zone)
         if index <= MAX_INTERFACE_INDEX:
             return index

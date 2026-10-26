@@ -12,6 +12,7 @@ from ipaddress import IPv4Network
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from ipscout.models import AddressFamily, Interface, InterfaceAddress, SubnetInfo
 from ipscout.scan import find_ip_by_mac, local_networks, sweep_scope
@@ -30,7 +31,7 @@ _MAC = "00:00:5e:00:53:01"
 def test_a_zoned_ipv6_host_address_gets_a_zone_free_network() -> None:
     # ip_network keeps the zone of "fe80::1%lab0/128" but drops it at a shorter
     # prefix, so the network is derived zone-free: one address, one network.
-    # Compared as text, because network equality may not look at the zone.
+    # Compared as text, so the assertion reads exactly what a caller is shown.
     lab = Interface(name="lab0", ipv6=(InterfaceAddress(address="fe80::1%lab0", prefix_len=128),))
 
     (record,) = subnet_info(interfaces=[lab])
@@ -137,3 +138,8 @@ def test_a_port_that_is_not_an_integer_is_refused_before_anything_is_sent(port: 
 
 def test_the_wake_settings_store_the_canonical_hardware_address() -> None:
     assert WakeSettings(mac="00-00-5E-00-53-01", broadcast="192.0.2.255").mac == _MAC
+
+
+def test_a_record_naming_another_zone_on_its_network_is_refused() -> None:
+    with pytest.raises(ValidationError, match="network must be fe80::1/128"):
+        SubnetInfo.model_validate({"interface": "lab0", "address": "fe80::1%lab0", "prefix_len": 128, "network": "fe80::1%eth9/128", "family": "ipv6"})

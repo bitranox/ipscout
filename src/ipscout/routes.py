@@ -95,9 +95,9 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
     # one after the % is refused rather than stripped into something valid.
     require_address(destination, family)
     # The routing table is asked about an address, not about an address on an
-    # interface, and every backend packs the destination with inet_pton, which
-    # refuses scoped text. Left in, the refusal is indistinguishable from an
-    # honest "no route to there".
+    # interface, so the backends are handed the bare address. Each backend
+    # also checks its argument with require_address and drops a zone itself,
+    # but stripping it here keeps one place deciding what is looked up.
     bare = split_zone(destination).address
     return _backend().query_route(bare, family)
 

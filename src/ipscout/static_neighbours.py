@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import contextlib
 import ipaddress
-import re
 import socket
 import sys
 from typing import TYPE_CHECKING
@@ -45,7 +44,7 @@ from .errors import IPScoutError, IPScoutUnsupportedError
 from .interfaces import local_interfaces
 from .models import LIMITED_BROADCAST, AddressFamily, Neighbour, names_a_neighbour, parse_address
 from .neighbours import neighbours
-from .resolve import interface_name
+from .resolve import INTERFACE_INDEX_DIGITS, interface_name
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -59,7 +58,6 @@ IS_MACOS = sys.platform == "darwin"
 
 #: An interface given as its number: digits only, and no more than an index
 #: can hold. ``str.isdigit`` would accept a superscript two (U+00B2), which ``int`` then refuses.
-_INDEX_PATTERN = re.compile(r"[0-9]{1,10}")
 
 #: The I/G bit of the first octet: set for every group address, broadcast
 #: included. A neighbour entry maps an address to ONE station.
@@ -159,7 +157,7 @@ def interface_index(name: str, interfaces: Sequence[Interface]) -> int:
 
     """
 
-    if _INDEX_PATTERN.fullmatch(name):
+    if INTERFACE_INDEX_DIGITS.fullmatch(name):
         if interface_name(int(name)) is None:
             msg = f"no interface with index {name} on this host"
             raise ValueError(msg)

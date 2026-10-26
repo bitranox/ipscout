@@ -1368,11 +1368,14 @@ class SubnetInfo(_Frozen):
     def _addressing_agrees(self) -> SubnetInfo:
         _require_prefix_len(self.prefix_len, require_address(self.address, self.family))
         expected = interface_network(self.address, self.prefix_len)
-        # Compared without the zone: interface_network drops it, while a record
-        # written before it did (a zoned /128, where ip_network keeps the zone)
-        # names the same network with it and must still validate.
+        # interface_network drops the zone, while a record written before it did
+        # (a zoned /128, where ip_network keeps the zone) names the same network
+        # with the address's own zone, and must still validate. Any other zone
+        # on the network is refused.
         stated = (self.network.network_address.packed, self.network.prefixlen)
-        if stated != (expected.network_address.packed, expected.prefixlen):
+        zone = getattr(self.network.network_address, "scope_id", None)
+        own_zone = getattr(ip_address(self.address), "scope_id", None)
+        if stated != (expected.network_address.packed, expected.prefixlen) or zone not in (None, own_zone):
             msg = f"network must be {expected} for {self.cidr}, got {self.network}"
             raise ValueError(msg)
         if self.broadcast is not None and (not isinstance(expected, IPv4Network) or ip_address(self.broadcast) != expected.broadcast_address):

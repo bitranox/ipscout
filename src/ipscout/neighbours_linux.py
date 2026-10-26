@@ -48,7 +48,7 @@ from .errors import (
     kernel_refused_neighbour_change,
     setcap_command,
 )
-from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, parse_address
+from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, parse_address, require_address
 from .netlink import (
     NLM_F_ACK,
     NLM_F_CREATE,
@@ -462,7 +462,9 @@ def build_set_request(ip: str, mac: bytes, ifindex: int, sequence: int = 1) -> b
     """
 
     body = (
-        _NDMSG.pack(socket.AF_INET, 0, 0, ifindex, _NUD_PERMANENT, 0, 0) + build_attribute(_NDA_DST, socket.inet_aton(ip)) + build_attribute(_NDA_LLADDR, mac)
+        _NDMSG.pack(socket.AF_INET, 0, 0, ifindex, _NUD_PERMANENT, 0, 0)
+        + build_attribute(_NDA_DST, require_address(ip, AddressFamily.IPV4).packed)
+        + build_attribute(_NDA_LLADDR, mac)
     )
     return build_message(_RTM_NEWNEIGH, NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE, body, sequence)
 
@@ -485,7 +487,7 @@ def build_remove_request(ip: str, ifindex: int, sequence: int = 1) -> bytes:
 
     """
 
-    body = _NDMSG.pack(socket.AF_INET, 0, 0, ifindex, 0, 0, 0) + build_attribute(_NDA_DST, socket.inet_aton(ip))
+    body = _NDMSG.pack(socket.AF_INET, 0, 0, ifindex, 0, 0, 0) + build_attribute(_NDA_DST, require_address(ip, AddressFamily.IPV4).packed)
     return build_message(_RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK, body, sequence)
 
 

@@ -30,7 +30,7 @@ import time
 from typing import TYPE_CHECKING
 
 from .deadline import seconds_left
-from .models import AddressFamily
+from .models import AddressFamily, require_address
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -260,11 +260,11 @@ def build_arp_request(*, sender_mac: str, sender_ip: str, target_ip: str) -> byt
         _PLEN,
         ARP_REQUEST,
         sender,
-        socket.inet_aton(sender_ip),
+        require_address(sender_ip, AddressFamily.IPV4).packed,
         # The target's hardware address is what is being asked for, so it is
         # left empty rather than guessed.
         bytes(MAC_LENGTH),
-        socket.inet_aton(target_ip),
+        require_address(target_ip, AddressFamily.IPV4).packed,
     )
     return ETHERNET.pack(BROADCAST, sender, ETH_P_ARP) + body
 

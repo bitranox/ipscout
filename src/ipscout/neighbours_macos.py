@@ -67,7 +67,7 @@ from .bsdroute import (
 )
 from .deadline import seconds_left
 from .errors import ARP_SCAN_ALTERNATIVE, PERMISSION_ERRNOS, IPScoutPermissionError, could_not_ask, kernel_refused_neighbour_change
-from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, parse_address
+from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, parse_address, require_address
 from .resolve import interface_name
 
 __all__ = [
@@ -323,7 +323,7 @@ def build_add_message(ip: str, mac: bytes, ifindex: int, *, pid: int, seq: int) 
 
     """
 
-    addresses = pack_sockaddr_in(socket.inet_aton(ip)) + pack_sockaddr_dl(ifindex, mac)
+    addresses = pack_sockaddr_in(require_address(ip, AddressFamily.IPV4).packed) + pack_sockaddr_dl(ifindex, mac)
     return _header(RTM_ADD, RTA_DST | RTA_GATEWAY, len(addresses), pid=pid, seq=seq) + addresses
 
 
@@ -347,7 +347,7 @@ def build_delete_message(ip: str, *, pid: int, seq: int) -> bytes:
 
     """
 
-    address = pack_sockaddr_in(socket.inet_aton(ip))
+    address = pack_sockaddr_in(require_address(ip, AddressFamily.IPV4).packed)
     return _header(RTM_DELETE, RTA_DST, len(address), pid=pid, seq=seq) + address
 
 
