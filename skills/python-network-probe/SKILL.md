@@ -156,7 +156,11 @@ that is not positive, raises `ValueError` before anything connects.
 
 Most printers, switches and print servers run an SNMP agent. `read_snmp_system` asks each host
 for sysUpTime, sysName, sysDescr and sysObjectID in ONE GET over a connected UDP socket. Plain UDP
-to port 161, so it needs no privilege:
+to port 161, so it needs no privilege. Like `grab_banners` it takes host strings, not a network:
+a string such as `"192.0.2.0/28"` is read as a name that does not resolve and comes back
+`UNREACHABLE`, so expand it with `ipaddress` as shown above (the `snmp-system` command expands
+networks for you). The defaults are `community="public"`,
+`port=161`, `timeout=3.0` seconds per host, `concurrency=64` and `version=SnmpVersion.V1`:
 
 ```python
 results = ipscout.read_snmp_system(["192.0.2.10", "192.0.2.11"], community="public", timeout=3.0)
@@ -166,27 +170,37 @@ for host, s in results.items():
 ```
 
 The uptime is the restart detector: read it before an action that restarts the device and again
-after, and a SMALLER value means it restarted, which a reachability check cannot tell you. It wraps
-to 0 after about 497 days (TimeTicks is 32 bits of hundredths).
+after, and a SMALLER value means it restarted, which a reachability check cannot tell you. Three
+holes in that test: the counter wraps to 0 after about 497 days (TimeTicks is 32 bits of
+hundredths), so a smaller value can also be a wrap; `uptime_seconds` is `None` when the agent does
+not report sysUpTime; and a read that is not `ANSWERED` before the action gives you no baseline to
+compare against, so check the first read's state before acting.
 
 Each value is an `SnmpSystem`; its `state` is an `SnmpState`:
 
 - `ANSWERED` - the agent replied; `uptime_seconds`, `name`, `description`, `object_id` are each
   `None` when the agent lacks that value.
-- `SILENT` - nothing arrived before the deadline. A host that is down, no agent, and a WRONG
-  COMMUNITY all look like this: SNMP answers a bad community with silence.
-- `REFUSED` - ICMP port unreachable: the host is up and nothing listens on that port.
+- `SILENT` - nothing arrived before the deadline. A host that is down, a WRONG COMMUNITY (SNMP
+  answers a bad community with silence), the other SNMP version, a firewall dropping UDP 161, a
+  `timeout` too short for a slow agent, and no agent on a host whose port-unreachable reply is
+  dropped all look like this. `is_reachable(host)` separates a down host from the rest; nothing
+  separates the others from each other.
+- `REFUSED` - ICMP port unreachable came back: the host is up and nothing listens on that port.
+  No agent shows as `REFUSED` only when that ICMP reply reaches you; filtered, it is `SILENT`.
 - `ERROR` - the agent sent an error status or a reply that is not a valid answer; `error` says which.
 - `UNREACHABLE` - the name did not resolve or the network reported no route; `error` says why.
 
 `version=SnmpVersion.V1` (the default) or `SnmpVersion.V2C`, never both: an agent that speaks only
 the other version stays SILENT, which cannot be told from a dead host, so there is no automatic
 fallback - pick the one the device speaks. Under v1 a GET fails as a whole when one value is
-unknown, so the read asks again without it and reports it as `None`. Every distinct host string
-gets one entry, in input order; a bare string as `hosts` raises `ValueError`, as does a port outside
-1-65535, a non-positive `timeout` or `concurrency`, or an empty `community`. The community never
-appears in an error; from the shell pass it as `IPSCOUT_SNMP_COMMUNITY`, not `--community`, which
-every user sees in the process list.
+unknown, so the read asks again without it and reports it as `None`. Every distinct host STRING
+gets one entry, keyed exactly as given (case included, nothing resolved or folded), at the position
+of its first occurrence; a repeat is read once. A bare string as `hosts` raises `ValueError`, as
+does a `port` outside 1-65535, a non-positive `timeout` or `concurrency`, or an empty `community`,
+all before anything is sent. The community never appears in an error; from the shell pass it as
+`IPSCOUT_SNMP_COMMUNITY`, not `--community`, which every user sees in the process list. The
+command takes `--version v1|v2c` and `--port`, and exits `0` when any host ANSWERED, `1` when
+none did, `2` on a bad argument.
 
 ## The error contract
 
@@ -204,8 +218,9 @@ here", and "that MAC holds no IPv6" is an ordinary finding.
 - An unresolvable name, missing permission, or nonsensical argument raises
   `IPScoutResolutionError`, `IPScoutPermissionError`, `IPScoutUnsupportedError`
   or `ValueError`. The many-host calls are the exception for a bad NAME: `ping_many` puts it
-  on that target's `.error`, and `grab_banners` reports it as an `UNREACHABLE` result, so one
-  typo cannot cost the other results. A nonsensical argument still raises before anything is sent.
+  on that target's `.error`, and `grab_banners` and `read_snmp_system` report it as an
+  `UNREACHABLE` result, so one typo cannot cost the other results. A nonsensical argument still
+  raises before anything is sent.
 - A sweep that cannot cover the ground it was asked about raises
   `IPScoutSweepTooWideError` or `IPScoutSweepIncompleteError`. Catch
   `IPScoutSweepError` for either; both are also `ValueError`.
@@ -419,7 +434,7 @@ partial answer is told from a complete one; the same note goes to stderr, never
 to the stream you parse. Exit codes are `0` reached, `1` not reached, `2` error
 - a bad name, a missing capability, or a malformed command line - independent of
 output format. `remove-neighbour` exits `1` when there was no entry to remove, and `banners`
-when no host greeted.
+when no host greeted, `snmp-system` when no host ANSWERED.
 
 ## What it will not do, and why
 
@@ -470,9 +485,9 @@ ICMP round trip and a filtered port is not a dead host.
 - Reading `scan_ports` as a boolean map. It returns each port mapped to a `PortState`: `OPEN`
   means the handshake completed, `CLOSED` means something refused, `FILTERED` means nothing
   answered, and conflating the last two hides the firewall you were looking for.
-- Calling `ping_many`, `scan_ports` or `grab_banners` from inside a running event loop. They
-  raise `RuntimeError` rather than deadlocking - await `aping_many`, `ascan_ports` or
-  `agrab_banners` there.
+- Calling `ping_many`, `scan_ports`, `grab_banners` or `read_snmp_system` from inside a running
+  event loop. They raise `RuntimeError` rather than deadlocking - await `aping_many`,
+  `ascan_ports`, `agrab_banners` or `aread_snmp_system` there.
 - Finding open ports with `scan_ports` and then connecting again to read a banner. That is two
   sessions, and a device that refuses a reconnect right after one is missed; `grab_banners`
   reads on the connection it opens.
