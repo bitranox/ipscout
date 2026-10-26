@@ -2,6 +2,8 @@
 
 Contents:
     within: Await something with whatever is left until a deadline.
+    seconds_left: The wait a blocking read may take before a deadline.
+    MIN_WAIT: The shortest wait seconds_left ever gives.
     failure_reason: Why something failed, never an empty string.
 
 """
@@ -9,14 +11,43 @@ Contents:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
 
-__all__ = ["failure_reason", "within"]
+__all__ = ["MIN_WAIT", "failure_reason", "seconds_left", "within"]
 
 _T = TypeVar("_T")
+
+#: The shortest wait a blocking read before a deadline is given. A deadline
+#: about to pass would otherwise become settimeout(0), which turns the socket
+#: non-blocking (and makes select return at once), or a negative timeout, which
+#: raises - so "no time left" still waits this long rather than changing the
+#: socket's mode or failing.
+MIN_WAIT = 0.001
+
+
+def seconds_left(deadline: float) -> float:
+    """Return how long a blocking read may wait before ``deadline``, never under MIN_WAIT.
+
+    Args:
+        deadline: A time on the ``time.monotonic()`` clock.
+
+    Returns:
+        The seconds until ``deadline``, or :data:`MIN_WAIT` once that is less,
+        so the result is always a valid blocking timeout.
+
+    Examples:
+        >>> seconds_left(time.monotonic() - 5) == MIN_WAIT
+        True
+        >>> 9 < seconds_left(time.monotonic() + 10) <= 10
+        True
+
+    """
+
+    return max(MIN_WAIT, deadline - time.monotonic())
 
 
 def failure_reason(exc: BaseException) -> str:

@@ -11,6 +11,7 @@ Contents:
     max_payload_size: The most payload one echo of a family can carry.
     require_payload_size: Refuse a payload one echo of a family cannot carry.
     parse_echo_reply: Decode a datagram back into its identifying fields.
+    ipv4_header_length: The length of a leading IPv4 header, if one is there.
     checksum: The RFC 1071 one's-complement sum.
 
 Why replies are matched on a token rather than on the identifier:
@@ -41,7 +42,7 @@ from typing import Annotated, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import AddressFamily
+from .models import MAX_ICMP_FIELD16, AddressFamily
 
 __all__ = [
     "DEFAULT_PAYLOAD_SIZE",
@@ -63,6 +64,7 @@ __all__ = [
     "ParsedReply",
     "build_echo_request",
     "checksum",
+    "ipv4_header_length",
     "is_echo_reply",
     "is_time_exceeded",
     "max_payload_size",
@@ -117,10 +119,9 @@ MAX_PAYLOAD_SIZE_IPV6 = MAX_IP_LENGTH - HEADER_SIZE
 #: the magic and token every payload starts with.
 _MAX_FILLER_SIZE = MAX_PAYLOAD_SIZE_IPV6 - MIN_PAYLOAD_SIZE
 
-#: The largest values of the one-byte (type, code) and two-byte (identifier,
-#: sequence) fields of an ICMP echo header.
+#: The largest value of the one-byte (type, code) fields of an ICMP echo
+#: header; the two-byte (identifier, sequence) bound is ``MAX_ICMP_FIELD16``.
 _MAX_UINT8 = 0xFF
-_MAX_UINT16 = 0xFFFF
 
 
 class EchoPayload(BaseModel):
@@ -189,8 +190,8 @@ class ParsedReply(BaseModel):
 
     icmp_type: Annotated[int, Field(ge=0, le=_MAX_UINT8)]
     code: Annotated[int, Field(ge=0, le=_MAX_UINT8)]
-    identifier: Annotated[int, Field(ge=0, le=_MAX_UINT16)]
-    sequence: Annotated[int, Field(ge=0, le=_MAX_UINT16)]
+    identifier: Annotated[int, Field(ge=0, le=MAX_ICMP_FIELD16)]
+    sequence: Annotated[int, Field(ge=0, le=MAX_ICMP_FIELD16)]
     payload: EchoPayload | None
 
     @property
@@ -311,8 +312,8 @@ def require_payload_size(payload_size: int, family: AddressFamily) -> int:
 def _require_uint16(name: str, value: int) -> None:
     """Refuse a value that does not fit a two-byte header field, naming it."""
 
-    if not 0 <= value <= _MAX_UINT16:
-        msg = f"{name} out of range 0-{_MAX_UINT16}: {value}"
+    if not 0 <= value <= MAX_ICMP_FIELD16:
+        msg = f"{name} out of range 0-{MAX_ICMP_FIELD16}: {value}"
         raise ValueError(msg)
 
 
@@ -402,6 +403,46 @@ def build_echo_request(
     return EchoRequest(_HEADER_STRUCT.pack(icmp_type, 0, checksum(blank), identifier, sequence) + payload, actual_token)
 
 
+def ipv4_header_length(datagram: bytes) -> int | None:
+    """Return the length in bytes of the IPv4 header ``datagram`` starts with, or None.
+
+    The one reading of the version and IHL nibbles of a first byte. None means
+    the bytes do not start with a plausible IPv4 header: too short to hold the
+    smallest one, a version other than 4, or an IHL below 5, which no sender
+    can write since the fixed part alone is five 32-bit words. Whether the
+    datagram is long enough for the header it claims is left to the caller,
+    whose rule for that differs (a header may or may not be followed by data).
+
+    Args:
+        datagram: Bytes that may begin with an IPv4 header.
+
+    Returns:
+        The header length (20-60), or None.
+
+    Examples:
+        >>> ipv4_header_length(b"\\x45" + b"\\x00" * 19)
+        20
+
+        Options lengthen the header, one 32-bit word per IHL step:
+
+        >>> ipv4_header_length(b"\\x46" + b"\\x00" * 23)
+        24
+
+        >>> ipv4_header_length(b"\\x44" + b"\\x00" * 19) is None
+        True
+        >>> ipv4_header_length(b"\\x65" + b"\\x00" * 39) is None
+        True
+        >>> ipv4_header_length(b"\\x45" + b"\\x00" * 5) is None
+        True
+
+    """
+
+    if len(datagram) < IPV4_MIN_HEADER_SIZE or (datagram[0] >> 4) != AddressFamily.IPV4.ip_version:
+        return None
+    header_len = (datagram[0] & 0x0F) * 4
+    return header_len if header_len >= IPV4_MIN_HEADER_SIZE else None
+
+
 def strip_ip_header(datagram: bytes) -> bytes:
     """Return the datagram with any leading IPv4 header removed.
 
@@ -442,10 +483,10 @@ def strip_ip_header(datagram: bytes) -> bytes:
 
     """
 
-    if len(datagram) < IPV4_MIN_HEADER_SIZE or (datagram[0] >> 4) != AddressFamily.IPV4.ip_version:
-        return datagram
-    header_len = (datagram[0] & 0x0F) * 4
-    if header_len < IPV4_MIN_HEADER_SIZE or header_len >= len(datagram):
+    header_len = ipv4_header_length(datagram)
+    # Strictly less than the datagram: a header with nothing after it leaves
+    # no ICMP message to strip down to.
+    if header_len is None or header_len >= len(datagram):
         return datagram
     return datagram[header_len:]
 

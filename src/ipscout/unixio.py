@@ -2,6 +2,7 @@
 
 Contents:
     fcntl_module: The ``fcntl`` module, typed and imported on first use.
+    packet_family: The ``AF_PACKET`` constant, or why this host has none.
 
 Note:
     ``fcntl`` exists only on Unix, so its attributes are unknown to a type
@@ -19,9 +20,12 @@ Note:
 
 from __future__ import annotations
 
+import socket
 from typing import Protocol, cast
 
-__all__ = ["fcntl_module"]
+from .errors import IPScoutUnsupportedError
+
+__all__ = ["fcntl_module", "packet_family"]
 
 
 class _Fcntl(Protocol):
@@ -54,3 +58,27 @@ def fcntl_module() -> _Fcntl:
     import fcntl  # noqa: PLC0415 - Unix-only, and only on a POSIX path
 
     return cast("_Fcntl", fcntl)
+
+
+def packet_family() -> int:
+    """Return the ``AF_PACKET`` constant, or say why this host has none.
+
+    Read with ``getattr`` rather than as ``socket.AF_PACKET`` because the
+    attribute exists only on Linux: a direct reference fails the type check
+    run for Windows and macOS even on a Linux-only path.
+
+    Raises:
+        IPScoutUnsupportedError: Off Linux, where no packet socket exists.
+
+    Examples:
+        >>> import sys
+        >>> if sys.platform.startswith("linux"):
+        ...     assert packet_family() == socket.AF_PACKET
+
+    """
+
+    af_packet = getattr(socket, "AF_PACKET", None)
+    if not isinstance(af_packet, int):  # pragma: no cover - non-Linux
+        msg = "AF_PACKET is a Linux facility and this process is not on Linux"
+        raise IPScoutUnsupportedError(msg)
+    return af_packet

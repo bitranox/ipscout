@@ -17,6 +17,11 @@ Contents:
     IPScoutUnsupportedError: No backend exists for this platform or feature.
     IPScoutSweepError: A sweep cannot be run as asked, in two flavours -
         IPScoutSweepTooWideError and IPScoutSweepIncompleteError.
+    ARP_SCAN_ALTERNATIVE: The unprivileged way out every refused active
+        resolution offers.
+    PERMISSION_ERRNOS: The errnos a kernel answers with for want of a privilege.
+    kernel_refused_neighbour_change: The error for a neighbour-table change the
+        kernel refused for a reason other than privilege.
 
 Note:
     Names carry the ``IPScout`` prefix rather than reading ``PermissionError``
@@ -27,12 +32,16 @@ Note:
 
 from __future__ import annotations
 
+import errno
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pydantic import ValidationError
 
 __all__ = [
+    "ARP_SCAN_ALTERNATIVE",
+    "PERMISSION_ERRNOS",
     "IPScoutError",
     "IPScoutPermissionError",
     "IPScoutResolutionError",
@@ -41,9 +50,21 @@ __all__ = [
     "IPScoutSweepTooWideError",
     "IPScoutUnsupportedError",
     "could_not_ask",
+    "kernel_refused_neighbour_change",
     "refused_arguments",
     "validation_problems",
 ]
+
+#: The way out offered whenever active MAC resolution is refused for want of a
+#: privilege. Every backend ends its refusal with these words, so a caller meets
+#: the same remedy whichever platform refused, and it is written once here.
+ARP_SCAN_ALTERNATIVE = "use arp_scan(), which resolves the same addresses unprivileged"
+
+#: The errnos a kernel answers with when the process lacks a privilege. Which
+#: of the two a refusal carries depends on the path it took through the kernel,
+#: so testing for one alone would report the other as an unexplained failure
+#: instead of naming the privilege to grant.
+PERMISSION_ERRNOS = frozenset({errno.EPERM, errno.EACCES})
 
 
 class IPScoutError(Exception):
@@ -248,3 +269,23 @@ def could_not_ask(target_ip: str, interface: str, error: OSError) -> IPScoutUnsu
     """
 
     return IPScoutUnsupportedError(f"could not ask for {target_ip} on {interface}: {error}")
+
+
+def kernel_refused_neighbour_change(verb: str, error: int) -> IPScoutError:
+    """Return the error for a neighbour-table change the kernel refused.
+
+    For a refusal that is not about privilege - those are
+    :data:`PERMISSION_ERRNOS` and get their own remedy - so the kernel's own
+    reason is all there is to report, with its errno for a caller to match on.
+
+    Args:
+        verb: What the change was to do (``"add"``, ``"delete"``).
+        error: The errno the kernel answered with.
+
+    Examples:
+        >>> str(kernel_refused_neighbour_change("add", errno.EEXIST))
+        'the kernel refused to add the neighbour entry: File exists (errno 17)'
+
+    """
+
+    return IPScoutError(f"the kernel refused to {verb} the neighbour entry: {os.strerror(error)} (errno {error})")

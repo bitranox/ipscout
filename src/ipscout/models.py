@@ -21,7 +21,10 @@ Two decisions worth knowing:
     ordinary model dump both drop it, producing a payload that looks complete
     while missing exactly the numbers a caller wants. Declaring them as
     computed fields puts them in ``model_dump()`` by construction, so they
-    cannot be forgotten again.
+    cannot be forgotten again. The exception is a parsed *view* of a field the
+    record already serialises (``InterfaceAddress.network``,
+    ``Neighbour.address``): it adds no fact, so it stays a plain property and
+    off the wire, where it would only repeat that field in another spelling.
 
     **The enums subclass ``str``.** Their members *are* strings, so the wire
     bytes are unchanged and no conversion is needed at the boundary.
@@ -33,11 +36,12 @@ Two decisions worth knowing:
 from __future__ import annotations
 
 import enum
+import math
 import re
 import socket
 import statistics
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address, ip_network
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, NamedTuple
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -45,9 +49,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 __all__ = [
+    "BLANK_TARGET_MESSAGE",
     "DEFAULT_TIMEOUT",
     "DISCARD_PORT",
     "MAX_HOP_LIMIT",
+    "MAX_ICMP_FIELD16",
     "MAX_PORT",
     "MAX_TIMEOUT",
     "MAX_TIMES",
@@ -58,6 +64,7 @@ __all__ = [
     "BannerState",
     "CapabilityReport",
     "CommandName",
+    "FamilyAddress",
     "FindIpReport",
     "IPNetwork",
     "Interface",
@@ -87,6 +94,7 @@ __all__ = [
     "RoundTrip",
     "RouteInfo",
     "ScanMethod",
+    "Settle",
     "SnmpState",
     "SnmpSystem",
     "SnmpVersion",
@@ -95,10 +103,14 @@ __all__ = [
     "Timeout",
     "TraceHop",
     "WakeReport",
+    "interface_network",
+    "is_blank_target",
+    "names_a_neighbour",
     "needs_zone",
     "parse_address",
     "require_address",
     "require_port",
+    "require_settle",
     "require_timeout",
 ]
 
@@ -146,10 +158,18 @@ MAX_TIMEOUT = 2147483.0
 #: of a second (RFC 2578), so an agent's uptime wraps to 0 after about 497 days.
 MAX_UPTIME_SECONDS = (2**32 - 1) / 100
 
+#: The largest value of the two 16-bit fields of an ICMP echo header, the
+#: identifier and the sequence number (RFC 792, RFC 4443).
+MAX_ICMP_FIELD16 = 0xFFFF
+
 #: The most echoes one ping sends. Each echo carries its own sequence number,
 #: counting from 1, in a 16-bit ICMP header field, so one more would fail
 #: half-way through the run instead of before it.
-MAX_TIMES = 0xFFFF
+MAX_TIMES = MAX_ICMP_FIELD16
+
+#: The refusal for a target that names nothing. One text, so every entry point
+#: that takes a target refuses an empty one in the same words.
+BLANK_TARGET_MESSAGE = "target must not be empty"
 
 
 def require_port(value: int) -> int:
@@ -213,6 +233,54 @@ def require_timeout(value: float) -> float:
         msg = f"timeout must be above 0 and at most {MAX_TIMEOUT:.0f} seconds, got {value!r}"
         raise ValueError(msg)
     return value
+
+
+def require_settle(settle: float) -> float:
+    """Return ``settle`` if it is a usable quiet period in seconds, or raise saying why not.
+
+    A settle is a wait like a timeout, so it shares the ``MAX_TIMEOUT`` bound,
+    but zero is a real setting (answer on the first sighting) where a zero
+    timeout would never wait. The finiteness test comes first because ``nan``
+    fails every comparison and ``inf`` is no wait a clock can count.
+
+    Args:
+        settle: The candidate number of seconds.
+
+    Returns:
+        ``settle`` unchanged.
+
+    Raises:
+        ValueError: ``settle`` is not finite, is below 0, or is above
+            ``MAX_TIMEOUT``.
+
+    Examples:
+        >>> require_settle(0.0)
+        0.0
+        >>> require_settle(-1.0)
+        Traceback (most recent call last):
+        ...
+        ValueError: settle must be a finite number of seconds from 0 to 2.14748e+06, got -1.0
+
+    """
+
+    if not (math.isfinite(settle) and 0 <= settle <= MAX_TIMEOUT):
+        msg = f"settle must be a finite number of seconds from 0 to {MAX_TIMEOUT:g}, got {settle!r}"
+        raise ValueError(msg)
+    return settle
+
+
+def is_blank_target(text: str) -> bool:
+    """Return whether ``text`` names no target at all: empty or whitespace only.
+
+    Examples:
+        >>> is_blank_target(" \\t")
+        True
+        >>> is_blank_target("example.test")
+        False
+
+    """
+
+    return not text.strip()
 
 
 def parse_address(text: str) -> IPv4Address | IPv6Address:
@@ -305,6 +373,60 @@ def needs_zone(address: IPv4Address | IPv6Address) -> bool:
     return address.version == AddressFamily.IPV6.ip_version and address.is_link_local
 
 
+def names_a_neighbour(address: IPv4Address | IPv6Address) -> bool:
+    """Return whether a neighbour-cache row for ``address`` can describe a host.
+
+    A row for a multicast or the unspecified address is a query or a group the
+    kernel tracks, not a host that answered, so a listing of neighbours skips it.
+
+    Examples:
+        >>> names_a_neighbour(ip_address("192.0.2.1"))
+        True
+        >>> names_a_neighbour(ip_address("ff02::1"))
+        False
+        >>> names_a_neighbour(ip_address("0.0.0.0"))
+        False
+
+    """
+
+    return not (address.is_multicast or address.is_unspecified)
+
+
+def interface_network(address: str, prefix_len: int) -> IPv4Network | IPv6Network:
+    """Return the network ``address/prefix_len`` sits on, host bits cleared.
+
+    The one derivation of "the subnet of an interface address", so a record
+    that stores the network and a reader that computes it agree. An IPv6
+    ``%zone`` on ``address`` is dropped first: a network is a set of addresses,
+    not a link, and ``ipaddress`` keeps the zone on a ``/128`` but drops it
+    on every shorter prefix, so the same address would otherwise yield networks
+    that compare unequal depending on its prefix length.
+
+    Args:
+        address: An IP address literal of either family, optionally zoned.
+        prefix_len: The prefix length; 0-32 for IPv4, 0-128 for IPv6.
+
+    Returns:
+        The network, never carrying a zone.
+
+    Raises:
+        ValueError: ``address`` is not an address literal, or ``prefix_len``
+            does not fit its family.
+
+    Examples:
+        >>> interface_network("192.0.2.77", 24)
+        IPv4Network('192.0.2.0/24')
+        >>> interface_network("fe80::1%eth0", 128)
+        IPv6Network('fe80::1/128')
+
+    """
+
+    # Rebuilt from the packed bytes because that is the one spelling of an
+    # address that cannot carry a zone, whatever the Python version.
+    bare = ip_address(parse_address(address).packed)
+    return ip_network((bare, prefix_len), strict=False)
+
+
 #: A port number a remote host can be asked about. Every record carrying one
 #: refuses anything else, so a reader never meets a port no producer could
 #: have probed. The check is ``require_port`` itself rather than a field bound,
@@ -315,6 +437,10 @@ Port = Annotated[int, AfterValidator(require_port)]
 #: bounded by ``require_port``: a request field and a plain argument refuse
 #: the same value in the same words.
 Timeout = Annotated[float, AfterValidator(require_timeout)]
+
+#: A quiet period in seconds, bounded by ``require_settle`` so a report field
+#: and the session argument it records refuse the same value in the same words.
+Settle = Annotated[float, AfterValidator(require_settle)]
 
 #: One measured round trip in milliseconds. A clock difference, so never
 #: negative, and never infinite or ``nan``: a reply that did not come back is
@@ -496,6 +622,59 @@ class AddressFamily(str, enum.Enum):
                 return family
         msg = f"no address family has IP version {version}"
         raise ValueError(msg)
+
+    @classmethod
+    def of_socket_family(cls, value: int) -> AddressFamily | None:
+        """Return the family whose ``socket_family`` is ``value``, or None.
+
+        Takes the raw number a sockaddr carries rather than a
+        ``socket.AddressFamily``, because ``AF_INET6`` is a different number on
+        Linux, macOS and Windows and the comparison has to be made against this
+        platform's own constant. Every other family (a link-layer entry,
+        ``AF_UNSPEC``) is not an IP address and has no answer here.
+
+        Args:
+            value: An ``AF_*`` number as read out of a sockaddr.
+
+        Returns:
+            The matching family, or None for a family that is not IP.
+
+        Examples:
+            >>> AddressFamily.of_socket_family(socket.AF_INET) is AddressFamily.IPV4
+            True
+            >>> AddressFamily.of_socket_family(int(socket.AF_INET6)) is AddressFamily.IPV6
+            True
+            >>> AddressFamily.of_socket_family(socket.AF_UNSPEC) is None
+            True
+
+        """
+
+        for family in cls:
+            if family.socket_family == value:
+                return family
+        return None
+
+
+class FamilyAddress(NamedTuple):
+    """One IP address read out of a platform sockaddr, with its family.
+
+    The record every interface backend decodes a sockaddr into, so the POSIX
+    and Windows readers hand the same shape to the code that builds
+    :class:`InterfaceAddress` from it.
+
+    Attributes:
+        family: The address family, decoded from the platform's raw
+            ``AF_INET`` / ``AF_INET6`` number where the sockaddr is read.
+        address: The address in its textual form, without a zone.
+
+    Examples:
+        >>> FamilyAddress(AddressFamily.IPV4, "192.0.2.1").address
+        '192.0.2.1'
+
+    """
+
+    family: AddressFamily
+    address: str
 
 
 class ProbeMethod(str, enum.Enum):
@@ -923,13 +1102,32 @@ class InterfaceAddress(_Frozen):
 
     @model_validator(mode="after")
     def _prefix_fits_the_address(self) -> InterfaceAddress:
-        try:
-            parsed = ip_address(self.address)
-        except ValueError as exc:
-            msg = f"{self.address!r} is not an IP address literal"
-            raise ValueError(msg) from exc
-        _require_prefix_len(self.prefix_len, parsed)
+        _require_prefix_len(self.prefix_len, parse_address(self.address))
         return self
+
+    @property
+    def cidr(self) -> str:
+        """Return the address in CIDR form, host bits and any zone kept.
+
+        Examples:
+            >>> InterfaceAddress(address="192.0.2.77", prefix_len=24).cidr
+            '192.0.2.77/24'
+
+        """
+
+        return f"{self.address}/{self.prefix_len}"
+
+    @property
+    def network(self) -> IPv4Network | IPv6Network:
+        """Return the network this address sits on, as :func:`interface_network` derives it.
+
+        Examples:
+            >>> InterfaceAddress(address="2001:db8::5", prefix_len=64).network
+            IPv6Network('2001:db8::/64')
+
+        """
+
+        return interface_network(self.address, self.prefix_len)
 
 
 class Interface(_Frozen):
@@ -964,9 +1162,7 @@ class Interface(_Frozen):
     def _addresses_sit_in_their_family(self) -> Interface:
         for family, entries in ((AddressFamily.IPV4, self.ipv4), (AddressFamily.IPV6, self.ipv6)):
             for entry in entries:
-                if ip_address(entry.address).version != family.ip_version:
-                    msg = f"{entry.address!r} is not an {family.value} address"
-                    raise ValueError(msg)
+                require_address(entry.address, family)
         return self
 
 
@@ -1010,6 +1206,18 @@ class Neighbour(_Frozen):
         require_address(self.ip, self.family)
         return self
 
+    @property
+    def address(self) -> IPv4Address | IPv6Address:
+        """Return ``ip`` parsed, for a caller that compares or classifies it.
+
+        Examples:
+            >>> Neighbour(ip="192.0.2.1").address
+            IPv4Address('192.0.2.1')
+
+        """
+
+        return ip_address(self.ip)
+
     @computed_field
     @property
     def scoped(self) -> str:
@@ -1030,7 +1238,7 @@ class Neighbour(_Frozen):
 
         """
 
-        if self.interface is None or not needs_zone(ip_address(self.ip)):
+        if self.interface is None or not needs_zone(self.address):
             return self.ip
         return f"{self.ip}%{self.interface}"
 
@@ -1126,7 +1334,7 @@ class SubnetInfo(_Frozen):
     @model_validator(mode="after")
     def _addressing_agrees(self) -> SubnetInfo:
         _require_prefix_len(self.prefix_len, require_address(self.address, self.family))
-        expected = ip_network(f"{self.address}/{self.prefix_len}", strict=False)
+        expected = interface_network(self.address, self.prefix_len)
         if self.network != expected:
             msg = f"network must be {expected} for {self.address}/{self.prefix_len}, got {self.network}"
             raise ValueError(msg)
@@ -1435,7 +1643,7 @@ class ObserveDhcpReport(_Frozen):
     timeout: Timeout
     #: Zero is a real setting: answer on the first address seen. Bounded like
     #: a timeout, since it is one: a wait in seconds.
-    settle: float = Field(ge=0, le=MAX_TIMEOUT, allow_inf_nan=False)
+    settle: Settle
 
 
 class CapabilityReport(_Frozen):

@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from .deadline import MIN_WAIT as MIN_CAPTURE_WAIT
 from .models import RoundTrip
 
 if TYPE_CHECKING:
@@ -39,10 +40,9 @@ __all__ = ["CAPTURE_RECEIVE_BUFFER", "MIN_CAPTURE_WAIT", "AsyncEchoTransport", "
 #: it is not a failure to capture.
 CAPTURE_RECEIVE_BUFFER = 1 << 20
 
-#: The shortest wait one capture read makes. A zero timeout would turn a
-#: blocking socket non-blocking (or make select return at once), so a caller's
-#: "no time left" still waits this long rather than changing the socket's mode.
-MIN_CAPTURE_WAIT = 0.001
+# MIN_CAPTURE_WAIT, the shortest wait one capture read makes, is
+# deadline.MIN_WAIT under the name the capture backends import it by: the
+# reason for the floor is the same, so its value lives once, in deadline.
 
 
 class EchoResult(BaseModel):

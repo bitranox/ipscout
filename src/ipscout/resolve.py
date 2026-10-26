@@ -11,6 +11,9 @@ Contents:
     ResolvedTarget: The ``(address, family)`` record resolve_one returns.
     split_zone: Separate an address from its IPv6 ``%zone`` suffix.
     ScopedAddress: The ``(address, zone)`` record split_zone returns.
+    zone_index: The interface index a zone names, by name or by number.
+    interface_name: The name of an interface index, or None.
+    MAX_INTERFACE_INDEX: The largest interface index a sockaddr can carry.
     reverse_dns: Turn an address back into a name.
     family_of: Classify a literal address.
 
@@ -34,9 +37,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
 __all__ = [
+    "MAX_INTERFACE_INDEX",
     "ResolvedTarget",
     "ScopedAddress",
     "family_of",
+    "interface_name",
     "resolve",
     "resolve_one",
     "reverse_dns",
@@ -145,7 +150,45 @@ def split_zone(address: str) -> ScopedAddress:
 _ZONE_INDEX = re.compile(r"[0-9]{1,10}")
 
 #: A sockaddr carries the scope as an unsigned 32-bit field.
-_MAX_INTERFACE_INDEX = 2**32 - 1
+MAX_INTERFACE_INDEX = 2**32 - 1
+
+
+def interface_name(index: int) -> str | None:
+    """Return the name of the interface with ``index``, or None if there is none.
+
+    Args:
+        index: An interface index, as a sockaddr's scope or a route carries it.
+
+    Returns:
+        The interface's name, or ``None`` when the index is out of the range an
+        index can take or no interface has it here. Index 0 means "no
+        interface" everywhere, so it never names one.
+
+    Examples:
+        >>> interface_name(0) is None
+        True
+        >>> interface_name(-1) is None
+        True
+        >>> interface_name(2**32) is None
+        True
+        >>> import socket
+        >>> known = getattr(socket, "if_nameindex", list)()
+        >>> all(interface_name(index) == name for index, name in known)
+        True
+
+    """
+
+    # Out of range is "no such interface" to a caller, never a crash, but
+    # if_indextoname reports it as OverflowError past a C unsigned int and as
+    # ValueError or OverflowError for a negative index depending on the Python
+    # version, and as OSError for index 0. The range check settles all of them
+    # the same way before the call; the except keeps the call total anyway.
+    if not 1 <= index <= MAX_INTERFACE_INDEX:
+        return None
+    try:
+        return socket.if_indextoname(index)
+    except (OSError, ValueError, OverflowError):
+        return None
 
 
 def zone_index(zone: str) -> int:
@@ -172,9 +215,9 @@ def zone_index(zone: str) -> int:
     # interface), and an unbounded run would hit int()'s digit limit.
     if _ZONE_INDEX.fullmatch(zone):
         index = int(zone)
-        if index <= _MAX_INTERFACE_INDEX:
+        if index <= MAX_INTERFACE_INDEX:
             return index
-        msg = f"zone {zone!r} is past the largest interface index ({_MAX_INTERFACE_INDEX}): use an index or a name this host has"
+        msg = f"zone {zone!r} is past the largest interface index ({MAX_INTERFACE_INDEX}): use an index or a name this host has"
         raise IPScoutResolutionError(msg)
     try:
         return socket.if_nametoindex(zone)
@@ -205,10 +248,8 @@ def _with_zone(sockaddr: _SockAddr, written_zone: str | None) -> str:
     scope = sockaddr[3]
     if not scope:
         return address
-    try:
-        return f"{address}%{socket.if_indextoname(scope)}"
-    except OSError:  # pragma: no cover - an index the OS no longer knows
-        return f"{address}%{scope}"
+    # An index the OS no longer knows keeps its number, so the link is still named.
+    return f"{address}%{interface_name(scope) or scope}"
 
 
 class ResolvedTarget(NamedTuple):
@@ -267,10 +308,12 @@ def _refuse_a_malformed_zone(target: str) -> None:
     is a malformed target rather than a fact about the network.
     """
 
-    bare, separator, zone = target.partition("%")
-    if not separator:
+    if "%" not in target:
         return
-    if not zone:
+    bare, zone = split_zone(target)
+    # split_zone names no zone for a % with nothing after it, so with a % present
+    # a None zone is exactly that trailing-% mistake.
+    if zone is None:
         msg = f"{target!r} ends with % but names no interface: write one after it, or drop the %"
         raise IPScoutResolutionError(msg)
     if "%" in zone:
@@ -309,10 +352,16 @@ def _dedupe(items: Iterable[ResolvedTarget]) -> list[ResolvedTarget]:
 def _resolved_targets(infos: Iterable[_AddrInfo], written_zone: str | None) -> Iterator[ResolvedTarget]:
     """Yield each ``getaddrinfo`` result as its address text and the family it came with."""
 
-    # Only AF_INET and AF_INET6 are ever asked for, so a result that is not
-    # the one is the other.
+    # Only AF_INET and AF_INET6 are asked for, but a resolver is outside this
+    # library: a result of any other family is skipped rather than labelled
+    # IPv4, which would hand a probe an address it cannot send to.
     for socket_family, _kind, _proto, _canonname, sockaddr in infos:
-        family = AddressFamily.IPV6 if socket_family == AddressFamily.IPV6.socket_family else AddressFamily.IPV4
+        if socket_family == AddressFamily.IPV6.socket_family:
+            family = AddressFamily.IPV6
+        elif socket_family == AddressFamily.IPV4.socket_family:
+            family = AddressFamily.IPV4
+        else:
+            continue
         yield ResolvedTarget(_with_zone(sockaddr, written_zone), family)
 
 

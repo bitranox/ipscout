@@ -1,18 +1,23 @@
-"""ARP and NDP message codecs. Pure bytes in, pure bytes out, no I/O.
+"""ARP and NDP message codecs, and the socket steps every sender repeats.
 
 Contents:
+    require_mac / packed_mac: A written hardware address, checked or packed.
     build_arp_request: An Ethernet frame asking who holds an IPv4 address.
     parse_arp_reply: The hardware address in a reply, if it answers our query.
     build_neighbour_solicitation: The ICMPv6 equivalent for IPv6.
     parse_neighbour_advertisement: The hardware address in its reply.
     solicited_node_multicast: The IPv6 group a solicitation is sent to.
+    send_neighbour_solicitation: Send a solicitation on a socket the caller
+        opened.
+    await_answer: Read frames until one answers or the time runs out.
 
 Note:
-    Separated from the sockets that carry these so the wire formats can be
-    tested without the privileges the sockets need. That matters here more
+    Separated from the code that opens the sockets so the wire formats can be
+    tested without the privileges those sockets need. That matters here more
     than anywhere else in this package: sending either message requires root
-    or ``CAP_NET_RAW``, so the transmit paths cannot run in CI at all, while
-    everything in this module can.
+    or ``CAP_NET_RAW``, so the transmit paths cannot run in CI at all. The two
+    socket helpers take a socket already opened and leave every exception to
+    the caller, so they run against an ordinary unprivileged socket in tests.
 
 """
 
@@ -21,19 +26,31 @@ from __future__ import annotations
 import ipaddress
 import socket
 import struct
+import time
+from typing import TYPE_CHECKING
+
+from .deadline import seconds_left
+from .models import AddressFamily
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = [
     "ETHERNET",
     "ETHERNET_HEADER_SIZE",
     "FRAME_RECEIVE_SIZE",
     "HTYPE_ETHERNET",
+    "await_answer",
     "build_arp_request",
     "build_neighbour_solicitation",
     "format_hardware_address",
     "format_mac",
     "normalise_mac",
+    "packed_mac",
     "parse_arp_reply",
     "parse_neighbour_advertisement",
+    "require_mac",
+    "send_neighbour_solicitation",
     "solicited_node_multicast",
 ]
 
@@ -44,13 +61,19 @@ ETH_P_IP = 0x0800
 ETH_P_ARP = 0x0806
 ETH_P_VLAN = 0x8100
 ETH_P_IPV6 = 0x86DD
-BROADCAST = b"\xff" * 6
+
+#: An Ethernet hardware address is six bytes.
+MAC_LENGTH = 6
+
+BROADCAST = b"\xff" * MAC_LENGTH
 
 #: ARP: hardware type, protocol type, lengths, operation, then the addresses.
 _ARP = struct.Struct("!HHBBH6s4s6s4s")
 HTYPE_ETHERNET = 1
-_PTYPE_IPV4 = 0x0800
-_HLEN = 6
+#: ARP names the protocol it resolves by that protocol's EtherType (RFC 826),
+#: so IPv4's protocol type is the IPv4 EtherType, not a number of its own.
+_PTYPE_IPV4 = ETH_P_IP
+_HLEN = MAC_LENGTH
 _PLEN = 4
 ARP_REQUEST = 1
 ARP_REPLY = 2
@@ -60,9 +83,6 @@ ICMPV6_NEIGHBOUR_SOLICITATION = 135
 ICMPV6_NEIGHBOUR_ADVERTISEMENT = 136
 _ND_OPT_SOURCE_LINK_ADDRESS = 1
 _ND_OPT_TARGET_LINK_ADDRESS = 2
-
-#: An Ethernet hardware address is six bytes.
-MAC_LENGTH = 6
 
 #: Bytes read for one link-layer frame (an ARP reply, a neighbour
 #: advertisement, a captured DHCP reply). A standard Ethernet frame fits
@@ -146,32 +166,67 @@ def format_mac(raw: bytes) -> str | None:
     return format_hardware_address(raw)
 
 
-def _packed_mac(mac: str) -> bytes:
-    """Return a written hardware address as its six bytes, or refuse it.
+def require_mac(mac: str) -> str:
+    """Return a written hardware address in canonical form, or refuse it.
 
-    Read through :func:`normalise_mac`, the one parser of written addresses,
-    so a frame is never built from a short or long one: two bytes would be
-    zero-padded by the frame layout into an address nobody holds, and a
-    seventh byte would be kept and dropped silently by ``struct``.
+    The refusing counterpart of :func:`normalise_mac`, for a caller that has
+    no use for an address it cannot read: one wording for the refusal, so
+    every entry point that takes a hardware address says the same thing.
+
+    Args:
+        mac: An address in any form :func:`normalise_mac` accepts.
+
+    Returns:
+        The lowercase colon-separated form.
 
     Raises:
         ValueError: ``mac`` is not a six-byte Ethernet address.
 
     Examples:
-        >>> _packed_mac("02-00-5E-10-00-00").hex()
-        '02005e100000'
-        >>> _packed_mac("aa:bb")
+        >>> require_mac("AA-BB-CC-DD-EE-FF")
+        'aa:bb:cc:dd:ee:ff'
+        >>> require_mac("aa:bb")
         Traceback (most recent call last):
         ...
-        ValueError: 'aa:bb' is not a 6-byte Ethernet hardware address
+        ValueError: 'aa:bb' is not a hardware address
 
     """
 
     canonical = normalise_mac(mac)
     if canonical is None:
-        msg = f"{mac!r} is not a {MAC_LENGTH}-byte Ethernet hardware address"
+        msg = f"{mac!r} is not a hardware address"
         raise ValueError(msg)
-    return bytes.fromhex(canonical.replace(":", ""))
+    return canonical
+
+
+def packed_mac(mac: str) -> bytes:
+    """Return a written hardware address as its six bytes, or refuse it.
+
+    Read through :func:`require_mac`, so a frame is never built from a short
+    or long address: two bytes would be zero-padded by the frame layout into
+    an address nobody holds, and a seventh byte would be kept and dropped
+    silently by ``struct``.
+
+    Args:
+        mac: An address in any form :func:`normalise_mac` accepts.
+
+    Returns:
+        The six bytes, in transmission order.
+
+    Raises:
+        ValueError: ``mac`` is not a six-byte Ethernet address.
+
+    Examples:
+        >>> packed_mac("02-00-5E-10-00-00").hex()
+        '02005e100000'
+        >>> packed_mac("aa:bb:cc:dd:ee:ff:00")
+        Traceback (most recent call last):
+        ...
+        ValueError: 'aa:bb:cc:dd:ee:ff:00' is not a hardware address
+
+    """
+
+    return bytes.fromhex(require_mac(mac).replace(":", ""))
 
 
 def build_arp_request(*, sender_mac: str, sender_ip: str, target_ip: str) -> bytes:
@@ -197,7 +252,7 @@ def build_arp_request(*, sender_mac: str, sender_ip: str, target_ip: str) -> byt
 
     """
 
-    sender = _packed_mac(sender_mac)
+    sender = packed_mac(sender_mac)
     body = _ARP.pack(
         HTYPE_ETHERNET,
         _PTYPE_IPV4,
@@ -291,7 +346,7 @@ def build_neighbour_solicitation(*, sender_mac: str, target_ip: str) -> bytes:
     """
 
     header = struct.pack("!BBHI", ICMPV6_NEIGHBOUR_SOLICITATION, 0, 0, 0)
-    option = struct.pack("!BB6s", _ND_OPT_SOURCE_LINK_ADDRESS, 1, _packed_mac(sender_mac))
+    option = struct.pack("!BB6s", _ND_OPT_SOURCE_LINK_ADDRESS, 1, packed_mac(sender_mac))
     return header + socket.inet_pton(socket.AF_INET6, target_ip) + option
 
 
@@ -345,3 +400,97 @@ def parse_neighbour_advertisement(message: bytes, target_ip: str) -> str | None:
         return None
 
     return _target_link_address(message)
+
+
+def send_neighbour_solicitation(sock: socket.socket, *, interface: str, target_ip: str, source_mac: str, timeout: float) -> None:
+    """Send a neighbour solicitation on a raw ICMPv6 socket the caller opened.
+
+    The multicast interface is pinned before sending because the
+    solicited-node group exists on every link: left to the routing table, the
+    solicitation could leave by an interface the target is not on.
+
+    Args:
+        sock: An ICMPv6 socket. Opening it is the caller's, because that is
+            where the privilege is needed and each platform words the refusal
+            differently.
+        interface: The interface to send on; its index scopes both the
+            multicast egress and the destination.
+        target_ip: The IPv6 address being asked about.
+        source_mac: This host's hardware address, carried as an option.
+        timeout: Seconds the socket waits on each later operation.
+
+    Raises:
+        OSError: The interface is unknown, the option or the send was refused.
+            Nothing is caught here: each caller maps the failure itself, and a
+            ``PermissionError`` from the send must stay distinguishable.
+        ValueError: ``source_mac`` is not a six-byte Ethernet address.
+
+    Examples:
+        >>> import socket
+        >>> sock = socket.socket()
+        >>> try:
+        ...     send_neighbour_solicitation(sock, interface="no-such-if0", target_ip="fe80::1",
+        ...                                 source_mac="02:00:5e:10:00:00", timeout=1.0)
+        ... except OSError:
+        ...     print("refused")
+        ... finally:
+        ...     sock.close()
+        refused
+
+    """
+
+    index = socket.if_nametoindex(interface)
+    sock.setsockopt(AddressFamily.IPV6.ip_option_level, socket.IPV6_MULTICAST_IF, index)
+    sock.settimeout(timeout)
+    group = solicited_node_multicast(target_ip)
+    # Port 0 and flow info 0: ICMPv6 has no ports, and the scope id is the
+    # interface index so a link-local group resolves on the right link.
+    sock.sendto(build_neighbour_solicitation(sender_mac=source_mac, target_ip=target_ip), (group, 0, 0, index))
+
+
+def await_answer(sock: socket.socket, *, timeout: float, parse: Callable[[bytes], str | None]) -> str | None:
+    """Read frames until one parses to an answer, or the time runs out.
+
+    A link-layer or raw ICMPv6 socket sees traffic that is not the reply
+    being waited for, so each frame goes to ``parse`` and the ones it rejects
+    are dropped. The socket timeout is reset to what is left before every
+    read, so a stream of unrelated frames cannot stretch the wait past
+    ``timeout``.
+
+    Args:
+        sock: The socket the request went out on.
+        timeout: Seconds to wait in total, counted from this call.
+        parse: Returns the answer a frame carries, or ``None`` for a frame
+            that is not one.
+
+    Returns:
+        The first non-``None`` result of ``parse``, or ``None`` when the time
+        ran out first. A timeout is an answer ("nobody replied"), which is why
+        it is the only exception handled here.
+
+    Raises:
+        OSError: Reading failed for any reason other than the timeout.
+            Uncaught on purpose: "could not read" is not "nobody answered",
+            and each caller maps it to its own error.
+
+    Examples:
+        >>> import socket
+        >>> receiver, sender = socket.socketpair()
+        >>> _ = sender.send(b"reply")
+        >>> await_answer(receiver, timeout=1.0, parse=lambda frame: frame.decode())
+        'reply'
+        >>> receiver.close(); sender.close()
+
+    """
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        sock.settimeout(seconds_left(deadline))
+        try:
+            frame = sock.recv(FRAME_RECEIVE_SIZE)
+        except TimeoutError:
+            return None
+        found = parse(frame)
+        if found is not None:
+            return found
+    return None

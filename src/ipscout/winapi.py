@@ -12,8 +12,9 @@ Contents:
     win_family / family_from_win: Windows' own ``AF_*`` numbering, both ways.
     IpStatus: The ``IP_STATUS`` codes, each with its text; status_message
         renders a raw one.
-    sockaddr_inet_address / address_text: Decode a ``SOCKADDR_INET`` once,
-        and render an address the way every backend does.
+    sockaddr_inet / sockaddr_inet_address / address_text: Encode and decode
+        a ``SOCKADDR_INET`` once, and render an address the way every
+        backend does.
 
 Fixed-width integers, deliberately:
     Every field is declared with an explicit width (``c_uint32`` for ``ULONG``
@@ -81,6 +82,7 @@ __all__ = [
     "last_error",
     "reply_buffer_size",
     "sockaddr_in6",
+    "sockaddr_inet",
     "sockaddr_inet_address",
     "sockaddr_inet_to_string",
     "status_message",
@@ -541,6 +543,45 @@ def last_error() -> int:
     return value if isinstance(value, int) else 0
 
 
+def sockaddr_inet(packed: bytes, family: AddressFamily) -> SOCKADDR_INET:
+    """Build a ``SOCKADDR_INET`` holding one address, tagged with its family.
+
+    The inverse of :func:`sockaddr_inet_address`: the tag is written in
+    Windows' own numbering (:func:`win_family`), and the address goes into
+    the arm that tag selects.
+
+    Args:
+        packed: The address in network byte order, 4 bytes for IPv4 and 16
+            for IPv6.
+        family: The family ``packed`` belongs to.
+
+    Returns:
+        The union, ready to pass to an iphlpapi call.
+
+    Raises:
+        ValueError: ``packed`` is not the length ``family`` needs. ctypes
+            refuses the assignment rather than padding or truncating it.
+
+    Examples:
+        >>> sockaddr = sockaddr_inet(bytes((192, 0, 2, 1)), AddressFamily.IPV4)
+        >>> sockaddr.si_family == WIN_AF_INET, sockaddr_inet_address(sockaddr)
+        (True, IPv4Address('192.0.2.1'))
+        >>> sockaddr_inet(bytes(4), AddressFamily.IPV6)
+        Traceback (most recent call last):
+        ...
+        ValueError: Can only assign sequence of same size
+
+    """
+
+    sockaddr = SOCKADDR_INET()
+    sockaddr.si_family = win_family(family)
+    if family is AddressFamily.IPV6:
+        sockaddr.Ipv6.sin6_addr[:] = packed
+    else:
+        sockaddr.Ipv4.sin_addr[:] = packed
+    return sockaddr
+
+
 def sockaddr_inet_address(sockaddr: SOCKADDR_INET) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     """Return the address held in a ``SOCKADDR_INET``, or None if it holds none.
 
@@ -644,21 +685,35 @@ def ipv4_to_string(address: int) -> str:
 def string_to_ipv4(address: str) -> int:
     """Return the ``IPAddr`` form of a dotted-quad string.
 
+    Parsed with ``inet_pton`` rather than ``inet_aton``: the latter accepts
+    shorthand (``127.1``, ``0x7f.1``) that no other part of this package
+    reads as an address, so a typo would reach the API as a different host.
+
     Args:
-        address: An IPv4 address in text form.
+        address: An IPv4 address in full dotted-quad form.
 
     Returns:
         The 32-bit value in the byte order the API expects.
+
+    Raises:
+        OSError: ``address`` is not a full dotted-quad IPv4 address.
 
     Examples:
         >>> string_to_ipv4("127.0.0.1") == 0x0100007F
         True
         >>> ipv4_to_string(string_to_ipv4("192.168.1.1"))
         '192.168.1.1'
+        >>> try:
+        ...     string_to_ipv4("127.1")
+        ... except OSError:
+        ...     print("refused")
+        refused
 
     """
 
-    return int(struct.unpack("<I", socket.inet_aton(address))[0])
+    # "<I": IPAddr is the four network-order bytes read as one native
+    # little-endian DWORD, which is how every Windows architecture stores it.
+    return int(struct.unpack("<I", socket.inet_pton(AddressFamily.IPV4.socket_family, address))[0])
 
 
 def ipv6_words_to_string(words: Iterable[int]) -> str:
@@ -793,6 +848,15 @@ def _configure(library: ctypes.CDLL) -> None:  # pragma: no cover - Windows only
 
     library.FreeMibTable.restype = None
     library.FreeMibTable.argtypes = (ctypes.c_void_p,)
+
+    library.GetAdaptersAddresses.restype = ctypes.c_uint32
+    library.GetAdaptersAddresses.argtypes = (
+        ctypes.c_uint32,  # Family
+        ctypes.c_uint32,  # Flags
+        ctypes.c_void_p,  # Reserved, must be NULL
+        ctypes.c_void_p,  # AdapterAddresses, written by the call
+        ctypes.POINTER(ctypes.c_uint32),  # SizePointer, in and out
+    )
 
     library.Icmp6SendEcho2.restype = ctypes.c_uint32
     library.Icmp6SendEcho2.argtypes = (

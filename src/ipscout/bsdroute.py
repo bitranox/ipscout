@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict
 from .arp import MAC_LENGTH, format_mac
 
 __all__ = [
+    "AF_LINK",
     "NO_METRICS",
     "RTA_BRD",
     "RTA_DST",

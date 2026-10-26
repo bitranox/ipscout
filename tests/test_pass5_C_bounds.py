@@ -88,14 +88,14 @@ def test_lookup_mac_active_keeps_the_zone_it_was_given() -> None:
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("mac", ["02:00:5e:10", "02:00:5e:10:00:00:00", "02:00:5e:10:00:zz", ""])
 def test_build_arp_request_refuses_a_sender_that_is_not_six_bytes(mac: str) -> None:
-    with pytest.raises(ValueError, match=r"is not a 6-byte Ethernet hardware address$"):
+    with pytest.raises(ValueError, match=r"is not a hardware address$"):
         build_arp_request(sender_mac=mac, sender_ip="192.0.2.10", target_ip="192.0.2.1")
 
 
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("mac", ["02:00:5e:10", "02:00:5e:10:00:00:00"])
 def test_build_neighbour_solicitation_refuses_a_sender_that_is_not_six_bytes(mac: str) -> None:
-    with pytest.raises(ValueError, match=r"is not a 6-byte Ethernet hardware address$"):
+    with pytest.raises(ValueError, match=r"is not a hardware address$"):
         build_neighbour_solicitation(sender_mac=mac, target_ip="2001:db8::1")
 
 
