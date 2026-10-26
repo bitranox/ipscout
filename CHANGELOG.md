@@ -48,7 +48,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `set_neighbour` and the other static-entry helpers refuse a non-literal address with "'x' is not
   an IP address literal" instead of "'x' is not an IP address".
 - `tcpsyn.build_syn`, `arp.build_arp_request` and the static neighbour entry writers refuse a
-  non-canonical IPv4 address (shorthand such as "10.1") with `ValueError` instead of packing the
+  non-canonical IPv4 address (shorthand such as "127.1") with `ValueError` instead of packing the
   address `inet_aton` guessed.
 - `ipscout traceroute --timeout`, `ipscout observe-dhcp --timeout` and `--settle` refuse a bad
   value while the command line is parsed, naming the option (exit code 2 as before; the JSON error

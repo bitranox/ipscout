@@ -266,7 +266,7 @@ def test_sockaddr_inet_refuses_an_address_of_the_wrong_length(family: AddressFam
         winapi.sockaddr_inet(bytes(size), family)
 
 
-@pytest.mark.parametrize("text", ["127.0.0.1", "192.168.1.1", "10.0.0.1", "255.255.255.255"])
+@pytest.mark.parametrize("text", ["127.0.0.1", "192.0.2.1", "198.51.100.7", "255.255.255.255"])
 def test_string_to_ipv4_round_trips_a_full_dotted_quad(text: str) -> None:
     assert winapi.ipv4_to_string(winapi.string_to_ipv4(text)) == text
 

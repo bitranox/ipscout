@@ -100,7 +100,7 @@ def build_syn(*, source_ip: str, target_ip: str, source_port: int, target_port: 
 
     """
 
-    # Parsed once, strictly: inet_aton would read "10.1" as 10.0.0.1 and build
+    # Parsed once, strictly: inet_aton would read "127.1" as 127.0.0.1 and build
     # a packet for an address nobody wrote.
     source = require_address(source_ip, AddressFamily.IPV4).packed
     target = require_address(target_ip, AddressFamily.IPV4).packed
