@@ -293,17 +293,17 @@ def test_the_error_queue_reader_names_its_fields_and_is_still_a_tuple() -> None:
         assert reader == (recvmsg, flag)
 
 
-#: macOS's receive buffer for an ICMP socket (``net.inet.raw.recvspace``). A
-#: reply larger than it is dropped by the kernel, and the probe reads as a host
-#: that never answered. Linux admits one oversized datagram into an empty
+#: macOS's send and receive buffers for an ICMP socket (``net.inet.raw.maxdgram``,
+#: ``net.inet.raw.recvspace``). A larger request is refused and a larger reply
+#: dropped, and the probe reads as a host that never answered. Linux admits one oversized datagram into an empty
 #: buffer, so the drop cannot be reproduced here; the buffer size is checked
 #: instead, and the drop itself was measured on a macOS runner.
-_MACOS_ICMP_RECEIVE_BUFFER = 8192
+_MACOS_ICMP_BUFFER = 8192
 _LARGE_PAYLOAD = 60_000
 
 
 @pytest.mark.parametrize("transport_type", [PosixEchoTransport, AsyncPosixEchoTransport])
-def test_the_receive_buffer_is_raised_to_hold_a_reply_of_the_payload_size(
+def test_both_socket_buffers_are_raised_to_fit_an_echo_of_the_payload_size(
     transport_type: type[PosixEchoTransport] | type[AsyncPosixEchoTransport],
 ) -> None:
     opened: list[socket.socket] = []
@@ -311,12 +311,14 @@ def test_the_receive_buffer_is_raised_to_hold_a_reply_of_the_payload_size(
     def small_buffer(family: AddressFamily) -> socket.socket:
         del family
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _MACOS_ICMP_RECEIVE_BUFFER)
+        for option in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+            sock.setsockopt(socket.SOL_SOCKET, option, _MACOS_ICMP_BUFFER)
         opened.append(sock)
         return sock
 
     transport = transport_type("127.0.0.1", AddressFamily.IPV4, payload_size=_LARGE_PAYLOAD, socket_factory=small_buffer)
     try:
+        assert opened[0].getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) > _LARGE_PAYLOAD
         assert opened[0].getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) > _LARGE_PAYLOAD
     finally:
         if isinstance(transport, AsyncPosixEchoTransport):

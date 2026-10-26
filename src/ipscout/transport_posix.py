@@ -180,19 +180,22 @@ def _is_raw_socket(sock: socket.socket) -> bool:
         return False
 
 
-def _fit_receive_buffer(sock: socket.socket, *, payload_size: int) -> None:
-    """Raise ``sock``'s receive buffer to hold replies of ``payload_size``; never lower it.
+def _fit_buffers(sock: socket.socket, *, payload_size: int) -> None:
+    """Raise ``sock``'s send and receive buffers to fit echoes of ``payload_size``; never lower them.
 
-    The kernel drops a reply that does not fit the receive buffer, and the
-    probe then reads as a host that never answered. macOS gives an ICMP socket
-    8192 bytes (``net.inet.raw.recvspace``), so without this every payload
-    above about 8100 bytes went unanswered there; measured on a macOS runner,
-    where a raised buffer received replies up to the protocol maximum.
+    Either buffer, too small, makes a reachable host read as one that never
+    answered: the send is refused, or the kernel drops the reply. macOS gives
+    an ICMP socket 8192 bytes of each (``net.inet.raw.maxdgram``,
+    ``net.inet.raw.recvspace``), so every payload above about 8100 bytes went
+    unanswered there. Measured on a macOS runner: raising the receive buffer
+    alone moved the limit to about 8180, and raising both reached the
+    protocol maximum.
     """
 
-    wanted = _REPLIES_BUFFERED * (payload_size + _REPLY_OVERHEAD)
-    if sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) < wanted:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, wanted)
+    one_echo = payload_size + _REPLY_OVERHEAD
+    for option, wanted in ((socket.SO_SNDBUF, one_echo), (socket.SO_RCVBUF, _REPLIES_BUFFERED * one_echo)):
+        if sock.getsockopt(socket.SOL_SOCKET, option) < wanted:
+            sock.setsockopt(socket.SOL_SOCKET, option, wanted)
 
 
 def open_hop_socket(family: AddressFamily) -> socket.socket:
@@ -319,7 +322,7 @@ def recvmsg_of(sock: socket.socket) -> RecvMsg | None:
 #: while an earlier one is still unread is not dropped.
 _REPLIES_BUFFERED = 4
 
-#: Bytes one queued reply takes beyond its ICMP payload: the ICMP header, the
+#: Bytes one echo takes in a socket buffer beyond its ICMP payload: the ICMP header, the
 #: IP header a raw socket delivers, and the kernel's per-datagram bookkeeping
 #: (sender address, ancillary data), which counts against the buffer too.
 #: Measured on a macOS runner: an 8192-byte buffer held at most 8132 payload
@@ -715,7 +718,7 @@ class PosixEchoTransport:
         self._destination = _destination_for(address, family=family)
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
-        _fit_receive_buffer(self._socket, payload_size=payload_size)
+        _fit_buffers(self._socket, payload_size=payload_size)
         self._errqueue = _enable_error_queue(self._socket, family=family)
         self._is_raw = _is_raw_socket(self._socket)
         self._own_destination = _own_destination(self._destination, family=family)
@@ -887,7 +890,7 @@ class AsyncPosixEchoTransport:
         self._destination = _destination_for(address, family=family)
         self._payload_size = payload_size
         self._socket = (socket_factory or open_socket)(family)
-        _fit_receive_buffer(self._socket, payload_size=payload_size)
+        _fit_buffers(self._socket, payload_size=payload_size)
         # settimeout(0) is setblocking(False) without a boolean positional arg.
         self._socket.settimeout(0)
         self._waiters: dict[bytes, _Waiter] = {}
