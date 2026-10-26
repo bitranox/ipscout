@@ -604,7 +604,8 @@ def observe_dhcp(  # noqa: PLR0913 - public API: every knob is keyword-only and 
         the interface named, so a bridge shows the frames it forwards to its
         guests. Windows uses ``SIO_RCVALL``, which shows what reaches this
         host's own interface - on a Hyper-V virtual switch that excludes other
-        guests unless the port is configured to mirror. macOS raises.
+        guests unless the port is configured to mirror. macOS reads a BPF
+        device bound to the interface, as root, and sees what Linux sees.
 
         **The address the machine most likely settled on is the last element,
         not the first.** A pool that hands out an address the guest declines

@@ -402,8 +402,8 @@ finally:
 
 Every platform writes natively: netlink `RTM_NEWNEIGH`/`RTM_DELNEIGH` on Linux,
 `CreateIpNetEntry2`/`DeleteIpNetEntry2` on Windows, and `RTM_ADD`/`RTM_DELETE` on a routing socket
-on macOS, as `arp -s` does. The macOS path has not been run on real hardware: its message encoding
-is pinned byte for byte by tests, but no CI runner is root on macOS.
+on macOS, as `arp -s` does. The macOS message encoding is pinned byte for byte by tests, and the
+write itself was measured as root on a macOS runner VM, not on physical hardware.
 
 ## Watching a DHCP handshake
 
@@ -456,9 +456,10 @@ that could not run.
 
 Needs elevation on every platform: root or `CAP_NET_RAW` on Linux, root on
 macOS, Administrator on Windows. Ask `ipscout.dhcp_capture_available()` first.
-The macOS backend's device path has not been run on real hardware - no CI runner
-may open a BPF device - so treat it as new; on macOS name a bridge or physical
-interface rather than `lo0`, which is not Ethernet-framed and is refused. The interface goes into promiscuous mode for the session's lifetime,
+The macOS backend's device path was measured as root on a macOS runner VM,
+capturing frames on a `feth` pair, not yet on physical hardware or a bridge
+watching a real guest boot; on macOS name a bridge or physical interface rather
+than `lo0`, which is not Ethernet-framed and is refused. The interface goes into promiscuous mode for the session's lifetime,
 which is not optional in practice: on a bridge a reply is forwarded to the
 guest's own port and a Linux client does not set the broadcast flag that would
 make it visible otherwise.

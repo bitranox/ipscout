@@ -17,10 +17,11 @@ Note:
     encoders are separated from the system calls so the wire format can be
     tested on Linux, where none of this can execute.
 
-    **The write path has not been run on macOS hardware.** No CI runner here
-    is root on macOS, so the message encoding is pinned byte for byte against
-    the BSD headers (``net/route.h``, ``net/if_dl.h``) and ``arp.c`` while the
-    ``write`` to the routing socket itself is untested.
+    **The write path is measured on a macOS runner VM, as root.** The CI test
+    lanes are not root, so the message encoding is pinned byte for byte
+    against the BSD headers (``net/route.h``, ``net/if_dl.h``) and ``arp.c``,
+    and the ``write`` to the routing socket runs only in the ``host_mutating``
+    round trip of ``tests/test_static_neighbours.py``.
 
 """
 

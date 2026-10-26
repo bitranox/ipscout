@@ -13,9 +13,9 @@ Note:
     that next caller, so the plumbing moved here rather than being copied.
 
     Everything except :func:`open_bpf_device` is arithmetic over integers and
-    slicing over bytes, so the encoding is asserted from any platform - which
-    matters more than usual here, because no CI runner is privileged enough to
-    open a BPF device and prove it on the real thing.
+    slicing over bytes, so the encoding is asserted from any platform. The
+    device itself needs root, which the CI test lanes do not have; it is
+    exercised as root on a macOS runner by ``tests/test_dhcp_macos_live.py``.
 
 """
 

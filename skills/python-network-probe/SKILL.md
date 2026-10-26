@@ -359,12 +359,11 @@ what reaches *this host's* interface; on a Hyper-V virtual switch that excludes
 other guests unless the port is set to mirror. So Windows is right for DHCP on
 this host's own segment, and the POSIX pair for watching a guest boot.
 
-**The macOS device path has not been run on real hardware** (ipscout 1.6.0, checked
-2026-08-28 - `ipscout --version`; treat it as still true unless a later release says
-otherwise). No CI runner may
-open a BPF device, so its ioctl encoding and record splitting are pinned by
-tests while the syscalls themselves are untested. Linux is the one to trust for
-anything that matters; treat macOS as new until you have exercised it. On macOS
+**The macOS device path is measured on a macOS runner VM, not on physical
+hardware** (ipscout 2.5.0, checked 2026-10-26 - `ipscout --version`). As root it
+captured frames on a `feth` pair end to end; it has not yet watched a real guest
+boot on a bridge. Linux is the one with the longest record; on macOS, check the
+first capture you depend on. On macOS
 name a bridge or physical interface, not `lo0` - loopback is not Ethernet-framed
 and is refused by name rather than silently returning nothing.
 
@@ -374,13 +373,13 @@ The operations in this table need privilege, apart from the exceptions a row nam
 everything else in this skill runs unprivileged. Each of these raises `IPScoutPermissionError` naming the exact remedy rather than
 degrading:
 
-| Operation                                     | Needs                                                                                                             |
-|-----------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `scan_ports(..., method=ScanMethod.SYN)`      | root / `CAP_NET_RAW`. Unavailable on Windows at any privilege level: raw TCP sends have been blocked since XP SP2 |
-| `lookup_mac(ip, active=True)`                 | root / `CAP_NET_RAW` on Linux and macOS. Windows IPv4 needs none (`SendARP`); Windows IPv6 needs Administrator    |
-| Traceroute on macOS                           | a raw socket, so root. Unprivileged macOS does not surface Time Exceeded at all                                   |
-| `observe_dhcp(...)` and its session           | root / `CAP_NET_RAW` on Linux, root on macOS (`/dev/bpf`), Administrator on Windows (`SIO_RCVALL`, no driver)     |
-| `set_neighbour(...)`, `remove_neighbour(...)` | root / `CAP_NET_ADMIN` on Linux, root on macOS (routing socket, measured as root on a macOS runner VM)            |
+| Operation                                     | Needs                                                                                                                                                                                                                                                   |
+|-----------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `scan_ports(..., method=ScanMethod.SYN)`      | root / `CAP_NET_RAW`. Unavailable on Windows at any privilege level: raw TCP sends have been blocked since XP SP2                                                                                                                                       |
+| `lookup_mac(ip, active=True)`                 | root / `CAP_NET_RAW` on Linux and macOS. Windows IPv4 needs none (`SendARP`); Windows IPv6 needs Administrator                                                                                                                                          |
+| Traceroute on macOS                           | a raw socket, so root. Unprivileged macOS does not surface Time Exceeded at all                                                                                                                                                                         |
+| `observe_dhcp(...)` and its session           | root / `CAP_NET_RAW` on Linux, root on macOS (`/dev/bpf`), Administrator on Windows (`SIO_RCVALL`, no driver)                                                                                                                                           |
+| `set_neighbour(...)`, `remove_neighbour(...)` | root / `CAP_NET_ADMIN` on Linux, root on macOS (routing socket, measured as root on a macOS runner VM), Administrator on Windows. `remove_neighbour` without `interface=` reads the cache first and answers `False` unprivileged when nothing is listed |
 
 The rules these follow, worth relying on:
 

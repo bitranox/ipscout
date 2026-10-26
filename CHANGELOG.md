@@ -9,6 +9,13 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 - `factory.make_hop_transport` / `make_async_hop_transport`: the ICMP transport a hop walk needs,
   one that can observe Time Exceeded on this platform.
+- `tests/test_dhcp_macos_live.py`: a `host_mutating` test that runs the macOS DHCP capture end to
+  end as root, capturing offers written onto a `feth` pair through a real BPF device.
+
+### Changed
+
+- The macOS DHCP capture and the macOS static-neighbour write are now measured as root on a macOS
+  runner VM; the docs, docstrings and skill no longer call them untested.
 
 ### Fixed
 

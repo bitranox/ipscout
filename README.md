@@ -308,7 +308,7 @@ Measured on real CI runners, not assumed.
 | Traceroute                    | yes, `IP_RECVERR` + `MSG_ERRQUEUE`                         | no, raises `IPScoutUnsupportedError`                                      | yes, `IP_TTL_EXPIRED_TRANSIT`                 |
 | Async on the event loop       | yes, one socket per probe                                  | yes, one socket per probe                                                 | no, `IcmpSendEcho` runs in an executor        |
 | Interface listing             | yes, `getifaddrs`                                          | yes, `getifaddrs`                                                         | yes, `GetAdaptersAddresses`                   |
-| Observing a DHCP handshake    | yes, `AF_PACKET`, needs root                               | yes, `/dev/bpf`, needs root (untested on real hardware)                   | yes, `SIO_RCVALL`, needs Administrator        |
+| Observing a DHCP handshake    | yes, `AF_PACKET`, needs root                               | yes, `/dev/bpf`, needs root (measured on a macOS runner VM)               | yes, `SIO_RCVALL`, needs Administrator        |
 | Static neighbour entry (IPv4) | yes, netlink `RTM_NEWNEIGH`, needs root or `CAP_NET_ADMIN` | yes, routing socket `RTM_ADD`, needs root (measured on a macOS runner VM) | yes, `CreateIpNetEntry2`, needs Administrator |
 
 Ask the host itself rather than guessing, with `ipscout capabilities` or `ipscout.icmp_available()`.

@@ -24,9 +24,10 @@ Note:
     Each platform writes natively, nothing shells out to ``ip``, ``arp`` or
     ``netsh``: netlink ``RTM_NEWNEIGH``/``RTM_DELNEIGH`` on Linux,
     ``CreateIpNetEntry2``/``DeleteIpNetEntry2`` on Windows, and a routing
-    socket ``RTM_ADD``/``RTM_DELETE`` on macOS. **The macOS path has not been
-    run on real hardware**: its message encoding is pinned byte for byte by
-    tests, but no CI runner is root on macOS.
+    socket ``RTM_ADD``/``RTM_DELETE`` on macOS. The macOS message encoding is
+    pinned byte for byte by tests on any platform; the write itself was
+    measured as root on a macOS runner VM, through the ``host_mutating`` tests
+    in ``tests/test_static_neighbours.py``, not on physical hardware.
 
 """
 

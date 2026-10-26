@@ -31,10 +31,12 @@ Note:
 Verification status:
     The encoding and the record splitting are asserted from any platform, and
     the ioctl numbers are pinned against the values in ``<net/bpf.h>``. The
-    device path itself is NOT proven: no CI runner is privileged enough to
-    open a BPF device (measured: ``/dev/bpf0`` refused with EACCES on every
-    macos-latest lane) and this was written without a Mac to hand. Treat the
-    socket path as untested until somebody runs it on real hardware.
+    unprivileged CI lanes cannot open a BPF device (measured: ``/dev/bpf0``
+    refused with EACCES on macos-latest). As root on a macOS 26 runner VM,
+    ``tests/test_dhcp_macos_live.py`` captures offers written onto a ``feth``
+    pair: device open, interface bind, link-type check, packed-record split
+    and decode all ran against the kernel. Not yet run on physical hardware,
+    nor on a bridge watching a real guest boot.
 
 """
 
