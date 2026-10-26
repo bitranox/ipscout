@@ -154,19 +154,19 @@ ipscout ping 127.0.0.1 -c 2
 ipscout ping-many 127.0.0.1 ::1 -c 1
 ipscout reachable example.com
 ipscout traceroute 1.1.1.1 --max-hops 10
-ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
+ipscout scan-ports 192.0.2.10 --ports 22,80,443,8000-8100
 ipscout banners 192.0.2.0/24 --port 21 --farewell 'QUIT\r\n'   # what each host says first
 ipscout snmp-system 192.0.2.0/28        # uptime, name and model over SNMP
 ipscout mac 8.8.8.8                     # the gateway's, labelled NEXT_HOP
-ipscout find-ip dc:b2:2f:44:34:59 --scan
-ipscout arp-scan --network 192.168.1.0/24
+ipscout find-ip 00:00:5e:00:53:42 --scan
+ipscout arp-scan --network 192.0.2.0/24
 ipscout neighbours
 sudo ipscout set-neighbour 192.0.2.7 00:00:5e:00:53:07 --interface eth0   # a static entry
 sudo ipscout remove-neighbour 192.0.2.7 --interface eth0
 ipscout gateway
 ipscout subnet
 ipscout mtu 8.8.8.8
-ipscout wake aa:bb:cc:dd:ee:ff --broadcast 192.168.1.255
+ipscout wake 00:00:5e:00:53:01 --broadcast 192.0.2.255
 ipscout resolve localhost
 ipscout reverse-dns 1.1.1.1
 ipscout interfaces
@@ -185,7 +185,7 @@ import ipscout
 
 ipscout.lookup_mac("8.8.8.8")  # the router's address, labelled NEXT_HOP
 ipscout.find_ip_by_mac(mac, scan=True)  # sweep, then search the refreshed cache
-ipscout.arp_scan("192.168.1.0/24")  # every hardware address on a subnet
+ipscout.arp_scan("192.0.2.0/24")  # every hardware address on a subnet
 ipscout.sweep_scope()  # what a default sweep covers, and what is too wide for it
 ipscout.default_gateway()  # and query_route() for any destination
 ipscout.subnet_info()  # addressing, gateway, stored DHCP facts
@@ -193,7 +193,7 @@ ipscout.scan_ports(host, "22,80,8000-8100")
 ipscout.grab_banners(hosts, 21, farewell=b"QUIT\r\n")  # each host's first line, on one connection
 ipscout.read_snmp_system(hosts)  # uptime, sysName, sysDescr, sysObjectID; a falling uptime is a restart
 ipscout.path_mtu("8.8.8.8")
-ipscout.wake_on_lan(mac, broadcast="192.168.1.255")
+ipscout.wake_on_lan(mac, broadcast="192.0.2.255")
 ipscout.observe_dhcp(mac, interface="br0")  # a machine that has no address yet (needs elevation)
 ipscout.set_neighbour(ip, mac, interface="eth0")  # a static neighbour entry (needs elevation)
 ipscout.remove_neighbour(ip, interface="eth0")  # and out again

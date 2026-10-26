@@ -249,10 +249,10 @@ import ipscout
 
 answer = ipscout.lookup_mac("8.8.8.8")
 answer.mac, answer.scope, answer.via_ip
-# ('00:00:5e:00:53:01', <MacScope.NEXT_HOP: 'next_hop'>, '192.168.1.1')
+# ('00:00:5e:00:53:01', <MacScope.NEXT_HOP: 'next_hop'>, '192.0.2.1')
 
 ipscout.get_mac_address("8.8.8.8")  # None - refuses to pass off the gateway's
-ipscout.get_mac_address("192.168.1.5")  # '00:00:5e:00:53:05' for an on-link host
+ipscout.get_mac_address("192.0.2.5")  # '00:00:5e:00:53:05' for an on-link host
 ```
 
 `lookup_mac` never raises on the passive path: an address this host has no route to, or has simply
@@ -290,7 +290,7 @@ does not appear. `arp_scan()` sweeps first and then reads, which is why it finds
 for entry in ipscout.neighbours():
     entry.ip, entry.mac, entry.interface, entry.state, entry.scoped
 
-found = ipscout.arp_scan("192.168.1.0/24")
+found = ipscout.arp_scan("192.0.2.0/24")
 ```
 
 `scoped` is the entry's address in the form a probe accepts: for a link-local entry it carries the
@@ -303,11 +303,11 @@ searches the refreshed cache. It returns a list because one hardware address leg
 several addresses, commonly an IPv4 and an IPv6 link-local on the same NIC:
 
 ```python
-ipscout.find_ip_by_mac("dc:b2:2f:44:34:59", scan=True)
-# ['192.168.1.104', 'fe80::4b42:61c4:c618:8370']
+ipscout.find_ip_by_mac("00:00:5e:00:53:42", scan=True)
+# ['192.0.2.104', 'fe80::200:5eff:fe00:5342']
 ```
 
-Any written form compares equal - `aa:bb:cc:dd:ee:ff`, `AA-BB-CC-DD-EE-FF` and `aabb.ccdd.eeff` are
+Any written form compares equal - `00:00:5e:00:53:01`, `00-00-5E-00-53-01` and `0000.5e00.5301` are
 the same address. `network=` and `scope=` apply only when `scan=True`; giving one without it is
 refused rather than ignored, since without a sweep there is only the cache to search.
 
@@ -318,7 +318,7 @@ it is named, because a result assembled from part of the ground is not the same 
 
 ```python
 ipscout.sweep_scope()
-# SweepScope(limit=4096, networks=(IPv4Network('192.168.168.0/24'),), skipped=(IPv4Network('172.17.0.0/16'),), complete=False)
+# SweepScope(limit=4096, networks=(IPv4Network('192.0.2.0/24'),), skipped=(IPv4Network('172.17.0.0/16'),), complete=False)
 ```
 
 The fields hold parsed networks, so you can ask one for its size or test membership without
@@ -348,8 +348,8 @@ read, for describing a host other than this one:
 ```python
 from ipscout import Interface, InterfaceAddress
 
-elsewhere = [Interface(name="eth0", ipv4=(InterfaceAddress(address="10.0.0.5", prefix_len=24),), is_up=True)]
-ipscout.local_networks(elsewhere)  # (IPv4Network('10.0.0.0/24'),)
+elsewhere = [Interface(name="eth0", ipv4=(InterfaceAddress(address="198.51.100.5", prefix_len=24),), is_up=True)]
+ipscout.local_networks(elsewhere)  # (IPv4Network('198.51.100.0/24'),)
 ```
 
 Ask that before sweeping and you know what the answer will and will not cover. Two consequences
@@ -475,7 +475,7 @@ address rather than to a device.
 ## Routes and subnets
 
 ```python
-ipscout.default_gateway()  # RouteInfo(gateway='192.168.1.1', interface='eth0', ...)
+ipscout.default_gateway()  # RouteInfo(gateway='192.0.2.1', interface='eth0', ...)
 ipscout.query_route("8.8.8.8")  # how this host would reach one address
 ipscout.local_networks()  # the IPv4 subnets a default sweep covers
 
@@ -495,7 +495,7 @@ may be unset on macOS and Windows. The addressing fields work everywhere.
 ## Port scanning
 
 ```python
-states = ipscout.scan_ports("192.168.1.10", "22,80,443,8000-8100")
+states = ipscout.scan_ports("192.0.2.10", "22,80,443,8000-8100")
 open_ports = [port for port, state in states.items() if state is ipscout.PortState.OPEN]
 ```
 
@@ -583,7 +583,7 @@ whole exchange. `aread_snmp_system` is the same on the event loop.
 ## Waking a host, and the path to it
 
 ```python
-ipscout.wake_on_lan("aa:bb:cc:dd:ee:ff", broadcast="192.168.1.255")
+ipscout.wake_on_lan("00:00:5e:00:53:01", broadcast="192.0.2.255")
 ipscout.path_mtu("8.8.8.8")  # 1500, or None where the platform cannot say
 ```
 
@@ -679,15 +679,15 @@ ipscout interfaces
 ipscout gateway                           # the default route, or --to an address
 ipscout neighbours                        # the ARP/NDP cache
 ipscout mac 8.8.8.8                       # with its scope: direct or next_hop
-ipscout find-ip dc:b2:2f:44:34:59 --scan  # which addresses hold a MAC
-ipscout arp-scan --network 192.168.1.0/24 # sweep, then read what was learned
+ipscout find-ip 00:00:5e:00:53:42 --scan  # which addresses hold a MAC
+ipscout arp-scan --network 192.0.2.0/24   # sweep, then read what was learned
 ipscout subnet                            # addressing, gateway, stored DHCP facts
-ipscout scan-ports 192.168.1.10 --ports 22,80,443,8000-8100
+ipscout scan-ports 192.0.2.10 --ports 22,80,443,8000-8100
 ipscout banners 192.0.2.0/24 --port 21 --farewell 'QUIT\r\n'   # each host's greeting; networks expand
 ipscout snmp-system 192.0.2.10 192.0.2.0/28 --timeout 2          # uptime, name, description, object id
 IPSCOUT_SNMP_COMMUNITY=private ipscout --json snmp-system 192.0.2.10 --version v2c
 ipscout mtu 8.8.8.8
-ipscout wake aa:bb:cc:dd:ee:ff --broadcast 192.168.1.255
+ipscout wake 00:00:5e:00:53:01 --broadcast 192.0.2.255
 ipscout observe-dhcp 02:00:5e:10:00:00 --interface br0   # needs root; last line is the bound address
 ipscout capabilities
 ipscout info
