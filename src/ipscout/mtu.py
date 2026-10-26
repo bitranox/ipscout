@@ -157,7 +157,9 @@ def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
 
     Windows has no query for this, so the size is narrowed by bisection: the
     largest payload that is not answered with "packet too big" is the answer,
-    whether the local stack refuses it or a router's reply carries it.
+    whether the local stack refuses it or a router's reply carries it. Both
+    were measured on a Windows test VM: the router's reply arrives as count 1
+    with Status 11009 in the reply, sent from the router's address.
     """
 
     # Converted once, before any handle exists: every probe of the bisection

@@ -62,8 +62,10 @@ _ERROR_NOT_FOUND = 1168
 #: ERROR_BAD_NET_NAME: the one status that means "asked, nobody answered".
 #: Measured 2026-10-26 on a Windows test VM: SendARP gives it for an on-link address
 #: nobody holds and for an off-subnet one, and ResolveIpNetEntry2 for an
-#: unanswered link-local address. Every other failure (ERROR_NETWORK_UNREACHABLE
-#: with no route, an invalid parameter) means the request could not be asked.
+#: unanswered link-local address and an unanswered on-link global one, with the
+#: interface index set or left to the stack. Every other failure
+#: (ERROR_NETWORK_UNREACHABLE for a global address no route covers and no
+#: interface index pins, an invalid parameter) means the request could not be asked.
 _ERROR_BAD_NET_NAME = 67
 
 
