@@ -78,7 +78,7 @@ from .models import (
     WakeReport,
 )
 from .mtu import path_mtu
-from .neighbours import get_mac_address, lookup_mac, neighbours
+from .neighbours import lookup_mac, neighbours
 from .pool import Concurrency
 from .portscan import DEFAULT_CONCURRENCY as DEFAULT_PORTSCAN_CONCURRENCY
 from .portscan import DEFAULT_TIMEOUT as DEFAULT_PORT_TIMEOUT
@@ -723,25 +723,41 @@ def cli_neighbours(ctx: click.Context, *, ipv4: bool, ipv6: bool) -> None:
 @argument("ip")
 @option("--strict", is_flag=True, default=False, help="Answer only for a directly-attached host; refuse anything routed.")
 @option("--active", is_flag=True, default=False, help="Send a real resolution request instead of reading the cache.")
+@option(
+    "--fallback-to-cache",
+    is_flag=True,
+    default=False,
+    help="With --active: read the cache when this host cannot ask (no privilege, no path); 'method' says which answered.",
+)
 @click.pass_context
-def cli_mac(ctx: click.Context, ip: str, *, strict: bool, active: bool) -> None:
-    """Show the hardware address for an address, and whose it is."""
+def cli_mac(ctx: click.Context, ip: str, *, strict: bool, active: bool, fallback_to_cache: bool) -> None:
+    """Show the hardware address for an address, whose it is, and how it was learned."""
 
+    if fallback_to_cache and not active:
+        msg = "--fallback-to-cache needs --active: without an active ask there is nothing to fall back from"
+        raise click.UsageError(msg)
     try:
-        if strict:
-            address = get_mac_address(ip, active=active)
-            payload = MacLookup(ip=ip, mac=address, scope=MacScope.DIRECT if address else MacScope.UNKNOWN)
-        else:
-            payload = lookup_mac(ip, active=active)
+        answer = lookup_mac(ip, active=active, fallback_to_cache=fallback_to_cache)
     except (IPScoutError, ValueError) as exc:
         # ValueError too: the route lookup behind it refuses a non-literal, and
         # escaping would exit through the errno mapping with no command named.
         _fail(ctx, CommandName.MAC, exc)
         return
+    # --strict answers only for a directly attached host, as get_mac_address
+    # does, but keeps the method so the caller still learns how it was found.
+    routed_or_unknown = answer.scope is not MacScope.DIRECT
+    payload = MacLookup(ip=ip, scope=MacScope.UNKNOWN, method=answer.method) if strict and routed_or_unknown else answer
 
     def human() -> None:
-        table = Table("ip", "mac", "scope", "via", "interface")
-        table.add_row(payload.ip, payload.mac or "-", payload.scope.value, payload.via_ip or "-", payload.interface or "-")
+        table = Table("ip", "mac", "scope", "via", "interface", "method")
+        table.add_row(
+            payload.ip,
+            payload.mac or "-",
+            payload.scope.value,
+            payload.via_ip or "-",
+            payload.interface or "-",
+            payload.method.value,
+        )
         console.print(table)
 
     _emit(ctx, CommandName.MAC, payload, human)

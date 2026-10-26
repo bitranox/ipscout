@@ -249,14 +249,35 @@ import ipscout
 
 answer = ipscout.lookup_mac("8.8.8.8")
 answer.mac, answer.scope, answer.via_ip
-# ('bc:24:11:4d:71:be', <MacScope.NEXT_HOP: 'next_hop'>, '192.168.1.1')
+# ('00:00:5e:00:53:01', <MacScope.NEXT_HOP: 'next_hop'>, '192.168.1.1')
 
 ipscout.get_mac_address("8.8.8.8")  # None - refuses to pass off the gateway's
-ipscout.get_mac_address("192.168.1.5")  # 'dc:b2:2f:44:34:59' for an on-link host
+ipscout.get_mac_address("192.168.1.5")  # '00:00:5e:00:53:05' for an on-link host
 ```
 
 `lookup_mac` never raises on the passive path: an address this host has no route to, or has simply
 not spoken to, comes back as `MacScope.UNKNOWN`.
+
+The passive path reads the neighbour cache, which knows only hosts this machine has already talked
+to and can still hold one that has gone. `active=True` sends a real ARP request or neighbour
+solicitation instead. That needs root or `CAP_NET_RAW` on Linux and macOS (Windows IPv4 needs
+nothing), and without them it raises rather than quietly reading the cache. When a caller wants an
+answer either way, `fallback_to_cache=True` reads the cache instead, but only when this host cannot
+ask: no privilege (`IPScoutPermissionError`) or no interface that can carry the request
+(`IPScoutUnsupportedError`). Every record says which one answered in `method`:
+
+```python
+answer = ipscout.lookup_mac("192.0.2.7", active=True, fallback_to_cache=True)
+if answer.method is ipscout.MacMethod.CACHE:
+    print("only the cache was read: an empty answer does not mean the address is free")
+```
+
+An active ask that nobody answers is reported as `method=ACTIVE` with `mac=None` and is never
+replaced by a cache entry, since "nothing answers this address now" is exactly what a stale entry
+would contradict. A host name still raises `ValueError` and a zone naming no interface still raises
+`IPScoutResolutionError`, with the fallback on or off. `fallback_to_cache=True` without
+`active=True` raises `ValueError`. On the command line it is
+`ipscout mac 192.0.2.7 --active --fallback-to-cache`.
 
 ## The neighbour cache, and searching it
 
@@ -915,6 +936,7 @@ Enums, all `str` subclasses so their members are already strings on the wire:
 | `AddressFamily`  | IPV4, IPV6                                             |
 | `BannerState`    | GREETED, SILENT, REFUSED, UNREACHABLE                  |
 | `CommandName`    | one member per CLI subcommand                          |
+| `MacMethod`      | ACTIVE, CACHE                                          |
 | `MacScope`       | DIRECT, NEXT_HOP, UNKNOWN                              |
 | `NeighbourState` | REACHABLE, STALE, PERMANENT, INCOMPLETE, FAILED, OTHER |
 | `PortState`      | OPEN, CLOSED, FILTERED                                 |

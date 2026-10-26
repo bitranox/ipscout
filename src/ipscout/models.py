@@ -66,6 +66,7 @@ __all__ = [
     "JsonError",
     "LeaseInfo",
     "MacLookup",
+    "MacMethod",
     "MacScope",
     "MtuReport",
     "Neighbour",
@@ -525,6 +526,20 @@ class MacScope(str, enum.Enum):
     NEXT_HOP = "next_hop"
     #: Neither could be determined.
     UNKNOWN = "unknown"
+
+
+class MacMethod(str, enum.Enum):
+    """How a MAC answer was obtained, so a caller can tell a fresh one from a remembered one.
+
+    The cache knows only hosts this machine has already talked to and may hold
+    an entry for a host that has since gone, so a caller deciding whether an
+    address is free needs to know which of the two it was given.
+    """
+
+    #: A resolution request was sent; ``mac`` is what came back, ``None`` when nothing answered.
+    ACTIVE = "active"
+    #: Read from the neighbour cache.
+    CACHE = "cache"
 
 
 class PortState(str, enum.Enum):
@@ -1059,6 +1074,8 @@ class MacLookup(_Frozen):
     #: The next-hop router, set exactly when ``scope`` is NEXT_HOP.
     via_ip: _IpLiteral | None = None
     interface: str | None = None
+    #: Whether a resolution request was sent or the cache was read.
+    method: MacMethod = MacMethod.CACHE
 
     @model_validator(mode="after")
     def _fields_agree_with_scope(self) -> MacLookup:

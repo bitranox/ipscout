@@ -5,6 +5,18 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `lookup_mac(ip, active=True, fallback_to_cache=True)` (and the same on `get_mac_address`, plus
+  `ipscout mac --active --fallback-to-cache`): ask actively, and read the neighbour cache instead
+  only when this host cannot ask, meaning no privilege (`IPScoutPermissionError`) or no interface
+  that can carry the request (`IPScoutUnsupportedError`). An active ask nobody answered stays an
+  active answer and is never replaced by a cache entry; a host name and a zone naming no interface
+  still raise. `fallback_to_cache=True` without `active=True` raises `ValueError`.
+- `MacMethod` (`ACTIVE`, `CACHE`) and `MacLookup.method`: every MAC answer says whether it was asked
+  for or read from the cache, and `ipscout mac` prints and emits it. `--strict` keeps it too, and now
+  also carries the interface of a direct answer.
+
 ## [2.2.0] 2026-10-26 11:06:07
 
 ### Added

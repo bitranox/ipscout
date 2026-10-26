@@ -32,16 +32,21 @@ import ipaddress
 import socket
 import sys
 from ipaddress import IPv4Address, IPv6Address
-from typing import Annotated, NamedTuple
+from typing import TYPE_CHECKING, Annotated, NamedTuple
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, ValidationError
 
 from .arp import normalise_mac
-from .errors import IPScoutResolutionError, IPScoutUnsupportedError, refused_arguments
+from .errors import IPScoutPermissionError, IPScoutResolutionError, IPScoutUnsupportedError, refused_arguments
 from .interfaces import local_interfaces
-from .models import DEFAULT_TIMEOUT, AddressFamily, MacLookup, MacScope, Neighbour, Timeout, parse_address
+from .models import DEFAULT_TIMEOUT, AddressFamily, MacLookup, MacMethod, MacScope, Neighbour, Timeout, parse_address
 from .resolve import split_zone, zone_index
 from .routes import query_route
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from .models import RouteInfo
 
 __all__ = ["get_mac_address", "lookup_mac", "neighbours", "normalise_mac", "resolve_active"]
 
@@ -365,63 +370,69 @@ def _entry_for(ip: str, entries: tuple[Neighbour, ...], *, interface: str | None
     return matches[0]
 
 
-def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
-    """Return the hardware address question answered with its scope attached.
+#: What makes this host unable to ASK, as opposed to a caller's mistake: no
+#: privilege for a raw socket, or no interface and path that can carry the
+#: request. Only these let an active lookup fall back to the cache.
+_CANNOT_ASK_ACTIVELY: tuple[type[Exception], ...] = (IPScoutPermissionError, IPScoutUnsupportedError)
+
+
+def ask_or_read_cache(ask: Callable[[], MacLookup], read_cache: Callable[[], MacLookup], *, fall_back: bool) -> MacLookup:
+    """Return the active answer, or the cache's when this host cannot ask and the caller allowed it.
 
     Args:
-        ip: The address asked about. A literal, not a name.
-        active: Send a real resolution request rather than reading the cache.
-            Opt-in, and it never silently falls back: a caller who asked to
-            resolve actively gets a truthful answer or an error, not a stale
-            cache entry dressed up as a fresh one.
+        ask: The active lookup.
+        read_cache: The passive lookup, run only when ``ask`` cannot be made.
+        fall_back: Whether a host that cannot ask may read the cache instead.
 
     Returns:
-        A record carrying the address found and what it is an address *of*.
-        For an on-link host that is the host itself, ``scope=DIRECT``. For a
-        routed address it is the next-hop router, ``scope=NEXT_HOP``, with
-        ``via_ip`` naming that router - which is the truthful answer, since
-        the remote host's own address is not knowable from here. When nothing
-        is known, ``scope=UNKNOWN`` and ``mac`` is ``None``.
+        What ``ask`` returned - an active miss included, because "nobody
+        answered just now" is the truthful reply a stale cache entry would
+        contradict - or, only when ``ask`` raised one of the cannot-ask
+        errors and ``fall_back`` is set, what ``read_cache`` returned.
 
     Raises:
-        ValueError: ``ip`` is not an IP address literal (a host name, a
-            malformed address, or a zone on an IPv4 address).
-        IPScoutUnsupportedError: ``active=True`` on a platform with no
-            unprivileged active path.
-
-    Note:
-        An address this host has no route to, or has simply not talked to, is
-        an ordinary outcome reported as ``UNKNOWN`` rather than an error.
+        IPScoutPermissionError: ``ask`` lacked privilege and ``fall_back`` is off.
+        IPScoutUnsupportedError: ``ask`` had no path and ``fall_back`` is off.
+        IPScoutResolutionError: ``ask`` was given a zone naming no interface,
+            whatever ``fall_back`` says; so is anything else ``ask`` raises.
 
     Examples:
-        >>> answer = lookup_mac("127.0.0.1")
-        >>> answer.scope in {MacScope.DIRECT, MacScope.UNKNOWN}
+        >>> miss = MacLookup(ip="192.0.2.7", method=MacMethod.ACTIVE)
+        >>> ask_or_read_cache(lambda: miss, lambda: MacLookup(ip="192.0.2.7"), fall_back=True) is miss
         True
 
     """
 
-    # A zone is the caller naming the link they mean, so it steers the lookup
-    # rather than travelling with the address: the cache, the routing table and
-    # every packed sockaddr hold bare addresses, and comparing scoped text
-    # against them matches nothing and reports a known neighbour as unknown.
-    family = AddressFamily.of_version(parse_address(ip).version)
-    bare, zone = split_zone(ip)
-    route = query_route(bare, family)
-    on_interface = zone if zone is not None else (route.interface if route else None)
+    if not fall_back:
+        return ask()
+    try:
+        return ask()
+    except _CANNOT_ASK_ACTIVELY:
+        return read_cache()
 
-    if active:
-        # Resolve whichever address actually carries the frame: the host
-        # itself when on-link, the router when not. Falling back to the cache
-        # for the routed case would make active=True silently passive, which
-        # is the one thing this flag must never do.
-        if route is not None and route.gateway:
-            found = resolve_active(ip=route.gateway)
-            return MacLookup(ip=ip, mac=found, scope=MacScope.NEXT_HOP, via_ip=route.gateway, interface=route.interface)
-        # The zoned text, not the bare address: the zone is the caller naming
-        # the link, and resolve_active sends on it.
-        found = resolve_active(ip=ip)
-        scope = MacScope.DIRECT if found else MacScope.UNKNOWN
-        return MacLookup(ip=ip, mac=found, scope=scope, interface=on_interface)
+
+def _active_lookup(ip: str, route: RouteInfo | None, on_interface: str | None) -> MacLookup:
+    """Resolve whichever address actually carries the frame: the host itself when on-link, the router when not."""
+
+    if route is not None and route.gateway:
+        found = resolve_active(ip=route.gateway)
+        return MacLookup(
+            ip=ip,
+            mac=found,
+            scope=MacScope.NEXT_HOP,
+            via_ip=route.gateway,
+            interface=route.interface,
+            method=MacMethod.ACTIVE,
+        )
+    # The zoned text, not the bare address: the zone is the caller naming
+    # the link, and resolve_active sends on it.
+    found = resolve_active(ip=ip)
+    scope = MacScope.DIRECT if found else MacScope.UNKNOWN
+    return MacLookup(ip=ip, mac=found, scope=scope, interface=on_interface, method=MacMethod.ACTIVE)
+
+
+def _cached_lookup(ip: str, bare: str, route: RouteInfo | None, on_interface: str | None) -> MacLookup:
+    """Answer from the neighbour cache, labelling a routed answer as the router's."""
 
     entries = neighbours()
 
@@ -447,12 +458,87 @@ def lookup_mac(ip: str, *, active: bool = False) -> MacLookup:
     return MacLookup(ip=ip, scope=MacScope.UNKNOWN, interface=on_interface)
 
 
-def get_mac_address(ip: str, *, active: bool = False) -> str | None:
+def _require_active_for_fallback(*, active: bool, fallback_to_cache: bool) -> None:
+    if fallback_to_cache and not active:
+        msg = "fallback_to_cache=True needs active=True: without an active ask there is nothing to fall back from"
+        raise ValueError(msg)
+
+
+def lookup_mac(ip: str, *, active: bool = False, fallback_to_cache: bool = False) -> MacLookup:
+    """Return the hardware address question answered with its scope attached.
+
+    Args:
+        ip: The address asked about. A literal, not a name.
+        active: Send a real resolution request rather than reading the cache.
+            Opt-in, and without ``fallback_to_cache`` it never falls back: a
+            caller who asked to resolve actively gets a truthful answer or an
+            error, not a stale cache entry dressed up as a fresh one.
+        fallback_to_cache: With ``active``, read the cache instead when this
+            host cannot ask - no privilege for the raw socket, or no interface
+            that can carry the request - and say so in ``method``. An ask that
+            nobody answered is still an ``ACTIVE`` answer and is never replaced
+            by a cache entry. Refused without ``active``.
+
+    Returns:
+        A record carrying the address found, what it is an address *of*, and
+        in ``method`` whether it was asked for or read from the cache. For an
+        on-link host that is the host itself, ``scope=DIRECT``. For a routed
+        address it is the next-hop router, ``scope=NEXT_HOP``, with ``via_ip``
+        naming that router - which is the truthful answer, since the remote
+        host's own address is not knowable from here. When nothing is known,
+        ``scope=UNKNOWN`` and ``mac`` is ``None``.
+
+    Raises:
+        ValueError: ``ip`` is not an IP address literal (a host name, a
+            malformed address, or a zone on an IPv4 address), or
+            ``fallback_to_cache`` is set without ``active``. Refused before
+            anything is sent.
+        IPScoutPermissionError: ``active=True`` without the privilege the
+            request needs, unless ``fallback_to_cache`` is set.
+        IPScoutUnsupportedError: ``active=True`` with no interface or path
+            that can carry the request, unless ``fallback_to_cache`` is set.
+        IPScoutResolutionError: ``active=True`` with a zone that names no
+            interface this host has, whatever ``fallback_to_cache`` says.
+
+    Note:
+        An address this host has no route to, or has simply not talked to, is
+        an ordinary outcome reported as ``UNKNOWN`` rather than an error.
+
+    Examples:
+        >>> answer = lookup_mac("127.0.0.1")
+        >>> answer.scope in {MacScope.DIRECT, MacScope.UNKNOWN}, answer.method.value
+        (True, 'cache')
+
+    """
+
+    _require_active_for_fallback(active=active, fallback_to_cache=fallback_to_cache)
+    # A zone is the caller naming the link they mean, so it steers the lookup
+    # rather than travelling with the address: the cache, the routing table and
+    # every packed sockaddr hold bare addresses, and comparing scoped text
+    # against them matches nothing and reports a known neighbour as unknown.
+    family = AddressFamily.of_version(parse_address(ip).version)
+    bare, zone = split_zone(ip)
+    route = query_route(bare, family)
+    on_interface = zone if zone is not None else (route.interface if route else None)
+
+    if not active:
+        return _cached_lookup(ip, bare, route, on_interface)
+    return ask_or_read_cache(
+        lambda: _active_lookup(ip, route, on_interface),
+        lambda: _cached_lookup(ip, bare, route, on_interface),
+        fall_back=fallback_to_cache,
+    )
+
+
+def get_mac_address(ip: str, *, active: bool = False, fallback_to_cache: bool = False) -> str | None:
     """Return the hardware address of an on-link host, or None if it is routed.
 
     Args:
         ip: The address asked about.
         active: Send a real resolution request rather than reading the cache.
+        fallback_to_cache: With ``active``, read the cache when this host
+            cannot ask, as :func:`lookup_mac` does. This returns only the
+            address, so use :func:`lookup_mac` to learn which one answered.
 
     Returns:
         The address, or ``None`` when the host is not directly reachable at
@@ -469,5 +555,5 @@ def get_mac_address(ip: str, *, active: bool = False) -> str | None:
 
     """
 
-    answer = lookup_mac(ip, active=active)
+    answer = lookup_mac(ip, active=active, fallback_to_cache=fallback_to_cache)
     return answer.mac if answer.scope is MacScope.DIRECT else None
