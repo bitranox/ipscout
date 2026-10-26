@@ -52,6 +52,7 @@ __all__ = [
     "BLANK_TARGET_MESSAGE",
     "DEFAULT_TIMEOUT",
     "DISCARD_PORT",
+    "LIMITED_BROADCAST",
     "MAX_HOP_LIMIT",
     "MAX_ICMP_FIELD16",
     "MAX_PORT",
@@ -128,6 +129,10 @@ NO_TIME_MS = -1.0
 #: Reported for "no address determined". A placeholder in the result only;
 #: nothing is ever bound to it.
 UNKNOWN_IP = "0.0.0.0"  # noqa: S104  # nosec B104
+
+#: The IPv4 limited broadcast address (RFC 919): every station on the local
+#: link, never forwarded by a router, and so never one station's address.
+LIMITED_BROADCAST = "255.255.255.255"
 
 #: The lowest and highest TCP/UDP port numbers. Port 0 is excluded: it asks
 #: the OS to pick one, so it never names a port on a remote host.
@@ -1363,7 +1368,11 @@ class SubnetInfo(_Frozen):
     def _addressing_agrees(self) -> SubnetInfo:
         _require_prefix_len(self.prefix_len, require_address(self.address, self.family))
         expected = interface_network(self.address, self.prefix_len)
-        if self.network != expected:
+        # Compared without the zone: interface_network drops it, while a record
+        # written before it did (a zoned /128, where ip_network keeps the zone)
+        # names the same network with it and must still validate.
+        stated = (self.network.network_address.packed, self.network.prefixlen)
+        if stated != (expected.network_address.packed, expected.prefixlen):
             msg = f"network must be {expected} for {self.cidr}, got {self.network}"
             raise ValueError(msg)
         if self.broadcast is not None and (not isinstance(expected, IPv4Network) or ip_address(self.broadcast) != expected.broadcast_address):

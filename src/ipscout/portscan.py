@@ -41,7 +41,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Strict, ValidationError
 
 from .deadline import seconds_left
-from .errors import IPScoutPermissionError, IPScoutUnsupportedError, refused_arguments
+from .errors import IPScoutPermissionError, IPScoutUnsupportedError, refused_arguments, setcap_command
 from .models import DISCARD_PORT, MAX_PORT, AddressFamily, Port, PortState, ScanMethod, Timeout, require_port
 from .packet import MAX_IP_LENGTH
 from .pool import Concurrency, gather_bounded
@@ -200,15 +200,23 @@ def _listed(ports: list[int]) -> list[int]:
         raise refused_arguments("port scan", refused) from refused
 
 
-def _wanted(ports: str | list[int]) -> list[int]:
-    """Return the ports to scan, however they were specified: each once, in port order.
+def _distinct(ports: list[int]) -> list[int]:
+    """Return a list of ports checked, each once, in port order.
 
-    Every entry point reads its ports through this, so a duplicate is probed
-    once and every result lists its ports in the same order. A list is held to the same range as a specification, so a port no host
-    can listen on is refused before any connect or SYN is attempted.
+    The one normalisation every entry point applies to a list, so a duplicate
+    is probed once and every result lists its ports in the same order, whether
+    it came from a connect scan or a SYN scan. A list is held to the same range
+    as a specification, so a port no host can listen on is refused before any
+    connect or SYN is attempted.
     """
 
-    return parse_ports(ports) if isinstance(ports, str) else sorted(set(_listed(ports)))
+    return sorted(set(_listed(ports)))
+
+
+def _wanted(ports: str | list[int]) -> list[int]:
+    """Return the ports to scan, given as a specification string or a list: each once, in port order."""
+
+    return parse_ports(ports) if isinstance(ports, str) else _distinct(ports)
 
 
 def choose_source_port() -> int:
@@ -287,7 +295,7 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
 
     """
 
-    wanted = _wanted(ports)
+    wanted = _distinct(ports)
     return _half_open(host, wanted, _settings(timeout=timeout))
 
 
@@ -314,7 +322,7 @@ def _half_open(host: str, ports: list[int], settings: PortScanSettings) -> dict[
     except PermissionError as exc:
         msg = (
             f"a SYN scan needs a raw socket, so root or CAP_NET_RAW: {exc}. "
-            f"Grant it with 'setcap cap_net_raw+ep $(readlink -f $(which python3))', run as root, "
+            f"Grant it with '{setcap_command('cap_net_raw')}', run as root, "
             f"or use the connect method, which needs no privileges"
         )
         raise IPScoutPermissionError(msg) from exc

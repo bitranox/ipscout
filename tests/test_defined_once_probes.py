@@ -19,10 +19,10 @@ from pydantic import ValidationError
 
 from ipscout.arp import ETHERNET_HEADER_SIZE
 from ipscout.bootp import DhcpReply
-from ipscout.dhcp import DhcpSession
+from ipscout.dhcp import DhcpSession, observe_dhcp_first_reachable
 from ipscout.models import PortState
 from ipscout.packet import IPV4_MIN_HEADER_SIZE
-from ipscout.portscan import syn_scan
+from ipscout.portscan import scan_ports, syn_scan
 from ipscout.tcpsyn import ACK, SYN, TCP_HEADER_SIZE, build_syn, read_reply
 
 pytestmark = pytest.mark.os_agnostic
@@ -196,3 +196,34 @@ def test_a_dhcp_watch_takes_whole_seconds_and_any_written_form_of_the_address() 
     session = DhcpSession("02-00-5E-10-00-00", timeout=5, settle=0)
 
     assert session.mac == GUEST_MAC
+
+
+# --------------------------------------------------------------------------
+# Review round: one report per bad argument, one normaliser per port list
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("timeout", [-1.0, float("nan"), "2"], ids=["negative", "nan", "text"])
+def test_the_first_reachable_window_is_refused_once_under_its_own_name(timeout: Any) -> None:
+    # The window is handed on as the session's settle too; checked first here,
+    # a bad one is reported once, never again under a "settle" this call has no argument for.
+    with pytest.raises(ValueError, match=r"^first-reachable DHCP watch refused its arguments: timeout: ") as refused:
+        observe_dhcp_first_reachable("00:00:5e:00:53:01", timeout=timeout)
+
+    assert "settle" not in str(refused.value)
+
+
+def test_a_syn_scan_still_takes_a_list_only() -> None:
+    # Typed Any: the point is what the runtime check does with a string the
+    # signature does not allow.
+    specification: Any = "22,80"
+    with pytest.raises(ValueError, match=r"^port scan refused its arguments: ports: "):
+        syn_scan("127.0.0.1", specification)
+
+
+def test_a_repeated_port_is_scanned_once_and_reported_in_port_order() -> None:
+    # The connect scan and the SYN scan share one list normaliser, so this
+    # unprivileged run pins the ordering the root-only SYN test also checks.
+    answer = scan_ports("127.0.0.1", [9, 7, 9], timeout=0.2)
+
+    assert list(answer) == [7, 9]

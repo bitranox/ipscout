@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, TypeVar
 if TYPE_CHECKING:
     from collections.abc import Coroutine
 
-__all__ = ["MIN_WAIT", "failure_reason", "seconds_left", "within"]
+__all__ = ["MIN_WAIT", "blocking_wait", "failure_reason", "seconds_left", "within"]
 
 _T = TypeVar("_T")
 
@@ -27,6 +27,23 @@ _T = TypeVar("_T")
 #: raises - so "no time left" still waits this long rather than changing the
 #: socket's mode or failing.
 MIN_WAIT = 0.001
+
+
+def blocking_wait(seconds: float) -> float:
+    """Return ``seconds`` as a blocking read's timeout, never under MIN_WAIT.
+
+    The floor for a wait given as a duration, where :func:`seconds_left` takes
+    a deadline; both apply the one rule.
+
+    Examples:
+        >>> blocking_wait(0) == MIN_WAIT
+        True
+        >>> blocking_wait(2.5)
+        2.5
+
+    """
+
+    return max(MIN_WAIT, seconds)
 
 
 def seconds_left(deadline: float) -> float:
@@ -47,7 +64,7 @@ def seconds_left(deadline: float) -> float:
 
     """
 
-    return max(MIN_WAIT, deadline - time.monotonic())
+    return blocking_wait(deadline - time.monotonic())
 
 
 def failure_reason(exc: BaseException) -> str:

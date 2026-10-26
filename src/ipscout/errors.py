@@ -52,6 +52,7 @@ __all__ = [
     "could_not_ask",
     "kernel_refused_neighbour_change",
     "refused_arguments",
+    "setcap_command",
     "validation_problems",
 ]
 
@@ -59,6 +60,23 @@ __all__ = [
 #: privilege. Every backend ends its refusal with these words, so a caller meets
 #: the same remedy whichever platform refused, and it is written once here.
 ARP_SCAN_ALTERNATIVE = "use arp_scan(), which resolves the same addresses unprivileged"
+
+
+def setcap_command(capability: str) -> str:
+    """Return the shell command that grants ``capability`` to the running interpreter.
+
+    Every Linux refusal for a missing capability offers it, so its spelling -
+    the interpreter resolved through ``which`` and ``readlink -f``, because
+    setcap must name the real file, not a symlink - is written once.
+
+    Examples:
+        >>> setcap_command("cap_net_raw")
+        'setcap cap_net_raw+ep $(readlink -f $(which python3))'
+
+    """
+
+    return f"setcap {capability}+ep $(readlink -f $(which python3))"
+
 
 #: The errnos a kernel answers with when the process lacks a privilege. Which
 #: of the two a refusal carries depends on the path it took through the kernel,

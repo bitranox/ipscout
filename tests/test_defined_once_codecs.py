@@ -10,6 +10,7 @@ frames, silence and a broken socket.
 
 from __future__ import annotations
 
+import errno
 import re
 import socket
 import sys
@@ -156,14 +157,19 @@ def test_await_answer_reads_nothing_once_the_deadline_has_passed() -> None:
     assert parsed == []
 
 
+class _FailingReadSocket(socket.socket):
+    """A real UDP socket whose read fails, so the failure arises inside the receive loop itself."""
+
+    def recv(self, bufsize: int, flags: int = 0, /) -> bytes:
+        del bufsize, flags
+        raise ConnectionRefusedError(errno.ECONNREFUSED, "the read failed")
+
+
 def test_await_answer_lets_a_read_failure_reach_the_caller() -> None:
-    receiver, sender = _datagram_pair()
-    sender.close()
-    receiver.close()
-    with pytest.raises(OSError, match=r".") as caught:
+    # The socket is open and settimeout succeeds, so only the read can fail:
+    # a loop that swallowed it would report "nobody answered" for "could not read".
+    with _FailingReadSocket(socket.AF_INET, socket.SOCK_DGRAM) as receiver, pytest.raises(ConnectionRefusedError, match="the read failed"):
         await_answer(receiver, timeout=1.0, parse=lambda _frame: "never")
-    # "Could not read" must not be mistaken for "nobody answered".
-    assert not isinstance(caught.value, TimeoutError)
 
 
 # --------------------------------------------------------------------------

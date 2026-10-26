@@ -33,9 +33,9 @@ from .winapi import (
     WIN_AF_UNSPEC,
     address_text,
     iphlpapi,
+    packed_to_ipv4,
     sockaddr_inet,
     sockaddr_inet_address,
-    string_to_ipv4,
 )
 
 __all__ = [
@@ -305,7 +305,7 @@ def resolve_active(ip: str, family: AddressFamily) -> str | None:  # pragma: no 
     if family is AddressFamily.IPV6:
         return _resolve_ipv6(library, packed, ip)
 
-    destination = string_to_ipv4(ip)
+    destination = packed_to_ipv4(packed)
     buffer = (ctypes.c_uint8 * MAX_ADAPTER_ADDRESS_LENGTH)()
     length = ctypes.c_uint32(MAX_ADAPTER_ADDRESS_LENGTH)
     status = library.SendARP(destination, 0, ctypes.byref(buffer), ctypes.byref(length))

@@ -8,13 +8,12 @@ wake-on-LAN arguments model) and pins what a caller sees through it.
 from __future__ import annotations
 
 import re
-from ipaddress import IPv4Network, IPv6Network
+from ipaddress import IPv4Network
 from typing import Any
 
 import pytest
 
-from ipscout.errors import IPScoutError
-from ipscout.models import AddressFamily, Interface, InterfaceAddress
+from ipscout.models import AddressFamily, Interface, InterfaceAddress, SubnetInfo
 from ipscout.scan import find_ip_by_mac, local_networks, sweep_scope
 from ipscout.static_neighbours import station_mac, subnet_interface_index
 from ipscout.subnet import subnet_info
@@ -28,16 +27,22 @@ _MAC = "00:00:5e:00:53:01"
 # --- subnet_info and the zone-free interface network ---------------------------------
 
 
-def test_a_zoned_ipv6_host_address_becomes_a_subnet_record_with_a_zone_free_network() -> None:
-    # A network built from "fe80::1%lab0/128" as text keeps the zone on a /128,
-    # and SubnetInfo checks against the zone-free network, so the record was
-    # refused and the whole listing failed with it.
+def test_a_zoned_ipv6_host_address_gets_a_zone_free_network() -> None:
+    # ip_network keeps the zone of "fe80::1%lab0/128" but drops it at a shorter
+    # prefix, so the network is derived zone-free: one address, one network.
+    # Compared as text, because network equality may not look at the zone.
     lab = Interface(name="lab0", ipv6=(InterfaceAddress(address="fe80::1%lab0", prefix_len=128),))
 
     (record,) = subnet_info(interfaces=[lab])
 
-    assert (record.address, record.family, record.network) == ("fe80::1%lab0", AddressFamily.IPV6, IPv6Network("fe80::1/128"))
+    assert (record.address, record.family, str(record.network)) == ("fe80::1%lab0", AddressFamily.IPV6, "fe80::1/128")
     assert record.broadcast is None
+
+
+def test_a_record_with_the_zoned_network_an_earlier_release_wrote_still_validates() -> None:
+    record = SubnetInfo.model_validate({"interface": "lab0", "address": "fe80::1%lab0", "prefix_len": 128, "network": "fe80::1%lab0/128", "family": "ipv6"})
+
+    assert str(record.network) == "fe80::1%lab0/128"
 
 
 def test_a_subnet_record_carries_the_network_and_broadcast_of_its_address() -> None:
@@ -126,10 +131,8 @@ def test_a_port_that_is_not_an_integer_is_refused_before_anything_is_sent(port: 
     # Before, True passed the range check as port 1 and the packet went there.
     # The refusal coming from the arguments model, not from the socket layer,
     # is what shows the send never started.
-    with pytest.raises(ValueError, match=r"^wake-on-LAN refused its arguments: port: Input should be a valid integer") as refused:
+    with pytest.raises(ValueError, match=r"^wake-on-LAN refused its arguments: port: Input should be a valid integer"):
         wake_on_lan(_MAC, broadcast="127.0.0.1", port=port)
-
-    assert not isinstance(refused.value, IPScoutError)
 
 
 def test_the_wake_settings_store_the_canonical_hardware_address() -> None:

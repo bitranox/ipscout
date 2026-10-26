@@ -138,6 +138,19 @@ class _ReachabilityProbe(BaseModel):
     probe_timeout: Timeout = _PROBE_TIMEOUT
 
 
+class _FirstReachableSettings(_ReachabilityProbe):
+    """The probe plus the watch window, checked together under the caller's own name.
+
+    The first-reachable watch hands its ``timeout`` on as the session's
+    ``settle`` too, so a bad window checked only by the session would be
+    reported twice, once under a ``settle`` this function has no argument for.
+    Checking it here first means the session only ever sees a valid window.
+    """
+
+    #: Seconds to keep watching for an offer that answers.
+    timeout: Timeout = DEFAULT_TIMEOUT
+
+
 class _WatchSettings(BaseModel):
     """The arguments of one DHCP watch, checked before the capture opens.
 
@@ -681,15 +694,15 @@ def observe_dhcp_first_reachable(  # noqa: PLR0913 - public API: every knob is k
     """
 
     try:
-        probe = _ReachabilityProbe(tcp_port=tcp_port, probe_timeout=probe_timeout)
+        probe = _FirstReachableSettings(tcp_port=tcp_port, probe_timeout=probe_timeout, timeout=timeout)
     except ValidationError as refused:
         raise refused_arguments("first-reachable DHCP watch", refused) from refused
 
     with observe_dhcp_session(
         mac,
         interface=interface,
-        timeout=timeout,
-        settle=timeout,
+        timeout=probe.timeout,
+        settle=probe.timeout,
         capture=capture,
         promiscuous=promiscuous,
     ) as session:

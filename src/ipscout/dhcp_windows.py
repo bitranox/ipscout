@@ -38,10 +38,11 @@ import contextlib
 import socket
 from typing import TYPE_CHECKING, cast
 
+from .deadline import blocking_wait
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .models import AddressFamily, require_address
 from .packet import MAX_IP_LENGTH
-from .ports import CAPTURE_RECEIVE_BUFFER, MIN_CAPTURE_WAIT
+from .ports import CAPTURE_RECEIVE_BUFFER
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -156,7 +157,7 @@ class RawSocketCapture:
     def receive(self, *, timeout: float) -> bytes | None:
         """Return the next packet, or None when none arrived in ``timeout``."""
 
-        self._socket.settimeout(max(MIN_CAPTURE_WAIT, timeout))
+        self._socket.settimeout(blocking_wait(timeout))
         try:
             return self._socket.recv(MAX_IP_LENGTH)
         except TimeoutError:

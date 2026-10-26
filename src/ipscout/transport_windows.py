@@ -135,8 +135,8 @@ def api_destination(address: str, family: AddressFamily) -> int | winapi.SOCKADD
     if family is AddressFamily.IPV6:
         return ipv6_destination(address)
     # Checked through require_address so the refusal reads as it does in every
-    # other entry point; string_to_ipv4 then only converts.
-    return winapi.string_to_ipv4(str(require_address(address, family)))
+    # other entry point, and converted from the bytes it parsed, not parsed again.
+    return winapi.packed_to_ipv4(require_address(address, family).packed)
 
 
 def echo_outcome(status: winapi.IpStatus | None, *, elapsed_ms: float, api_rtt_ms: int, source: str) -> EchoResult:

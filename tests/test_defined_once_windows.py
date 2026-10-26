@@ -13,11 +13,16 @@ from __future__ import annotations
 import ctypes
 import socket
 import struct
+import sys
 
 import pytest
 
 from ipscout import interfaces_windows, neighbours_windows, routes_windows, winapi
+from ipscout.errors import IPScoutResolutionError
 from ipscout.models import AddressFamily, FamilyAddress
+
+# The package re-exports neighbours() under the submodule's name, so import from the module path.
+from ipscout.neighbours import resolve_active
 from ipscout.resolve import MAX_INTERFACE_INDEX
 from ipscout.transport_windows import WindowsEchoTransport, api_destination, ipv6_destination
 
@@ -140,3 +145,12 @@ def test_an_adapter_address_decodes_into_the_shared_family_address_record() -> N
 
     assert type(decoded) is FamilyAddress
     assert decoded == FamilyAddress(AddressFamily.IPV4, "192.0.2.7")
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="the public Windows resolve path")
+def test_the_public_windows_resolution_refuses_a_zone_naming_no_interface() -> None:
+    # Windows sends without the zone, but a zone that names no interface is a
+    # typo to refuse, as POSIX refuses it.
+    with pytest.raises(IPScoutResolutionError, match=r"no interface named 'nosuchif0'"):
+        resolve_active("fe80::1%nosuchif0")

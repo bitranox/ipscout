@@ -80,6 +80,7 @@ __all__ = [
     "ipv4_to_string",
     "ipv6_words_to_string",
     "last_error",
+    "packed_to_ipv4",
     "reply_buffer_size",
     "sockaddr_in6",
     "sockaddr_inet",
@@ -711,9 +712,27 @@ def string_to_ipv4(address: str) -> int:
 
     """
 
+    return packed_to_ipv4(socket.inet_pton(AddressFamily.IPV4.socket_family, address))
+
+
+def packed_to_ipv4(packed: bytes) -> int:
+    """Return the ``IPAddr`` form of an IPv4 address already parsed to its four bytes.
+
+    For a caller that has validated the address itself (``require_address``
+    gives ``.packed``), so it is converted without being parsed a second time.
+
+    Raises:
+        struct.error: ``packed`` is not exactly four bytes.
+
+    Examples:
+        >>> packed_to_ipv4(bytes([127, 0, 0, 1])) == 0x0100007F
+        True
+
+    """
+
     # "<I": IPAddr is the four network-order bytes read as one native
     # little-endian DWORD, which is how every Windows architecture stores it.
-    return int(struct.unpack("<I", socket.inet_pton(AddressFamily.IPV4.socket_family, address))[0])
+    return int(struct.unpack("<I", packed)[0])
 
 
 def ipv6_words_to_string(words: Iterable[int]) -> str:

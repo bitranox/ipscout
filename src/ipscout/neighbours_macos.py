@@ -273,9 +273,10 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
         raise IPScoutPermissionError(f"active neighbour discovery needs a raw ICMPv6 socket, which is root-only here: {exc}. {_UNPRIVILEGED_ADVICE}") from exc
 
     try:
-        # A PermissionError is the send refused for want of root, so it names
-        # the remedy. The helper's interface lookup reports an unknown name as
-        # a plain OSError, which like every other failure here (the receive
+        # A PermissionError anywhere in preparing or sending the solicitation
+        # (the interface lookup, the multicast option, the send) is a refusal
+        # for want of root, so it names the remedy. An unknown interface name
+        # is a plain OSError, which like every other failure here (the receive
         # included) falls through to "could not ask" below.
         try:
             send_neighbour_solicitation(sock, interface=interface, target_ip=target_ip, source_mac=source_mac, timeout=timeout)

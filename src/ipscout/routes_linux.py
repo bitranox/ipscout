@@ -24,7 +24,7 @@ import contextlib
 import socket
 import struct
 
-from .models import DEFAULT_TIMEOUT, AddressFamily, RouteInfo
+from .models import DEFAULT_TIMEOUT, AddressFamily, RouteInfo, require_address
 from .netlink import (
     NLM_F_DUMP,
     NLM_F_REQUEST,
@@ -133,9 +133,11 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
 
     """
 
+    # The one literal check every route backend shares: a %zone is accepted
+    # and the lookup made for the bare address, as routes.query_route makes it.
     try:
-        packed = socket.inet_pton(family.socket_family, destination)
-    except OSError:
+        packed = require_address(destination, family).packed
+    except ValueError:
         return None
 
     sock = open_socket()

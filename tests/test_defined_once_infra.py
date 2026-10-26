@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from ipscout import deadline, ports
+from ipscout import deadline
 from ipscout.deadline import MIN_WAIT, seconds_left
 from ipscout.errors import (
     ARP_SCAN_ALTERNATIVE,
@@ -109,9 +109,9 @@ def test_a_result_of_neither_ip_family_is_skipped_not_called_ipv4(monkeypatch: p
 # --------------------------------------------------------------------------
 # deadline: the floor under every blocking wait
 # --------------------------------------------------------------------------
-def test_the_wait_floor_is_one_millisecond_and_ports_names_the_same_value() -> None:
+def test_the_wait_floor_is_one_millisecond_for_a_duration_and_a_deadline_alike() -> None:
     assert MIN_WAIT == 0.001
-    assert ports.MIN_CAPTURE_WAIT is deadline.MIN_WAIT
+    assert deadline.blocking_wait(0) == MIN_WAIT
 
 
 def test_a_deadline_already_passed_leaves_the_floor_not_zero_or_negative() -> None:

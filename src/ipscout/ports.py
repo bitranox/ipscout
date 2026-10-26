@@ -25,13 +25,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from .deadline import MIN_WAIT as MIN_CAPTURE_WAIT
 from .models import RoundTrip
 
 if TYPE_CHECKING:
     from types import TracebackType
 
-__all__ = ["CAPTURE_RECEIVE_BUFFER", "MIN_CAPTURE_WAIT", "AsyncEchoTransport", "EchoResult", "EchoTransport", "PacketCapture"]
+__all__ = ["CAPTURE_RECEIVE_BUFFER", "AsyncEchoTransport", "EchoResult", "EchoTransport", "PacketCapture"]
 
 #: The socket receive buffer a capture asks for. Asked for, not required: the
 #: kernel may double it for bookkeeping and clamp it (Linux: net.core.rmem_max),
@@ -39,10 +38,6 @@ __all__ = ["CAPTURE_RECEIVE_BUFFER", "MIN_CAPTURE_WAIT", "AsyncEchoTransport", "
 #: arriving between two reads, never a correctness dependency, so failing to set
 #: it is not a failure to capture.
 CAPTURE_RECEIVE_BUFFER = 1 << 20
-
-# MIN_CAPTURE_WAIT, the shortest wait one capture read makes, is
-# deadline.MIN_WAIT under the name the capture backends import it by: the
-# reason for the floor is the same, so its value lives once, in deadline.
 
 
 class EchoResult(BaseModel):

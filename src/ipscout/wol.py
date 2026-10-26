@@ -25,7 +25,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
 
 from .arp import MAC_LENGTH, packed_mac, require_mac
 from .errors import IPScoutError, refused_arguments
-from .models import DISCARD_PORT, AddressFamily, Port, require_address
+from .models import DISCARD_PORT, LIMITED_BROADCAST, AddressFamily, Port, require_address
 
 __all__ = ["DEFAULT_BROADCAST", "DEFAULT_PORT", "MAGIC_PACKET_SIZE", "WakeSettings", "build_magic_packet", "wake_on_lan"]
 
@@ -36,7 +36,7 @@ DEFAULT_PORT = DISCARD_PORT
 
 #: The limited broadcast address: it reaches the local segment without
 #: knowing its subnet, which is why it is the default.
-DEFAULT_BROADCAST = "255.255.255.255"
+DEFAULT_BROADCAST = LIMITED_BROADCAST
 
 #: The packet is six 0xFF bytes followed by the address repeated sixteen times.
 _SYNC_LENGTH = 6

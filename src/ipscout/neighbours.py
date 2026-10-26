@@ -335,7 +335,12 @@ def resolve_active(ip: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
     if IS_WINDOWS:  # pragma: no cover - exercised on Windows CI only
         from .neighbours_windows import resolve_active as _windows_resolve  # noqa: PLC0415 - Windows-only import
 
-        if zone is None and query_route(bare, family) is None:
+        if zone is not None:
+            # Windows sends without the zone (ResolveIpNetEntry2 and SendARP take
+            # no interface here), but a zone naming no interface is still a typo
+            # to refuse, as POSIX refuses it in _sending_interface.
+            _zone_interface(zone)
+        elif query_route(bare, family) is None:
             # SendARP answers an unrouted address with the same status as an
             # unanswered one, though nothing was sent, so the missing route is
             # refused here as POSIX refuses it in _sending_interface.

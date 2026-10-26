@@ -14,6 +14,7 @@ from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_add
 import pytest
 from pydantic import ValidationError
 
+from ipscout.errors import IPScoutResolutionError
 from ipscout.models import (
     BLANK_TARGET_MESSAGE,
     MAX_ICMP_FIELD16,
@@ -32,6 +33,8 @@ from ipscout.models import (
     require_settle,
 )
 from ipscout.packet import IPV4_MIN_HEADER_SIZE, build_echo_request, ipv4_header_length, strip_ip_header
+from ipscout.resolve import resolve
+from ipscout.service import PingRequest
 
 _MAC = "00:00:5e:00:53:01"
 
@@ -127,8 +130,16 @@ def test_an_echo_header_field_accepts_max_icmp_field16_and_refuses_one_more() ->
 # --- BLANK_TARGET_MESSAGE / is_blank_target ---------------------------------
 
 
-def test_blank_target_message_is_the_text_the_entry_points_refuse_with() -> None:
-    assert BLANK_TARGET_MESSAGE == "target must not be empty"
+def test_blank_target_message_is_the_text_both_entry_points_refuse_with() -> None:
+    # Read from what the resolver and the ping request actually raise, not
+    # from the constant, so a copy that drifts from it is caught.
+    with pytest.raises(IPScoutResolutionError) as resolver:
+        resolve("  ")
+    with pytest.raises(ValidationError) as request:
+        PingRequest.model_validate({"target": "  "})
+
+    assert str(resolver.value) == BLANK_TARGET_MESSAGE == "target must not be empty"
+    assert any(error["msg"].endswith(BLANK_TARGET_MESSAGE) for error in request.value.errors())
 
 
 @pytest.mark.parametrize("text", ["", " ", "\t\n", chr(0x3000)])

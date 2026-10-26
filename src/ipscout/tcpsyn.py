@@ -25,7 +25,7 @@ import socket
 import struct
 from typing import NamedTuple
 
-from .models import AddressFamily, PortState
+from .models import AddressFamily, PortState, require_address
 from .packet import checksum, ipv4_header_length
 
 __all__ = ["TCP_HEADER_SIZE", "PortReply", "build_syn", "parse_tcp_reply", "read_reply"]
@@ -57,13 +57,13 @@ _DATA_OFFSET = (_TCP.size // _WORD) << 4
 _WINDOW = 65535
 
 
-def _pseudo_header(source_ip: str, target_ip: str, length: int) -> bytes:
+def _pseudo_header(source: bytes, target: bytes, length: int) -> bytes:
     """Return the pseudo-header the TCP checksum is computed over."""
 
     return struct.pack(
         "!4s4sBBH",
-        socket.inet_aton(source_ip),
-        socket.inet_aton(target_ip),
+        source,
+        target,
         0,
         socket.IPPROTO_TCP,
         length,
@@ -86,6 +86,10 @@ def build_syn(*, source_ip: str, target_ip: str, source_port: int, target_port: 
     Returns:
         The complete packet, ready for a raw socket with ``IP_HDRINCL``.
 
+    Raises:
+        ValueError: ``source_ip`` or ``target_ip`` is not a canonical IPv4
+            literal (shorthand such as ``"127.1"`` included).
+
     Examples:
         >>> packet = build_syn(source_ip="192.168.1.2", target_ip="192.168.1.5",
         ...                    source_port=40000, target_port=80)
@@ -96,8 +100,12 @@ def build_syn(*, source_ip: str, target_ip: str, source_port: int, target_port: 
 
     """
 
+    # Parsed once, strictly: inet_aton would read "10.1" as 10.0.0.1 and build
+    # a packet for an address nobody wrote.
+    source = require_address(source_ip, AddressFamily.IPV4).packed
+    target = require_address(target_ip, AddressFamily.IPV4).packed
     tcp = _TCP.pack(source_port, target_port, sequence, 0, _DATA_OFFSET, SYN, _WINDOW, 0, 0)
-    tcp_checksum = checksum(_pseudo_header(source_ip, target_ip, len(tcp)) + tcp)
+    tcp_checksum = checksum(_pseudo_header(source, target, len(tcp)) + tcp)
     tcp = _TCP.pack(source_port, target_port, sequence, 0, _DATA_OFFSET, SYN, _WINDOW, tcp_checksum, 0)
 
     total = _IPV4.size + len(tcp)
@@ -110,8 +118,8 @@ def build_syn(*, source_ip: str, target_ip: str, source_port: int, target_port: 
         _DEFAULT_TTL,
         socket.IPPROTO_TCP,
         0,
-        socket.inet_aton(source_ip),
-        socket.inet_aton(target_ip),
+        source,
+        target,
     )
     # The kernel fills in the IP checksum for a raw socket, but computing it
     # costs nothing and makes the packet valid on its own terms.
@@ -124,8 +132,8 @@ def build_syn(*, source_ip: str, target_ip: str, source_port: int, target_port: 
         _DEFAULT_TTL,
         socket.IPPROTO_TCP,
         checksum(header),
-        socket.inet_aton(source_ip),
-        socket.inet_aton(target_ip),
+        source,
+        target,
     )
     return header + tcp
 

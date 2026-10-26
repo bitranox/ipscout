@@ -43,8 +43,9 @@ from . import neighbours_linux, neighbours_macos, neighbours_windows
 from .arp import packed_mac, require_mac
 from .errors import IPScoutError, IPScoutUnsupportedError
 from .interfaces import local_interfaces
-from .models import AddressFamily, Neighbour
+from .models import LIMITED_BROADCAST, AddressFamily, Neighbour, names_a_neighbour, parse_address
 from .neighbours import neighbours
+from .resolve import interface_name
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -90,15 +91,11 @@ def ipv4_station_address(ip: str) -> str:
 
     """
 
-    try:
-        address = ipaddress.ip_address(ip)
-    except ValueError as exc:
-        msg = f"{ip!r} is not an IP address"
-        raise ValueError(msg) from exc
+    address = parse_address(ip)
     if isinstance(address, ipaddress.IPv6Address):
         msg = f"{ip} is an IPv6 address; static neighbour entries are written for IPv4 only"
         raise IPScoutUnsupportedError(msg)
-    if address.is_multicast or address.is_unspecified or address == ipaddress.IPv4Address("255.255.255.255"):
+    if not names_a_neighbour(address) or str(address) == LIMITED_BROADCAST:
         msg = f"{ip} does not name a single station, so it cannot have a neighbour entry"
         raise ValueError(msg)
     return str(address)
@@ -163,11 +160,9 @@ def interface_index(name: str, interfaces: Sequence[Interface]) -> int:
     """
 
     if _INDEX_PATTERN.fullmatch(name):
-        try:
-            socket.if_indextoname(int(name))
-        except (OSError, OverflowError, ValueError) as exc:
+        if interface_name(int(name)) is None:
             msg = f"no interface with index {name} on this host"
-            raise ValueError(msg) from exc
+            raise ValueError(msg)
         return int(name)
     for candidate in interfaces:
         if candidate.name == name and candidate.index:

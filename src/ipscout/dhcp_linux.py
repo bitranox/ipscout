@@ -40,8 +40,9 @@ import socket
 import struct
 
 from .arp import ETH_P_IP, FRAME_RECEIVE_SIZE
-from .errors import IPScoutPermissionError, IPScoutUnsupportedError
-from .ports import CAPTURE_RECEIVE_BUFFER, MIN_CAPTURE_WAIT
+from .deadline import blocking_wait
+from .errors import IPScoutPermissionError, IPScoutUnsupportedError, setcap_command
+from .ports import CAPTURE_RECEIVE_BUFFER
 from .unixio import packet_family
 
 __all__ = ["PACKET_MREQ", "PacketSocketCapture", "capture_available", "open_capture"]
@@ -81,7 +82,7 @@ def _permission_error(exc: OSError) -> IPScoutPermissionError:
 
     return IPScoutPermissionError(
         f"capturing DHCP needs a link-layer socket, so root or CAP_NET_RAW: {exc}. "
-        f"Grant it with 'setcap cap_net_raw+ep $(readlink -f $(which python3))' or run as root. "
+        f"Grant it with '{setcap_command('cap_net_raw')}' or run as root. "
         f"There is no unprivileged way to watch somebody else's traffic; subnet_info() reads this "
         f"host's own lease without any privilege, but it only describes this host"
     )
@@ -133,7 +134,7 @@ class PacketSocketCapture:
     def receive(self, *, timeout: float) -> bytes | None:
         """Return the next frame, or None when none arrived in ``timeout``."""
 
-        self._socket.settimeout(max(MIN_CAPTURE_WAIT, timeout))
+        self._socket.settimeout(blocking_wait(timeout))
         try:
             return self._socket.recv(FRAME_RECEIVE_SIZE)
         except TimeoutError:

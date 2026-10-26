@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import socket
 
 from .bsdroute import (
     NO_METRICS,
@@ -39,7 +38,7 @@ from .bsdroute import (
     pack_sockaddr_in6,
     split_sockaddrs,
 )
-from .models import DEFAULT_TIMEOUT, AddressFamily, RouteInfo
+from .models import DEFAULT_TIMEOUT, AddressFamily, RouteInfo, require_address
 from .resolve import interface_name
 
 __all__ = ["default_gateway", "parse_route_reply", "query_route"]
@@ -151,9 +150,11 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
 
     """
 
+    # The one literal check every route backend shares: a %zone is accepted
+    # and the lookup made for the bare address, as routes.query_route makes it.
     try:
-        packed = socket.inet_pton(family.socket_family, destination)
-    except OSError:
+        packed = require_address(destination, family).packed
+    except ValueError:
         return None
 
     try:
