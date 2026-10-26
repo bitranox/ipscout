@@ -32,6 +32,7 @@ import os
 import select
 import socket
 import time
+from typing import TYPE_CHECKING
 
 from .arp import (
     await_answer,
@@ -70,10 +71,14 @@ from .errors import ARP_SCAN_ALTERNATIVE, PERMISSION_ERRNOS, IPScoutPermissionEr
 from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, parse_address, require_address
 from .resolve import interface_name
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
 __all__ = [
     "build_add_message",
     "build_delete_message",
     "list_neighbours",
+    "lists_neighbour",
     "parse_neighbour_dump",
     "raise_for_route_errno",
     "remove_static_neighbour",
@@ -444,11 +449,39 @@ def _route_write(message: bytes) -> int:  # pragma: no cover - macOS only
     return 0
 
 
-def _is_listed(ip: str, ifindex: int | None = None) -> bool:  # pragma: no cover - macOS only
-    """Return whether the neighbour dump holds an entry for ``ip``, on ``ifindex`` when given."""
+def lists_neighbour(entries: Iterable[Neighbour], ip: str, *, ifindex: int | None = None) -> bool:
+    """Return whether ``entries`` hold one for ``ip``, on interface ``ifindex`` when given.
 
-    name = interface_name(ifindex) if ifindex is not None else None
-    return any(entry.ip == ip and (ifindex is None or entry.interface == name) for entry in list_neighbours())
+    The static-entry writers only delete what the neighbour dump lists, so a
+    host route that is not a neighbour cannot be removed through them. Since
+    the delete message names no interface, nothing counts as listed on an
+    index that names no interface: an entry with no interface is not on it.
+
+    Args:
+        entries: The parsed neighbour dump.
+        ip: The address to look for, as the entries spell it.
+        ifindex: The interface it must be listed on, or ``None`` for any.
+
+    Returns:
+        Whether such an entry exists.
+
+    Examples:
+        >>> from ipscout.models import Neighbour
+        >>> lists_neighbour([Neighbour(ip="192.0.2.7", interface=None)], "192.0.2.7")
+        True
+
+    """
+
+    if ifindex is None:
+        return any(entry.ip == ip for entry in entries)
+    name = interface_name(ifindex)
+    return name is not None and any(entry.ip == ip and entry.interface == name for entry in entries)
+
+
+def _is_listed(ip: str, ifindex: int | None = None) -> bool:  # pragma: no cover - macOS only
+    """Return whether this host's neighbour dump lists ``ip``; see :func:`lists_neighbour`."""
+
+    return lists_neighbour(list_neighbours(), ip, ifindex=ifindex)
 
 
 def set_static_neighbour(ip: str, mac: bytes, ifindex: int) -> None:  # pragma: no cover - macOS only

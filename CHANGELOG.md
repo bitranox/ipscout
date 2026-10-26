@@ -88,6 +88,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ### Fixed
 
+- macOS: `remove_neighbour` on an interface index that names no interface removes nothing. The
+  index read as "no interface", which matched an entry learned on no interface, and the delete
+  (which names no interface) then removed it. `neighbours_macos.lists_neighbour` is the check,
+  pure over the parsed dump.
 - Linux lease reading keeps only address literals: a lease file's server, router or DNS entry
   that is not one is dropped instead of reaching the record as text, and the first literal in a
   dhclient `routers` list is the router even when an earlier entry is not one.
