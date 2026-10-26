@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import errno
 import ipaddress
+import os
 import socket
 import struct
+import sys
 
 import pytest
 
@@ -34,6 +36,31 @@ from ipscout.neighbours import SendingInterface, _entry_for, resolve_active
 from ipscout.resolve import resolve_one
 
 pytestmark = pytest.mark.os_agnostic
+
+
+def _may_send_link_layer() -> bool:
+    """Return whether this process can open the socket an active resolution sends on.
+
+    Root can, and so can a process granted CAP_NET_RAW on Linux (AF_PACKET),
+    and for either an active resolution answers rather than raising.
+    """
+
+    if sys.platform == "win32":
+        return False
+    if os.geteuid() == 0:
+        return True
+    packet_family = getattr(socket, "AF_PACKET", None)
+    if not isinstance(packet_family, int):
+        return False
+    try:
+        socket.socket(packet_family, socket.SOCK_RAW).close()
+    except OSError:
+        return False
+    return True
+
+
+#: The unprivileged active-resolution tests need a process that cannot send.
+needs_unprivileged = pytest.mark.skipif(_may_send_link_layer(), reason="this process may send at the link layer, so an active resolution answers")
 
 
 # --------------------------------------------------------------------------
@@ -737,12 +764,11 @@ def test_a_neighbour_record_cannot_be_edited_after_the_fact() -> None:
 
 
 @pytest.mark.os_agnostic
+@needs_unprivileged
 def test_active_resolution_refuses_where_it_would_need_root() -> None:
     # The send is implemented on every platform, but Linux and macOS need a
     # raw socket for it. Unprivileged, that must be a loud, actionable error
     # rather than a quiet fallback to whatever the cache happens to hold.
-    import sys
-
     if sys.platform == "win32":
         pytest.skip("Windows resolves IPv4 actively through SendARP, which needs no elevation")
 
@@ -775,12 +801,11 @@ def test_the_linux_raw_socket_refusal_names_the_query_as_plain_text(kind: linux.
 
 
 @pytest.mark.os_agnostic
+@needs_unprivileged
 def test_active_resolution_never_quietly_becomes_a_cache_read() -> None:
     # The failure mode worth guarding: a caller asks to resolve actively, the
     # platform cannot, and it hands back a stale cache entry as though it were
     # fresh. It must raise instead.
-    import sys
-
     if sys.platform == "win32":
         pytest.skip("Windows has an unprivileged active path")
 
