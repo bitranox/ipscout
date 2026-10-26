@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.3.0] 2026-10-26 12:19:25
+
 ### Added
 
 - `lookup_mac(ip, active=True, fallback_to_cache=True)` (and the same on `get_mac_address`, plus
