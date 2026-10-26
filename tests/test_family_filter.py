@@ -15,7 +15,7 @@ import ipaddress
 import pytest
 
 import ipscout
-from ipscout.models import AddressFamily, Neighbour
+from ipscout.models import AddressFamily, Neighbour, SweepScope
 
 BOTH_FAMILIES = (
     Neighbour(ip="192.0.2.10", mac="aa:bb:cc:dd:ee:ff", interface="eth0"),
@@ -81,17 +81,20 @@ def test_the_neighbour_cache_can_be_asked_for_one_family() -> None:
 
 
 @pytest.mark.os_agnostic
-def test_a_sweep_can_be_asked_for_one_family(monkeypatch: pytest.MonkeyPatch) -> None:
-    # arp_scan sweeps IPv4 either way - there is no IPv6 sweep - but the cache it then reads
-    # holds both, so the same filter has to be available on the way out.
-    def fixed_sweep(scope: object, *, concurrency: int = 0, timeout: float = 0.0) -> tuple[Neighbour, ...]:
-        return BOTH_FAMILIES
+@pytest.mark.usefixtures("cache")
+def test_a_sweep_can_be_asked_for_one_family() -> None:
+    # A scope may hold networks of both families, and the cache the sweep then reads holds
+    # both, so the same filter has to be available on the way out. The sweep and its
+    # membership filter run for real - the networks hold only documentation and link-local
+    # addresses, which answer nothing - and only the cache it reads is fixed. 192.0.2.11 is in
+    # the cache but outside the scope, so it must not come back either.
+    scope = SweepScope(limit=16, networks=(ipaddress.IPv4Network("192.0.2.10/32"), ipaddress.IPv6Network("fe80::/126")))
 
-    monkeypatch.setattr(ipscout.scan, "_sweep", fixed_sweep)
+    v4 = ipscout.arp_scan(scope=scope, family=AddressFamily.IPV4, timeout=0.05)
+    v6 = ipscout.arp_scan(scope=scope, family=AddressFamily.IPV6, timeout=0.05)
 
-    v4 = ipscout.arp_scan(network="192.0.2.0/24", family=AddressFamily.IPV4)
-
-    assert [entry.ip for entry in v4] == ["192.0.2.10", "192.0.2.11"]
+    assert [entry.ip for entry in v4] == ["192.0.2.10"]
+    assert [entry.ip for entry in v6] == ["fe80::1"]
 
 
 @pytest.mark.os_agnostic
