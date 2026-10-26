@@ -30,6 +30,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   the send was refused or the reply dropped. macOS gives an ICMP socket 8192 bytes of each, so
   every `payload_size` above about 8100 went unanswered there. The POSIX transports now raise both
   buffers to fit echoes of the payload size.
+- The skill said a macOS capture on `lo0` is refused by name. It is refused by its link type, with
+  `IPScoutUnsupportedError`; the skill now says so.
 
 ## [2.4.0] 2026-10-26 16:19:43
 
