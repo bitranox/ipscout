@@ -5,6 +5,33 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `tests/test_dhcp_macos_bridge_live.py`: a `host_mutating` test, macOS as root, that runs the real
+  macOS DHCP client through a bridge of `feth` members against a small BPF server
+  (`tests/dhcp_responder.py`), and checks that the client's member port returns the offer the
+  client then binds, and that the bridge itself is refused.
+
+### Fixed
+
+- `observe_dhcp` / `observe_dhcp_session` on a macOS bridge returned `[]` for a machine that did
+  ask for an address: a capture on a macOS bridge sees only frames delivered to this host, never
+  the replies it forwards to a guest (measured as root on a macOS runner VM, with `tcpdump`
+  agreeing). A `bridgeN` interface is now refused with `IPScoutUnsupportedError`, naming the guest's
+  member port as the interface to watch. The docs, CLI help and skill that told macOS callers to
+  name the bridge now say the member port.
+- The README matrix said traceroute is unsupported on macOS; as root it walks with a raw ICMP
+  socket.
+- A deadline test compared against a literal and failed on Windows, where the monotonic clock's
+  float arithmetic can overshoot it; it now bounds by the clock read.
+
+### Changed
+
+- The CI workflow takes the `default_cicd_public` template's free-threaded test cells from
+  `[tool.ci]`; this project declares none, so the matrix is unchanged.
+- `docs/handover-observe-dhcp.md`, the proposal for `observe_dhcp`, is removed: the feature has
+  shipped and its contracts live in `docs/usage.md` and the docstrings.
+
 ## [2.5.0] 2026-10-26 19:16:26
 
 ### Added
