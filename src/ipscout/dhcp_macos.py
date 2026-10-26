@@ -16,27 +16,36 @@ Note:
     dropped - dropping them would silently lose exactly the reply being waited
     for, since a DHCP exchange arrives in a burst.
 
+    **A bridge is refused; watch the guest's member port.** A BPF device bound
+    to a macOS bridge sees only frames delivered to this host, never what the
+    bridge forwards between its members - unlike a Linux packet socket on a
+    bridge. Measured with a real macOS DHCP client behind a bridge: the bridge
+    showed nothing without an address of its own, and with one only
+    broadcasts, never a reply unicast to the guest, while the guest's member
+    port showed the whole exchange. See ``bridge_refusal``.
+
     **Promiscuous mode is asked for by default**, for the reason it is on
-    Linux: on a bridge a reply is forwarded to the guest's own port, and a
-    Linux client does not set the broadcast flag that would make it visible
-    otherwise. ``BIOCPROMISC`` takes no argument, so passing one makes the
-    kernel refuse it.
+    Linux: a reply is often unicast to the guest's own hardware address, which
+    is not the address of the interface watched, and a Linux client does not
+    set the broadcast flag that would make it visible otherwise.
+    ``BIOCPROMISC`` takes no argument, so passing one makes the kernel refuse
+    it.
 
     **Only an Ethernet link type is accepted.** A BPF device reports its
     framing through ``BIOCGDLT``; loopback uses ``DLT_NULL``, which prefixes a
     four-byte protocol family rather than an Ethernet header. A codec written
     for Ethernet would read the wrong bytes rather than none, so a foreign
-    link type is refused by name instead of quietly returning nothing.
+    link type is refused instead of quietly returning nothing.
 
 Verification status:
     The encoding and the record splitting are asserted from any platform, and
     the ioctl numbers are pinned against the values in ``<net/bpf.h>``. The
     unprivileged CI lanes cannot open a BPF device (measured: ``/dev/bpf0``
-    refused with EACCES on macos-latest). As root on a macOS 26 runner VM,
+    refused with EACCES on macos-latest). As root on a macOS 26 runner VM:
     ``tests/test_dhcp_macos_live.py`` captures offers written onto a ``feth``
-    pair: device open, interface bind, link-type check, packed-record split
-    and decode all ran against the kernel. Not yet run on physical hardware,
-    nor on a bridge watching a real guest boot.
+    pair, and ``tests/test_dhcp_macos_bridge_live.py`` watches a real macOS
+    DHCP client's handshake from its member port of a bridge, through to the
+    client binding the offered address. Not yet run on physical hardware.
 
 """
 
@@ -44,6 +53,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import select
 import struct
 import sys
@@ -54,7 +64,10 @@ from .deadline import blocking_wait
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .unixio import fcntl_module
 
-__all__ = ["BpfCapture", "capture_available", "open_capture"]
+__all__ = ["BpfCapture", "bridge_refusal", "capture_available", "open_capture"]
+
+#: How macOS names a bridge interface (``ifconfig bridge create`` answers ``bridge0``).
+_BRIDGE_NAME = re.compile(r"bridge[0-9]+")
 
 
 def _require_bpf() -> None:
@@ -70,6 +83,42 @@ def _require_bpf() -> None:
     if not sys.platform.startswith(("darwin", "freebsd", "openbsd", "netbsd")):  # pragma: no cover - non-BSD
         msg = f"the BPF devices are a BSD facility and this process is on {sys.platform!r}"
         raise IPScoutUnsupportedError(msg)
+
+
+def bridge_refusal(interface: str) -> str | None:
+    """Return why a capture on this interface would miss a guest's handshake, or None.
+
+    A BPF device bound to a macOS bridge sees only frames delivered to this
+    host, never what the bridge forwards between its members. Measured with a
+    real macOS DHCP client behind a bridge of ``feth`` members: without a
+    bridge address the bridge showed nothing, with one only broadcasts, and a
+    reply unicast to the guest never; both member ports showed the whole
+    exchange. Returning an empty list there would read as "the machine never
+    asked", so the capture refuses instead. macOS names every bridge
+    ``bridge<N>``, which is what is matched.
+
+    Args:
+        interface: The interface a caller asked to watch.
+
+    Returns:
+        The refusal message for a bridge, or None for anything else.
+
+    Examples:
+        >>> bridge_refusal("en0") is None
+        True
+        >>> "member port" in bridge_refusal("bridge100")
+        True
+
+    """
+
+    if _BRIDGE_NAME.fullmatch(interface) is None:
+        return None
+    return (
+        f"{interface!r} is a bridge, and macOS shows a capture on a bridge only the frames delivered to this "
+        f"host - never the replies the bridge forwards to a guest - so it would report a machine that did ask "
+        f"for an address as one that never did. Watch the guest's own member port instead: "
+        f"'ifconfig {interface}' lists the members"
+    )
 
 
 def _permission_error(exc: OSError) -> IPScoutPermissionError:
@@ -178,7 +227,9 @@ def open_capture(interface: str, *, promiscuous: bool = True) -> BpfCapture:
     """Open a capture of one interface through a BPF device.
 
     Args:
-        interface: The interface to watch, for example a bridge like ``bridge0``.
+        interface: The interface to watch: a physical interface, or for a
+            virtual machine the guest's own member port of its bridge (for
+            example its ``vmenet`` or ``feth`` interface), never the bridge.
         promiscuous: Whether to ask for promiscuous mode. Leaving it on is
             almost always right; see this module's docstring for what turning
             it off stops you seeing.
@@ -188,11 +239,15 @@ def open_capture(interface: str, *, promiscuous: bool = True) -> BpfCapture:
 
     Raises:
         IPScoutPermissionError: The process may not open a BPF device.
-        IPScoutUnsupportedError: There is no such interface, or it does not
+        IPScoutUnsupportedError: The interface is a bridge (see
+            ``bridge_refusal``), there is no such interface, or it does not
             deliver Ethernet frames.
 
     """
 
+    refusal = bridge_refusal(interface)
+    if refusal is not None:
+        raise IPScoutUnsupportedError(refusal)
     _require_bpf()
     try:
         descriptor, buffer_length = open_bpf_device(interface, promiscuous=promiscuous, complete_headers=False)
@@ -208,7 +263,7 @@ def open_capture(interface: str, *, promiscuous: bool = True) -> BpfCapture:
         msg = (
             f"{interface!r} reports link type {link_type}, not Ethernet ({DLT_EN10MB}). Frames there are not "
             f"Ethernet-framed - loopback prefixes a protocol family instead - so reading them as Ethernet would "
-            f"decode the wrong bytes. Name the bridge or physical interface the traffic is on"
+            f"decode the wrong bytes. Name the physical interface or the guest's member port the traffic is on"
         )
         raise IPScoutUnsupportedError(msg)
 

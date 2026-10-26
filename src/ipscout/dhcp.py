@@ -527,9 +527,11 @@ def observe_dhcp_session(  # noqa: PLR0913 - public API: every knob is keyword-o
     Args:
         mac: The hardware address to watch for, in any common written form.
         interface: Which interface to watch. Defaults to the one carrying the
-            default route, which is a guess: **name the bridge explicitly for
-            a virtual machine**, because the bridge a guest boots on is
-            frequently not the routed interface.
+            default route, which is a guess: **name the interface explicitly
+            for a virtual machine**, because the bridge a guest boots on is
+            frequently not the routed interface. On Linux that is the bridge;
+            on macOS it is the guest's own member port, because a macOS bridge
+            is refused (see the note on :func:`observe_dhcp`).
         timeout: Seconds to watch before giving up on the machine appearing.
         settle: Seconds of quiet, after the last new address, before
             :meth:`DhcpSession.result` answers. See its note.
@@ -573,7 +575,8 @@ def observe_dhcp(  # noqa: PLR0913 - public API: every knob is keyword-only and 
     Args:
         mac: The hardware address to watch for, in any common written form.
         interface: Which interface to watch. Defaults to the one carrying the
-            default route; name the bridge explicitly for a virtual machine.
+            default route; for a virtual machine name the bridge on Linux and
+            the guest's own member port on macOS, where a bridge is refused.
             On Windows this may also be the IPv4 address to bind, since
             ``SIO_RCVALL`` binds to an address rather than to a device.
         timeout: Seconds to watch before giving up.
@@ -595,8 +598,8 @@ def observe_dhcp(  # noqa: PLR0913 - public API: every knob is keyword-only and 
             refused, worded as :func:`observe_dhcp_session` words it.
         IPScoutPermissionError: Capturing needs a privilege this process does
             not have.
-        IPScoutUnsupportedError: This platform cannot capture, or the named
-            interface does not exist.
+        IPScoutUnsupportedError: This platform cannot capture, the named
+            interface does not exist, or it is a macOS bridge.
         IPScoutError: The capture stopped part-way through the window.
 
     Note:
@@ -605,7 +608,10 @@ def observe_dhcp(  # noqa: PLR0913 - public API: every knob is keyword-only and 
         guests. Windows uses ``SIO_RCVALL``, which shows what reaches this
         host's own interface - on a Hyper-V virtual switch that excludes other
         guests unless the port is configured to mirror. macOS reads a BPF
-        device bound to the interface, as root, and sees what Linux sees.
+        device bound to the interface, as root; on a member port that is what
+        Linux sees on the bridge, but a BPF device on a macOS bridge sees only
+        frames delivered to this host, never the replies forwarded to a guest,
+        so a macOS bridge is refused rather than answered with an empty list.
 
         **The address the machine most likely settled on is the last element,
         not the first.** A pool that hands out an address the guest declines

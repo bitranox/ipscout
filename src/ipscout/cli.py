@@ -1178,7 +1178,7 @@ def cli_wake(ctx: click.Context, mac: str, *, broadcast: str, port: int) -> None
 
 @cli.command("observe-dhcp", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("mac")
-@option("--interface", default=None, help="Interface to watch. Defaults to the one carrying the default route; name the bridge for a VM.")
+@option("--interface", default=None, help="Interface to watch (default: the routed one). For a VM: the bridge on Linux, the guest's member port on macOS.")
 # The DHCP watch has no settings model of its own, so the report that records
 # the window and the settle carries the declaration; converting through it
 # refuses a bad value as a usage error before any capture socket is opened.

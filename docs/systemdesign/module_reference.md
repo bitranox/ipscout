@@ -350,13 +350,18 @@ load-bearing and each was measured rather than reasoned:
   duplicates de-duplicate regardless, so a narrower filter buys no precision
   and can only lose addresses.
 
-The two backends are NOT equivalent, and the shared function name must not be
+The three backends are NOT equivalent, and the shared function name must not be
 read as saying they are. `AF_PACKET` bound to a Linux bridge sees the frames
 the bridge forwards to its guests, which is the case the feature was built for.
-`SIO_RCVALL` sees what reaches this host's own interface; on a Hyper-V virtual
-switch that excludes other guests unless the port mirrors. Windows also delivers
-bare IPv4 packets with no link header, which the codec already accepts because
-it detects that shape from the data rather than from `sys.platform`.
+A BPF device bound to a macOS bridge does not: it sees only frames delivered to
+this host (measured: nothing without a bridge address, with one only
+broadcasts, never a reply unicast to the guest), so `dhcp_macos.open_capture`
+refuses a `bridge<N>` interface and names the guest's member port, where the
+whole exchange is visible. `SIO_RCVALL` sees what reaches this host's own
+interface; on a Hyper-V virtual switch that excludes other guests unless the
+port mirrors. Windows also delivers bare IPv4 packets with no link header, which
+the codec already accepts because it detects that shape from the data rather
+than from `sys.platform`.
 
 Which platforms CI can actually exercise is the inverse of the intuitive guess,
 and it was measured rather than assumed: `windows-latest` runs elevated, so the
@@ -364,12 +369,14 @@ Windows backend is covered on every push, while `ubuntu-latest` (euid 1001) and
 `macos-latest` (euid 501) are unprivileged and always skip theirs.
 `tests/test_dhcp_capability_probe.py` records that per runner.
 
-The macOS backend is therefore the one whose device path has never been run:
-Linux is exercised on a developer box as root and against a real bridge, Windows
-on every CI push, and macOS nowhere. Its ioctl encoding is pinned against the
-values in `<net/bpf.h>` and its record splitting against hand-built buffers, so
-the arithmetic is proven; the syscalls are not. That is stated in the module
-rather than left for a reader to discover.
+Linux is exercised on a developer box as root and against a real bridge, and
+Windows on every CI push. The macOS backend runs only in the `host_mutating`
+tests, as root on a macOS runner VM: `tests/test_dhcp_macos_live.py` captures
+offers written onto a `feth` pair, and `tests/test_dhcp_macos_bridge_live.py`
+watches a real macOS DHCP client's handshake from its member port of a bridge
+and checks the bridge itself is refused. Its ioctl encoding is also pinned
+against the values in `<net/bpf.h>` and its record splitting against hand-built
+buffers on every platform. It has not run on physical hardware.
 
 ## The error contract
 

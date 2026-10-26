@@ -456,18 +456,24 @@ that could not run.
 
 Needs elevation on every platform: root or `CAP_NET_RAW` on Linux, root on
 macOS, Administrator on Windows. Ask `ipscout.dhcp_capture_available()` first.
-The macOS backend's device path was measured as root on a macOS runner VM,
-capturing frames on a `feth` pair, not yet on physical hardware or a bridge
-watching a real guest boot; on macOS name a bridge or physical interface rather
-than `lo0`, which is not Ethernet-framed and is refused. The interface goes into promiscuous mode for the session's lifetime,
-which is not optional in practice: on a bridge a reply is forwarded to the
-guest's own port and a Linux client does not set the broadcast flag that would
-make it visible otherwise.
+The macOS backend was measured as root on a macOS runner VM, watching a real
+macOS DHCP client's handshake from its member port of a bridge, through to the
+client binding the offered address; not yet on physical hardware. On macOS
+name a physical interface or the guest's member port, not `lo0`, which is not
+Ethernet-framed and is refused. The interface goes into promiscuous mode for the
+session's lifetime, which is not optional in practice: a reply is often unicast
+to the guest's own hardware address, and a Linux client does not set the
+broadcast flag that would make it visible otherwise.
 
 The backends do not all see the same traffic, and it is worth knowing which you
-are on. Linux binds `AF_PACKET` and macOS a `/dev/bpf` device to the interface
-you name, so pointing either at a bridge shows the frames the bridge forwards to
-its guests. Windows uses
+are on. Linux binds `AF_PACKET` to the interface you name, so pointing it at a
+bridge shows the frames the bridge forwards to its guests. **macOS does not:** a
+`/dev/bpf` device bound to a bridge sees only frames delivered to this host -
+measured, nothing at all without a bridge address, and with one only broadcasts,
+never a reply unicast to the guest - so a macOS bridge (`bridge<N>`) is refused
+with `IPScoutUnsupportedError` rather than answered with an empty list. Watch
+the guest's own member port instead; `ifconfig bridge100` lists the members,
+and on a member port the whole exchange is visible. Windows uses
 `SIO_RCVALL` on a raw socket, which shows what reaches this host's own
 interface - on a Hyper-V virtual switch that does **not** include other guests'
 traffic unless the port is configured to mirror it. On Windows `interface=` may

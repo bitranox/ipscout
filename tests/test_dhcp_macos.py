@@ -1,15 +1,12 @@
 """The macOS capture backend, asserted from any platform where possible.
 
-No CI runner can open a BPF device - measured, ``/dev/bpf0`` is refused with
-EACCES on every macos-latest lane - and this was written without a Mac to hand.
-So the device path is unproven and says so in the module docstring, and
-everything that does NOT need the device is pinned here instead: the ioctl
-encoding against the numbers in ``<net/bpf.h>``, the record splitting against
-hand-built buffers, and the refusals.
-
-That split is the same one that made the Windows layout trustworthy before the
-socket was ever opened: assert the arithmetic, and be honest that the syscall
-is untested.
+The unprivileged CI lanes cannot open a BPF device - measured, ``/dev/bpf0`` is
+refused with EACCES on every macos-latest lane - so the device path runs only in
+the root-only ``host_mutating`` tests (``test_dhcp_macos_live.py``,
+``test_dhcp_macos_bridge_live.py``). Everything that does NOT need the device is
+pinned here instead, on every platform: the ioctl encoding against the numbers
+in ``<net/bpf.h>``, the record splitting against hand-built buffers, and the
+refusals.
 """
 
 from __future__ import annotations
@@ -30,7 +27,7 @@ from ipscout.bpf import (
     BpfDevice,
     iter_bpf_frames,
 )
-from ipscout.dhcp_macos import capture_available, open_capture
+from ipscout.dhcp_macos import bridge_refusal, capture_available, open_capture
 from ipscout.errors import IPScoutPermissionError, IPScoutUnsupportedError
 
 pytestmark = pytest.mark.os_agnostic
@@ -169,8 +166,29 @@ def test_a_real_capture_opens_or_refuses_with_the_remedy_named() -> None:
 def test_loopback_is_refused_because_it_is_not_ethernet_framed() -> None:
     # lo0 reports DLT_NULL, which prefixes a protocol family rather than an
     # Ethernet header, so reading it as Ethernet would decode the wrong bytes
-    # rather than nothing. It has to be refused by name.
+    # rather than nothing. It is refused by its link type, not by its name.
     if not capture_available():
         pytest.skip("cannot open a BPF device here")
     with pytest.raises(IPScoutUnsupportedError, match="not Ethernet"):
         open_capture("lo0")
+
+
+# --------------------------------------------------------------------------
+# A bridge: macOS never shows it the frames it forwards to a guest
+# --------------------------------------------------------------------------
+# Measured on a macos-latest runner with a real macOS DHCP client behind a bridge of feth
+# members: BPF on the bridge saw nothing without a bridge address, and with one only the frames
+# delivered to this host (broadcasts) - never a reply unicast to the guest - while both member
+# ports saw the whole exchange. An empty list there would read as "the machine never asked".
+
+
+@pytest.mark.parametrize("name", ["bridge0", "bridge100"])
+def test_a_bridge_is_refused_with_the_member_port_named_as_the_remedy(name: str) -> None:
+    with pytest.raises(IPScoutUnsupportedError, match="member port") as caught:
+        open_capture(name)
+    assert name in str(caught.value)
+
+
+@pytest.mark.parametrize("name", ["en0", "feth740", "vmenet0", "bridge", "bridgeX", "mybridge0", "bridge0x"])
+def test_only_a_macos_bridge_name_is_refused_as_a_bridge(name: str) -> None:
+    assert bridge_refusal(name) is None
