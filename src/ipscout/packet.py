@@ -52,6 +52,7 @@ __all__ = [
     "ECHO_REQUEST_V6",
     "HEADER_SIZE",
     "IPV4_MIN_HEADER_SIZE",
+    "IPV6_HEADER_SIZE",
     "MAGIC",
     "MAX_IP_LENGTH",
     "MAX_PAYLOAD_SIZE_IPV4",
@@ -69,6 +70,8 @@ __all__ = [
     "is_time_exceeded",
     "max_payload_size",
     "parse_echo_reply",
+    "parse_echo_request",
+    "quoted_echo_request",
     "require_payload_size",
     "strip_ip_header",
 ]
@@ -600,3 +603,93 @@ def is_time_exceeded(datagram: bytes, *, family: AddressFamily) -> bool:
         return False
     expected = TIME_EXCEEDED_V6 if family is AddressFamily.IPV6 else TIME_EXCEEDED_V4
     return body[0] == expected
+
+
+#: An IPv6 header, which has no length field because its fixed part is all of
+#: it; extension headers follow as separate headers, and an echo request
+#: carries none.
+IPV6_HEADER_SIZE = 40
+
+
+def parse_echo_request(datagram: bytes, *, family: AddressFamily) -> ParsedReply | None:
+    """Decode bytes as one of our echo requests, or return None.
+
+    An ICMP error names the probe it answers by quoting that probe: the
+    error queue hands back the request as it was sent, and a Time Exceeded
+    message carries it after the router's own header. Either way the request
+    is all there is to match on, so only its type is checked here and the
+    caller compares the sequence, and the token when the quote reaches it.
+
+    Args:
+        datagram: Bytes starting at the ICMP header of a request.
+        family: Which family's echo-request type to expect.
+
+    Returns:
+        The decoded request, or ``None`` when the bytes are not an echo
+        request of this family. A quote cut short after the header still
+        parses, with ``token`` ``None``: a Linux ping socket's error queue
+        hands back only the eight header bytes.
+
+    Examples:
+        >>> datagram, token = build_echo_request(sequence=4, token=b"abcdefgh")
+        >>> parse_echo_request(datagram, family=AddressFamily.IPV4).sequence
+        4
+        >>> parse_echo_request(datagram[:HEADER_SIZE], family=AddressFamily.IPV4).token is None
+        True
+        >>> parse_echo_request(datagram, family=AddressFamily.IPV6) is None
+        True
+
+    """
+
+    if len(datagram) < HEADER_SIZE:
+        return None
+    parsed = parse_echo_reply(datagram)
+    expected = ECHO_REQUEST_V6 if family is AddressFamily.IPV6 else ECHO_REQUEST_V4
+    return parsed if parsed is not None and parsed.icmp_type == expected else None
+
+
+def _quoted_datagram(body: bytes, *, family: AddressFamily) -> bytes | None:
+    """Return the IP datagram a Time Exceeded ``body`` quotes, from its IP header on."""
+
+    quoted = body[HEADER_SIZE:]
+    if family is AddressFamily.IPV6:
+        if len(quoted) < IPV6_HEADER_SIZE or (quoted[0] >> 4) != AddressFamily.IPV6.ip_version:
+            return None
+        return quoted[IPV6_HEADER_SIZE:]
+    header_len = ipv4_header_length(quoted)
+    return None if header_len is None else quoted[header_len:]
+
+
+def quoted_echo_request(datagram: bytes, *, family: AddressFamily) -> ParsedReply | None:
+    """Return the echo request a received Time Exceeded message quotes, or None.
+
+    A router that discards a probe sends back its own ICMP header, then the
+    IP header and at least the first eight bytes of the probe it discarded
+    (RFC 792; RFC 1812 asks for as much as fits). That quote is what ties the
+    message to one probe, which matters on a raw socket: it receives every
+    ICMP message for the host, another process's traceroute included.
+
+    Args:
+        datagram: The bytes as received, with or without a leading IPv4
+            header (a raw IPv6 socket never delivers one).
+        family: Which family's numbering and headers apply.
+
+    Returns:
+        The quoted request, or ``None`` when this is not a Time Exceeded
+        message quoting one of this family's echo requests.
+
+    Examples:
+        >>> request, _ = build_echo_request(sequence=3, token=b"abcdefgh")
+        >>> inner_ip = b"\\x45" + bytes(19)
+        >>> message = bytes([TIME_EXCEEDED_V4]) + bytes(7) + inner_ip + request[:HEADER_SIZE]
+        >>> quoted_echo_request(b"\\x45" + bytes(19) + message, family=AddressFamily.IPV4).sequence
+        3
+        >>> quoted_echo_request(request, family=AddressFamily.IPV4) is None
+        True
+
+    """
+
+    if not is_time_exceeded(datagram, family=family):
+        return None
+    quoted = _quoted_datagram(strip_ip_header(datagram), family=family)
+    return None if quoted is None else parse_echo_request(quoted, family=family)

@@ -9,6 +9,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 - `subnet_info(interfaces=...)`: describe the given interfaces instead of reading this host's,
   as `local_networks(interfaces=...)` already does.
+- `packet.parse_echo_request` and `packet.quoted_echo_request`: read the echo request an ICMP
+  error quotes, from an error-queue entry or from a received Time Exceeded message.
 - `InterfaceAddress.cidr` / `.network`, `SubnetInfo.cidr` and `Neighbour.address`: the text and
   parsed views of a record's address as plain properties, so they do not appear in JSON output.
   `models.interface_cidr` / `interface_network` are the one derivation behind them.
@@ -80,6 +82,17 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 - A `getaddrinfo` result of neither IP family is skipped instead of being reported as IPv4.
 - `tcpsyn.read_reply` refuses a packet whose version nibble is not 4, as the other IPv4 parsers do.
+- `atraceroute` / `atrace_path` report the routers along the path. The asyncio ICMP transport
+  never read the Linux error queue, so every hop read as silent, and the unread error kept the
+  socket readable, so the event loop spun at full CPU for the rest of the walk.
+- An ICMP error is credited only to the probe it quotes, by sequence (and by token where the quote
+  carries it), in the sync and the asyncio transport. Before, an error that arrived after its
+  probe gave up made the next probe's send fail, so that probe read as lost without being sent,
+  and an entry left on the error queue was read as the answer of a later hop that timed out,
+  which then showed an earlier hop's router.
+- Traceroute over a raw ICMP socket without an error queue (macOS as root) reports the routers:
+  the receive loop discarded their Time Exceeded messages as foreign traffic. Checked on Linux
+  with a raw socket that refuses `IP_RECVERR`, not yet on a Mac.
 
 ## [2.3.0] 2026-10-26 12:19:25
 

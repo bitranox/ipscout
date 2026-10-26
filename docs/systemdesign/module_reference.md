@@ -173,10 +173,15 @@ expired hops on the error queue, on any socket. macOS surfaces them nowhere on a
 but delivers them as ordinary ICMP Time Exceeded packets on a **raw** one, which a privileged
 process gets - so macOS traces perfectly well as root, through exactly the same code.
 
-An earlier version of this document said root did not fix it. That was a conclusion drawn from
-measuring only the unprivileged case, and it was wrong: the distinction was never the operating
-system, it was the socket type. The TCP transport is refused through the same predicate for the
-same reason, having no hop limit to expire at all.
+The distinction is the socket type, not the operating system. The TCP transport is refused
+through the same predicate, having no hop limit to expire at all.
+
+Every ICMP error is credited only to the probe it quotes: the error-queue entry hands back the
+request as sent, and a Time Exceeded datagram carries it after the router's header. The quote
+holds the sequence, and the token when it reaches that far (a Linux ping socket's error queue
+returns only the eight header bytes). Both transports drain the error queue before every send
+and whenever the socket reports an error. An entry left unread keeps the socket readable, which
+spins an event loop, and makes the kernel refuse the next send with its errno.
 
 ### The Linux socket-option fallback
 
