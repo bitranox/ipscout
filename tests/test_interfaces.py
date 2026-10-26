@@ -8,7 +8,7 @@ import pytest
 
 import ipscout
 from ipscout.interfaces import local_interfaces
-from ipscout.interfaces_posix import network_of
+from ipscout.models import InterfaceAddress
 from ipscout.resolve import zone_index
 
 pytestmark = pytest.mark.os_agnostic
@@ -110,7 +110,7 @@ def test_the_records_are_immutable() -> None:
     ],
 )
 def test_a_network_is_derived_from_an_address_and_prefix(address: str, prefix: int, expected: str) -> None:
-    assert network_of(address, prefix) == expected
+    assert str(InterfaceAddress(address=address, prefix_len=prefix).network) == expected
 
 
 def test_the_public_surface_exposes_the_enumeration() -> None:

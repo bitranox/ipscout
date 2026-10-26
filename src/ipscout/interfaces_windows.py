@@ -22,10 +22,9 @@ from __future__ import annotations
 
 import ctypes
 import socket
-from typing import NamedTuple
 
 from .arp import format_hardware_address
-from .models import AddressFamily, Interface, InterfaceAddress
+from .models import AddressFamily, FamilyAddress, Interface, InterfaceAddress
 from .winapi import MAX_ADAPTER_ADDRESS_LENGTH, MS_LAYOUT, NO_ERROR, WIN_AF_UNSPEC, family_from_win, iphlpapi
 
 __all__ = ["list_interfaces"]
@@ -119,24 +118,7 @@ _IpAdapterAddresses._fields_ = (
 )
 
 
-class _IpAddress(NamedTuple):
-    """One IP address read out of a ``SOCKET_ADDRESS``.
-
-    The same record :mod:`ipscout.interfaces_posix` reads out of a sockaddr,
-    with the same field names, so the two backends read alike.
-
-    Attributes:
-        family: The address family, decoded from the ``AF_INET`` /
-            ``AF_INET6`` number Windows writes where the sockaddr is read.
-        address: The address in its textual form, without a zone.
-
-    """
-
-    family: AddressFamily
-    address: str
-
-
-def _sockaddr_text(address: _SocketAddress) -> _IpAddress | None:
+def _sockaddr_text(address: _SocketAddress) -> FamilyAddress | None:
     """Return the family and text form of a ``SOCKET_ADDRESS``.
 
     This is where the raw two-byte family becomes an
@@ -160,9 +142,9 @@ def _sockaddr_text(address: _SocketAddress) -> _IpAddress | None:
     # only on Windows, and these bytes may be decoded anywhere.
     family = family_from_win(int.from_bytes(raw[:_FAMILY_END], "little"))
     if family is AddressFamily.IPV4 and len(raw) >= _IPV4_ADDR.stop:
-        return _IpAddress(family, socket.inet_ntop(family.socket_family, raw[_IPV4_ADDR]))
+        return FamilyAddress(family, socket.inet_ntop(family.socket_family, raw[_IPV4_ADDR]))
     if family is AddressFamily.IPV6 and len(raw) >= _IPV6_ADDR.stop:
-        return _IpAddress(family, socket.inet_ntop(family.socket_family, raw[_IPV6_ADDR]))
+        return FamilyAddress(family, socket.inet_ntop(family.socket_family, raw[_IPV6_ADDR]))
     return None
 
 
@@ -191,15 +173,6 @@ def list_interfaces() -> list[Interface]:  # pragma: no cover - Windows only
     """
 
     library = iphlpapi()
-    library.GetAdaptersAddresses.restype = ctypes.c_uint32
-    library.GetAdaptersAddresses.argtypes = (
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_uint32),
-    )
-
     size = ctypes.c_uint32(_INITIAL_BUFFER)
     flags = _GAA_FLAG_SKIP_ANYCAST | _GAA_FLAG_SKIP_MULTICAST | _GAA_FLAG_INCLUDE_PREFIX
     buffer = ctypes.create_string_buffer(size.value)

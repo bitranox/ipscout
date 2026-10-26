@@ -43,23 +43,22 @@ Note:
 from __future__ import annotations
 
 import contextlib
-import math
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
 
 from .api import is_reachable
+from .arp import require_mac
 from .bootp import DhcpReply
 from .errors import IPScoutError, IPScoutUnsupportedError, refused_arguments
 
 # The library-wide probe wait, aliased: this module's own DEFAULT_TIMEOUT is the
 # DHCP watch window, a different quantity.
 from .models import DEFAULT_TIMEOUT as _PROBE_TIMEOUT
-from .models import MAX_TIMEOUT, Port, Timeout, require_timeout
-from .neighbours import normalise_mac
+from .models import Port, Settle, Timeout
 from .routes import default_gateway
 
 if TYPE_CHECKING:
@@ -139,6 +138,39 @@ class _ReachabilityProbe(BaseModel):
     probe_timeout: Timeout = _PROBE_TIMEOUT
 
 
+class _WatchSettings(BaseModel):
+    """The arguments of one DHCP watch, checked before the capture opens.
+
+    Refused before the capture opens rather than after, so a typo is the same
+    error on every host instead of being masked by a permission failure on the
+    ones that cannot capture. ``timeout`` and ``settle`` are the types the
+    :class:`ipscout.models.ObserveDhcpReport` this session feeds declares, so
+    a value that report would refuse (``nan``, a settle past ``MAX_TIMEOUT``)
+    is refused here, before the watch, not when the report is built after it.
+    Strict like :class:`_ReachabilityProbe`, so ``"2"`` is not a timeout and
+    ``True`` is not a settle; a strict float still takes an ``int``.
+
+    Examples:
+        >>> _WatchSettings(mac="02-00-5E-10-00-00", timeout=60, settle=0).mac
+        '02:00:5e:10:00:00'
+        >>> _WatchSettings(mac="02:00:5e:10:00:00", timeout="2", settle=0)
+        Traceback (most recent call last):
+        ...
+        pydantic_core._pydantic_core.ValidationError: ...
+
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    #: The address to watch for, stored canonical: replies are matched on it
+    #: by exact string comparison.
+    mac: Annotated[str, AfterValidator(require_mac)]
+    #: Seconds to watch in all.
+    timeout: Timeout
+    #: Seconds of quiet after the last new address.
+    settle: Settle
+
+
 def _the_exchange_has_gone_quiet(*, last_seen_at: float | None, now: float, started_at: float, timeout: float, settle: float) -> bool:
     """Return whether watching can stop.
 
@@ -200,27 +232,16 @@ class DhcpSession:
         capture: PacketCapture | None = None,
         promiscuous: bool = True,
     ) -> None:
-        wanted = normalise_mac(mac)
-        if wanted is None:
-            # Refused here rather than after the capture opens, so a typo is
-            # the same error on every host instead of being masked by a
-            # permission failure on the ones that cannot capture.
-            msg = f"not a hardware address: {mac!r}"
-            raise ValueError(msg)
-        # require_timeout also refuses a non-finite window: NaN passed the old
-        # comparisons and failed only when the report was built, after watching.
-        require_timeout(timeout)
-        # Bounded like every other wait: the report this session feeds refuses a
-        # settle past MAX_TIMEOUT, so a finite 1e12 would run the watch and then
-        # fail to report it.
-        if not (math.isfinite(settle) and 0 <= settle <= MAX_TIMEOUT):
-            msg = f"settle must be a finite number of seconds from 0 to {MAX_TIMEOUT:g}, got {settle!r}"
-            raise ValueError(msg)
+        # Checked here, before anything opens a capture: see _WatchSettings.
+        try:
+            settings = _WatchSettings(mac=mac, timeout=timeout, settle=settle)
+        except ValidationError as refused:
+            raise refused_arguments("DHCP watch", refused) from refused
 
-        self._mac = wanted
+        self._mac = settings.mac
         self._interface = interface
-        self._timeout = timeout
-        self._settle = settle
+        self._timeout = settings.timeout
+        self._settle = settings.settle
         self._injected = capture
         self._promiscuous = promiscuous
 
@@ -509,8 +530,11 @@ def observe_dhcp_session(  # noqa: PLR0913 - public API: every knob is keyword-o
         A session that has not started yet. Entering it opens the capture.
 
     Raises:
-        ValueError: The hardware address is not one, or the window is not a
-            positive number of seconds.
+        ValueError: The hardware address is not one, the window is not a
+            number of seconds above 0 and at most ``MAX_TIMEOUT``, or the
+            settle is not one from 0 to ``MAX_TIMEOUT``, as
+            ``DHCP watch refused its arguments: <field>: <reason>`` with one
+            ``; ``-separated part per bad argument.
 
     Examples:
         >>> session = observe_dhcp_session("02:00:5e:10:00:00", interface="br0")
@@ -554,7 +578,8 @@ def observe_dhcp(  # noqa: PLR0913 - public API: every knob is keyword-only and 
         nothing appeared, which is an answer rather than a failure.
 
     Raises:
-        ValueError: The hardware address is not one.
+        ValueError: The hardware address, the window or the settle is
+            refused, worded as :func:`observe_dhcp_session` words it.
         IPScoutPermissionError: Capturing needs a privilege this process does
             not have.
         IPScoutUnsupportedError: This platform cannot capture, or the named

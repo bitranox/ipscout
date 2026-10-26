@@ -103,6 +103,7 @@ __all__ = [
     "Timeout",
     "TraceHop",
     "WakeReport",
+    "interface_cidr",
     "interface_network",
     "is_blank_target",
     "names_a_neighbour",
@@ -259,12 +260,12 @@ def require_settle(settle: float) -> float:
         >>> require_settle(-1.0)
         Traceback (most recent call last):
         ...
-        ValueError: settle must be a finite number of seconds from 0 to 2.14748e+06, got -1.0
+        ValueError: settle must be a finite number of seconds from 0 to 2147483, got -1.0
 
     """
 
     if not (math.isfinite(settle) and 0 <= settle <= MAX_TIMEOUT):
-        msg = f"settle must be a finite number of seconds from 0 to {MAX_TIMEOUT:g}, got {settle!r}"
+        msg = f"settle must be a finite number of seconds from 0 to {MAX_TIMEOUT:.0f}, got {settle!r}"
         raise ValueError(msg)
     return settle
 
@@ -390,6 +391,21 @@ def names_a_neighbour(address: IPv4Address | IPv6Address) -> bool:
     """
 
     return not (address.is_multicast or address.is_unspecified)
+
+
+def interface_cidr(address: str, prefix_len: int) -> str:
+    """Return ``address/prefix_len``, the CIDR text of an interface address, host bits and zone kept.
+
+    The one spelling of that pair as text, shared by every record that holds
+    an address beside its prefix length.
+
+    Examples:
+        >>> interface_cidr("192.0.2.77", 24)
+        '192.0.2.77/24'
+
+    """
+
+    return f"{address}/{prefix_len}"
 
 
 def interface_network(address: str, prefix_len: int) -> IPv4Network | IPv6Network:
@@ -1115,7 +1131,7 @@ class InterfaceAddress(_Frozen):
 
         """
 
-        return f"{self.address}/{self.prefix_len}"
+        return interface_cidr(self.address, self.prefix_len)
 
     @property
     def network(self) -> IPv4Network | IPv6Network:
@@ -1331,12 +1347,24 @@ class SubnetInfo(_Frozen):
     #: Bytes; ``None`` where the OS did not say, never zero.
     mtu: _Mtu | None = None
 
+    @property
+    def cidr(self) -> str:
+        """Return the address in CIDR form, host bits and any zone kept.
+
+        Examples:
+            >>> SubnetInfo(interface="eth0", address="192.0.2.77", prefix_len=24, network="192.0.2.0/24").cidr
+            '192.0.2.77/24'
+
+        """
+
+        return interface_cidr(self.address, self.prefix_len)
+
     @model_validator(mode="after")
     def _addressing_agrees(self) -> SubnetInfo:
         _require_prefix_len(self.prefix_len, require_address(self.address, self.family))
         expected = interface_network(self.address, self.prefix_len)
         if self.network != expected:
-            msg = f"network must be {expected} for {self.address}/{self.prefix_len}, got {self.network}"
+            msg = f"network must be {expected} for {self.cidr}, got {self.network}"
             raise ValueError(msg)
         if self.broadcast is not None and (not isinstance(expected, IPv4Network) or ip_address(self.broadcast) != expected.broadcast_address):
             msg = f"broadcast must be the broadcast address of {expected}, got {self.broadcast!r}"

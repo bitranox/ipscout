@@ -7,6 +7,7 @@ Contents:
     ipv4_neighbour_row: Pure builder of the ``MIB_IPNET_ROW2`` both take.
     raise_for_status / removed_from_status: The Win32 error code, mapped to an
         outcome.
+    request_address: The packed address an active resolution asks about.
 
 Note:
     The read is passive - it reports what the stack already learned and sends
@@ -18,13 +19,12 @@ Note:
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
-import socket
 
 from .arp import MAC_LENGTH, format_mac
-from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
-from .models import AddressFamily, Neighbour, NeighbourChange, NeighbourState
+from .errors import ARP_SCAN_ALTERNATIVE, IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
+from .models import AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, require_address
+from .resolve import MAX_INTERFACE_INDEX, interface_name, split_zone
 from .winapi import (
     MAX_ADAPTER_ADDRESS_LENGTH,
     MIB_IPNET_ROW2,
@@ -33,8 +33,9 @@ from .winapi import (
     WIN_AF_UNSPEC,
     address_text,
     iphlpapi,
+    sockaddr_inet,
     sockaddr_inet_address,
-    win_family,
+    string_to_ipv4,
 )
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "refuse_unless_unanswered",
     "remove_static_neighbour",
     "removed_from_status",
+    "request_address",
     "resolve_active",
     "set_static_neighbour",
     "state_of",
@@ -86,9 +88,6 @@ def refuse_unless_unanswered(status: int, *, call: str, ip: str) -> None:
 
 #: ERROR_OBJECT_ALREADY_EXISTS: a create met an entry for that address.
 _ERROR_OBJECT_ALREADY_EXISTS = 5010
-
-#: The largest interface index the row's ULONG field holds.
-_MAX_INTERFACE_INDEX = 0xFFFFFFFF
 
 #: NL_NEIGHBOR_STATE, in declaration order.
 _NL_NUD_UNREACHABLE = 0
@@ -191,19 +190,14 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
 
             address = sockaddr_inet_address(row.Address)
             mac = declared_mac(bytes(row.PhysicalAddress), int(row.PhysicalAddressLength))
-            if address is None or mac is None or address.is_multicast or address.is_unspecified:
+            if address is None or mac is None or not names_a_neighbour(address):
                 continue
-
-            interface: str | None = None
-            if int(row.InterfaceIndex):
-                with contextlib.suppress(OSError, ValueError):
-                    interface = socket.if_indextoname(int(row.InterfaceIndex))
 
             found.append(
                 Neighbour(
                     ip=address_text(address),
                     mac=mac,
-                    interface=interface,
+                    interface=interface_name(int(row.InterfaceIndex)),
                     state=state,
                     family=AddressFamily.of_version(address.version),
                 )
@@ -213,27 +207,58 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - Windows on
         library.FreeMibTable(table)
 
 
-def _resolve_ipv6(library: ctypes.CDLL, ip: str) -> str | None:  # pragma: no cover - Windows only
+def request_address(ip: str, family: AddressFamily) -> bytes:
+    """Return the packed address an active resolution asks about, or refuse it.
+
+    Args:
+        ip: The bare address literal to resolve.
+        family: The family it must belong to.
+
+    Returns:
+        The address in network byte order.
+
+    Raises:
+        ValueError: ``ip`` is not an address literal of ``family``, or it
+            carries a zone. Refused before anything is sent, so a request that
+            could not be made is never reported as "nobody answered".
+
+    Examples:
+        >>> request_address("192.0.2.1", AddressFamily.IPV4).hex()
+        'c0000201'
+        >>> request_address("fe80::1%7", AddressFamily.IPV6)
+        Traceback (most recent call last):
+        ...
+        ValueError: 'fe80::1%7' carries a zone, which active resolution on Windows cannot honour: pass the bare address
+
+    """
+
+    # A zone is refused rather than dropped: neither SendARP nor the
+    # ResolveIpNetEntry2 row is given an interface here, so a dropped zone
+    # would let the request leave by another link than the one it names. The
+    # public resolve_active strips the zone before it calls this backend.
+    if split_zone(ip).zone is not None:
+        msg = f"{ip!r} carries a zone, which active resolution on Windows cannot honour: pass the bare address"
+        raise ValueError(msg)
+    return require_address(ip, family).packed
+
+
+def _resolve_ipv6(library: ctypes.CDLL, packed: bytes, ip: str) -> str | None:  # pragma: no cover - Windows only
     """Resolve an IPv6 neighbour through ResolveIpNetEntry2.
 
     Unlike SendARP this needs elevation, so a refusal here is reported as a
     permission problem naming the unprivileged alternative rather than being
-    swallowed.
+    swallowed. ``packed`` is ``ip`` as :func:`request_address` returned it;
+    ``ip`` is kept for the messages.
     """
 
     row = MIB_IPNET_ROW2()
-    row.Address.si_family = win_family(AddressFamily.IPV6)
-    try:
-        row.Address.Ipv6.sin6_addr[:] = socket.inet_pton(AddressFamily.IPV6.socket_family, ip)
-    except OSError:
-        return None
+    row.Address = sockaddr_inet(packed, AddressFamily.IPV6)
 
     status = library.ResolveIpNetEntry2(ctypes.byref(row), None)
     if status == _ERROR_ACCESS_DENIED:
         msg = (
             "active IPv6 resolution uses ResolveIpNetEntry2, which needs Administrator on Windows "
-            "(SendARP, used for IPv4, does not). Run elevated, or use arp_scan(), which resolves "
-            "the same addresses unprivileged"
+            f"(SendARP, used for IPv4, does not). Run elevated, or {ARP_SCAN_ALTERNATIVE}"
         )
         raise IPScoutPermissionError(msg)
     if status != NO_ERROR:
@@ -254,6 +279,9 @@ def resolve_active(ip: str, family: AddressFamily) -> str | None:  # pragma: no 
         The hardware address, or ``None`` when nothing answered.
 
     Raises:
+        ValueError: ``ip`` is not an address literal of ``family``, or it
+            carries a zone: the request could not be made, so it is never
+            reported as "nobody answered".
         IPScoutPermissionError: IPv6 resolution was refused for want of
             elevation. ``ResolveIpNetEntry2`` requires it; ``SendARP`` does
             not, so IPv4 works either way.
@@ -269,19 +297,17 @@ def resolve_active(ip: str, family: AddressFamily) -> str | None:  # pragma: no 
 
     """
 
+    # Checked before the library loads, so a malformed argument is refused the
+    # same way on every platform.
+    packed = request_address(ip, family)
     library = iphlpapi()
 
     if family is AddressFamily.IPV6:
-        return _resolve_ipv6(library, ip)
+        return _resolve_ipv6(library, packed, ip)
 
-    try:
-        packed = socket.inet_pton(family.socket_family, ip)
-    except OSError:
-        return None
-
+    destination = string_to_ipv4(ip)
     buffer = (ctypes.c_uint8 * MAX_ADAPTER_ADDRESS_LENGTH)()
     length = ctypes.c_uint32(MAX_ADAPTER_ADDRESS_LENGTH)
-    destination = ctypes.c_uint32.from_buffer_copy(packed).value
     status = library.SendARP(destination, 0, ctypes.byref(buffer), ctypes.byref(length))
     if status != NO_ERROR:
         refuse_unless_unanswered(int(status), call="SendARP", ip=ip)
@@ -332,18 +358,19 @@ def ipv4_neighbour_row(ip: str, mac: bytes, interface_index: int) -> MIB_IPNET_R
     if len(mac) not in (0, MAC_LENGTH):
         msg = f"a neighbour entry's hardware address is {MAC_LENGTH} bytes (or none, to delete), not {len(mac)}"
         raise ValueError(msg)
-    if not 1 <= interface_index <= _MAX_INTERFACE_INDEX:
-        msg = f"interface index out of range 1-{_MAX_INTERFACE_INDEX}: {interface_index}"
+    if not 1 <= interface_index <= MAX_INTERFACE_INDEX:
+        msg = f"interface index out of range 1-{MAX_INTERFACE_INDEX}: {interface_index}"
         raise ValueError(msg)
     try:
-        packed = socket.inet_pton(AddressFamily.IPV4.socket_family, ip)
-    except OSError as exc:
+        packed = require_address(ip, AddressFamily.IPV4).packed
+    except ValueError as exc:
+        # Reworded rather than passed on: the row takes nothing but a full
+        # dotted quad, and the refusal says which form that is.
         msg = f"{ip!r} is not a dotted-quad IPv4 address"
         raise ValueError(msg) from exc
 
     row = MIB_IPNET_ROW2()
-    row.Address.Ipv4.sin_family = win_family(AddressFamily.IPV4)
-    row.Address.Ipv4.sin_addr[:] = packed
+    row.Address = sockaddr_inet(packed, AddressFamily.IPV4)
     row.InterfaceIndex = interface_index
     row.PhysicalAddress[: len(mac)] = mac
     row.PhysicalAddressLength = len(mac)

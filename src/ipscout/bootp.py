@@ -34,16 +34,15 @@ Note:
 from __future__ import annotations
 
 import enum
-import ipaddress
 import socket
 import struct
 from typing import TYPE_CHECKING, Annotated, NamedTuple
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from .arp import ETH_P_IP, ETH_P_VLAN, ETHERNET, ETHERNET_HEADER_SIZE, HTYPE_ETHERNET, MAC_LENGTH, format_mac, normalise_mac
-from .models import AddressFamily
-from .packet import IPV4_MIN_HEADER_SIZE, UDP_HEADER_SIZE
+from .arp import ETH_P_IP, ETH_P_VLAN, ETHERNET, ETHERNET_HEADER_SIZE, HTYPE_ETHERNET, MAC_LENGTH, format_mac, require_mac
+from .models import AddressFamily, require_address
+from .packet import UDP_HEADER_SIZE, ipv4_header_length
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -158,13 +157,13 @@ def _ip_payload(frame: bytes) -> bytes | None:
 def _looks_like_bare_ipv4(frame: bytes) -> bool:
     """Return whether a buffer is an IPv4 UDP packet with no link header."""
 
-    if len(frame) < IPV4_MIN_HEADER_SIZE or (frame[0] >> 4) != AddressFamily.IPV4.ip_version:
+    header_len = ipv4_header_length(frame)
+    if header_len is None or frame[9] != socket.IPPROTO_UDP:
         return False
-    if frame[9] != socket.IPPROTO_UDP:
-        return False
-    header_len = (frame[0] & 0x0F) * 4
+    # The length fields must also agree with the buffer: the decoder checks
+    # only the first byte, which an Ethernet destination address can share.
     total_len = int.from_bytes(frame[2:4], "big")
-    return header_len >= IPV4_MIN_HEADER_SIZE and header_len <= len(frame) and header_len <= total_len <= len(frame)
+    return header_len <= len(frame) and header_len <= total_len <= len(frame)
 
 
 class _ServerDatagram(NamedTuple):
@@ -190,10 +189,8 @@ def _udp_payload(packet: bytes) -> _ServerDatagram | None:
     the fixed-header size check rather than raising here.
     """
 
-    if len(packet) < IPV4_MIN_HEADER_SIZE or (packet[0] >> 4) != AddressFamily.IPV4.ip_version:
-        return None
-    header_len = (packet[0] & 0x0F) * 4
-    if header_len < IPV4_MIN_HEADER_SIZE or packet[9] != socket.IPPROTO_UDP:
+    header_len = ipv4_header_length(packet)
+    if header_len is None or packet[9] != socket.IPPROTO_UDP:
         return None
     # A non-first fragment carries no UDP header. DHCP is a few hundred bytes
     # and is never legitimately fragmented, so this is somebody else's traffic.
@@ -299,13 +296,13 @@ def _canonical_mac(mac: str) -> str:
 def _ipv4_text(value: str) -> str:
     """Return an IPv4 address in dotted-quad form, refusing anything else."""
 
-    return str(ipaddress.IPv4Address(value))
+    return str(require_address(value, AddressFamily.IPV4))
 
 
 def _offered_ipv4_text(value: str) -> str:
     """Return an offered IPv4 address, refusing ``0.0.0.0``, which offers nothing."""
 
-    address = ipaddress.IPv4Address(value)
+    address = require_address(value, AddressFamily.IPV4)
     if address.is_unspecified:
         msg = f"{value} hands out no address: a request and a DHCPNAK carry it, an offer never does"
         raise ValueError(msg)
@@ -464,10 +461,7 @@ def offers_from_frames(frames: Iterable[bytes], *, mac: str, message_types: froz
 
     """
 
-    wanted = normalise_mac(mac)
-    if wanted is None:
-        msg = f"{mac!r} is not a hardware address"
-        raise ValueError(msg)
+    wanted = require_mac(mac)
     found: list[str] = []
     for frame in frames:
         reply = DhcpReply.from_frame(frame)

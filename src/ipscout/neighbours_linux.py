@@ -24,25 +24,30 @@ from __future__ import annotations
 import contextlib
 import enum
 import errno
-import ipaddress
 import os
 import socket
 import struct
-import time
 from typing import NamedTuple
 
 from .arp import (
     ETH_P_ARP,
-    FRAME_RECEIVE_SIZE,
+    await_answer,
     build_arp_request,
-    build_neighbour_solicitation,
     format_mac,
     parse_arp_reply,
     parse_neighbour_advertisement,
-    solicited_node_multicast,
+    send_neighbour_solicitation,
 )
-from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError, could_not_ask
-from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState
+from .errors import (
+    ARP_SCAN_ALTERNATIVE,
+    PERMISSION_ERRNOS,
+    IPScoutError,
+    IPScoutPermissionError,
+    IPScoutUnsupportedError,
+    could_not_ask,
+    kernel_refused_neighbour_change,
+)
+from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, parse_address
 from .netlink import (
     NLM_F_ACK,
     NLM_F_CREATE,
@@ -59,6 +64,8 @@ from .netlink import (
     open_socket,
     parse_ack,
 )
+from .resolve import interface_name
+from .unixio import packet_family
 
 __all__ = [
     "NeighbourDumpChunk",
@@ -114,22 +121,6 @@ def _state_of(state: int) -> NeighbourState:
     return NeighbourState.OTHER
 
 
-def _is_not_a_neighbour(ip: str) -> bool:
-    """Return whether an address cannot name a neighbour worth reporting.
-
-    Multicast entries carry a MAC derived from the group address rather than
-    learned from a host, and the unspecified address names nobody. Both appear
-    in a raw dump and both would be noise in a scan that answers "which host
-    has this hardware address".
-    """
-
-    try:
-        address = ipaddress.ip_address(ip)
-    except ValueError:  # pragma: no cover - the kernel does not emit these
-        return True
-    return address.is_multicast or address.is_unspecified
-
-
 class _EntryAddresses(NamedTuple):
     """The destination address and link address one neighbour entry carries.
 
@@ -181,16 +172,6 @@ def _read_address_attributes(payload: bytes, family: int) -> _EntryAddresses:
     return _EntryAddresses(ip=ip, mac=mac)
 
 
-def _interface_name(ifindex: int) -> str | None:
-    """Return the interface name for a kernel index, or ``None`` when unknown."""
-
-    if ifindex <= 0:
-        return None
-    with contextlib.suppress(OSError, ValueError):
-        return socket.if_indextoname(ifindex)
-    return None
-
-
 def _neighbour_from_payload(payload: bytes) -> Neighbour | None:
     """Decode one ``RTM_NEWNEIGH`` payload into a neighbour, if it names one.
 
@@ -204,24 +185,22 @@ def _neighbour_from_payload(payload: bytes) -> Neighbour | None:
 
     """
 
-    family, _pad1, _pad2, ifindex, state, _flags, _kind = _NDMSG.unpack(payload[: _NDMSG.size])
+    raw_family, _pad1, _pad2, ifindex, state, _flags, _kind = _NDMSG.unpack(payload[: _NDMSG.size])
     if state & (_NUD_INCOMPLETE | _NUD_FAILED):
         return None
-    if family not in (socket.AF_INET, socket.AF_INET6):
+    family = AddressFamily.of_socket_family(raw_family)
+    if family is None:
         return None
 
-    addresses = _read_address_attributes(payload, family)
+    addresses = _read_address_attributes(payload, raw_family)
     ip, mac = addresses.ip, addresses.mac
-    if ip is None or mac is None or _is_not_a_neighbour(ip):
+    # Multicast entries carry a MAC derived from the group rather than learned
+    # from a host, and the unspecified address names nobody: both would be
+    # noise in a scan that answers "which host has this hardware address".
+    if ip is None or mac is None or not names_a_neighbour(parse_address(ip)):
         return None
 
-    return Neighbour(
-        ip=ip,
-        mac=mac,
-        interface=_interface_name(ifindex),
-        state=_state_of(state),
-        family=AddressFamily.IPV6 if family == socket.AF_INET6 else AddressFamily.IPV4,
-    )
+    return Neighbour(ip=ip, mac=mac, interface=interface_name(ifindex), state=_state_of(state), family=family)
 
 
 class NeighbourDumpChunk(NamedTuple):
@@ -350,7 +329,7 @@ def _permission_error(exc: OSError, what: _Solicitation) -> IPScoutPermissionErr
     return IPScoutPermissionError(
         f"active {what.value} needs a raw socket, so root or CAP_NET_RAW: {exc}. "
         f"Grant it with 'setcap cap_net_raw+ep $(readlink -f $(which python3))', run as root, "
-        f"or use arp_scan(), which resolves the same addresses unprivileged"
+        f"or {ARP_SCAN_ALTERNATIVE}"
     )
 
 
@@ -380,10 +359,7 @@ def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, sourc
 
     """
 
-    af_packet = getattr(socket, "AF_PACKET", None)
-    if not isinstance(af_packet, int):  # pragma: no cover - non-Linux
-        msg = "AF_PACKET is a Linux facility and this process is not on Linux"
-        raise IPScoutUnsupportedError(msg)
+    af_packet = packet_family()
 
     try:
         sock = socket.socket(af_packet, socket.SOCK_RAW, socket.htons(ETH_P_ARP))
@@ -396,19 +372,9 @@ def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, sourc
         sock.bind((interface, ETH_P_ARP))
         sock.settimeout(timeout)
         sock.send(build_arp_request(sender_mac=source_mac, sender_ip=source_ip, target_ip=target_ip))
-
         # A link-layer socket sees every frame on the segment, so most of what
-        # arrives belongs to somebody else and is discarded.
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            sock.settimeout(max(0.01, deadline - time.monotonic()))
-            try:
-                found = parse_arp_reply(sock.recv(FRAME_RECEIVE_SIZE), target_ip)
-            except TimeoutError:
-                return None
-            if found is not None:
-                return found
-        return None
+        # arrives belongs to somebody else and is discarded by the parser.
+        return await_answer(sock, timeout=timeout, parse=lambda frame: parse_arp_reply(frame, target_ip))
     except PermissionError as exc:  # pragma: no cover - bind may also be denied
         raise _permission_error(exc, _Solicitation.ARP) from exc
     except OSError as exc:
@@ -451,22 +417,8 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
         raise _permission_error(exc, _Solicitation.NEIGHBOUR_DISCOVERY) from exc
 
     try:
-        index = socket.if_nametoindex(interface)
-        sock.setsockopt(AddressFamily.IPV6.ip_option_level, socket.IPV6_MULTICAST_IF, index)
-        sock.settimeout(timeout)
-        group = solicited_node_multicast(target_ip)
-        sock.sendto(build_neighbour_solicitation(sender_mac=source_mac, target_ip=target_ip), (group, 0, 0, index))
-
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            sock.settimeout(max(0.01, deadline - time.monotonic()))
-            try:
-                found = parse_neighbour_advertisement(sock.recv(FRAME_RECEIVE_SIZE), target_ip)
-            except TimeoutError:
-                return None
-            if found is not None:
-                return found
-        return None
+        send_neighbour_solicitation(sock, interface=interface, target_ip=target_ip, source_mac=source_mac, timeout=timeout)
+        return await_answer(sock, timeout=timeout, parse=lambda frame: parse_neighbour_advertisement(frame, target_ip))
     except PermissionError as exc:  # pragma: no cover - send may also be denied
         raise _permission_error(exc, _Solicitation.NEIGHBOUR_DISCOVERY) from exc
     except OSError as exc:
@@ -563,14 +515,13 @@ def raise_for_ack(error: int | None, *, action: NeighbourChange) -> None:
     if error is None:
         msg = f"the kernel did not acknowledge the request to {action.value} the neighbour entry"
         raise IPScoutError(msg)
-    if error in (errno.EPERM, errno.EACCES):
+    if error in PERMISSION_ERRNOS:
         msg = (
             f"changing the neighbour table needs root or CAP_NET_ADMIN: {os.strerror(error)}. "
             f"Run as root, or grant it with 'setcap cap_net_admin+ep $(readlink -f $(which python3))'"
         )
         raise IPScoutPermissionError(msg)
-    msg = f"the kernel refused to {action.value} the neighbour entry: {os.strerror(error)} (errno {error})"
-    raise IPScoutError(msg)
+    raise kernel_refused_neighbour_change(action.value, error)
 
 
 def removed_from_ack(error: int | None) -> bool:

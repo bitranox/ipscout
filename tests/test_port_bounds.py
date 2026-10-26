@@ -90,5 +90,5 @@ def test_a_magic_packet_to_a_port_outside_the_range_is_refused_as_an_argument(po
     # A bad argument is a ValueError, not a send failure: before this check
     # the socket layer answered 0 with an OSError on Linux and 70000 with an
     # OverflowError, which the CLI does not catch.
-    with pytest.raises(ValueError, match=rf"^port out of range 1-65535: {port}$"):
+    with pytest.raises(ValueError, match=rf"^wake-on-LAN refused its arguments: port: port out of range 1-65535: {port}$"):
         wake_on_lan("aa:bb:cc:dd:ee:ff", broadcast="127.0.0.1", port=port)

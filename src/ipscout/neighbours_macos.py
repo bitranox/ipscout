@@ -28,19 +28,17 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import ipaddress
 import os
 import select
 import socket
 import time
 
 from .arp import (
-    FRAME_RECEIVE_SIZE,
+    await_answer,
     build_arp_request,
-    build_neighbour_solicitation,
     parse_arp_reply,
     parse_neighbour_advertisement,
-    solicited_node_multicast,
+    send_neighbour_solicitation,
 )
 from .bpf import BpfDevice, iter_bpf_frames, open_bpf_device
 from .bsdroute import (
@@ -67,8 +65,10 @@ from .bsdroute import (
     split_sockaddrs,
     sysctl,
 )
-from .errors import IPScoutError, IPScoutPermissionError, could_not_ask
-from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState
+from .deadline import seconds_left
+from .errors import ARP_SCAN_ALTERNATIVE, PERMISSION_ERRNOS, IPScoutPermissionError, could_not_ask, kernel_refused_neighbour_change
+from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, parse_address
+from .resolve import interface_name
 
 __all__ = [
     "build_add_message",
@@ -136,25 +136,17 @@ def parse_neighbour_dump(data: bytes, family: AddressFamily) -> list[Neighbour]:
 
         if ip is None or mac is None:
             continue
-        try:
-            address = ipaddress.ip_address(ip)
-        except ValueError:  # pragma: no cover - the kernel does not emit these
-            continue
+        address = parse_address(ip)
         # A Neighbour refuses a family that disagrees with its address, so an
         # entry of the other family in this dump is skipped rather than allowed
         # to fail the whole listing.
-        if address.is_multicast or address.is_unspecified or address.version != family.ip_version:
+        if not names_a_neighbour(address) or address.version != family.ip_version:
             continue
-
-        interface: str | None = None
-        if index:
-            with contextlib.suppress(OSError, ValueError):
-                interface = socket.if_indextoname(index)
 
         # The dump reports no per-entry state, so every entry it lists is
         # simply one the kernel holds. Claiming REACHABLE would assert a
         # freshness this interface never provides.
-        found.append(Neighbour(ip=ip, mac=mac, interface=interface, state=NeighbourState.OTHER, family=family))
+        found.append(Neighbour(ip=ip, mac=mac, interface=interface_name(index), state=NeighbourState.OTHER, family=family))
     return found
 
 
@@ -179,7 +171,7 @@ def list_neighbours() -> tuple[Neighbour, ...]:  # pragma: no cover - macOS only
 # Active resolution, over BPF
 # --------------------------------------------------------------------------
 #: The way out offered whenever active resolution is refused for want of root.
-_UNPRIVILEGED_ADVICE = "Run as root, or use arp_scan(), which resolves the same addresses unprivileged"
+_UNPRIVILEGED_ADVICE = f"Run as root, or {ARP_SCAN_ALTERNATIVE}"
 
 
 def _open_bpf(interface: str) -> BpfDevice:  # pragma: no cover - macOS only
@@ -240,7 +232,7 @@ def resolve_active_ipv4(
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            readable, _writable, _failed = select.select([descriptor], [], [], max(0.01, deadline - time.monotonic()))
+            readable, _writable, _failed = select.select([descriptor], [], [], seconds_left(deadline))
             if not readable:
                 return None
             for frame in iter_bpf_frames(os.read(descriptor, buffer_length)):
@@ -281,25 +273,15 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
         raise IPScoutPermissionError(f"active neighbour discovery needs a raw ICMPv6 socket, which is root-only here: {exc}. {_UNPRIVILEGED_ADVICE}") from exc
 
     try:
-        index = socket.if_nametoindex(interface)
-        sock.setsockopt(AddressFamily.IPV6.ip_option_level, socket.IPV6_MULTICAST_IF, index)
-        sock.settimeout(timeout)
-        group = solicited_node_multicast(target_ip)
+        # A PermissionError is the send refused for want of root, so it names
+        # the remedy. The helper's interface lookup reports an unknown name as
+        # a plain OSError, which like every other failure here (the receive
+        # included) falls through to "could not ask" below.
         try:
-            sock.sendto(build_neighbour_solicitation(sender_mac=source_mac, target_ip=target_ip), (group, 0, 0, index))
+            send_neighbour_solicitation(sock, interface=interface, target_ip=target_ip, source_mac=source_mac, timeout=timeout)
         except PermissionError as exc:
             raise IPScoutPermissionError(f"active neighbour discovery was refused: {exc}. {_UNPRIVILEGED_ADVICE}") from exc
-
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            sock.settimeout(max(0.01, deadline - time.monotonic()))
-            try:
-                found = parse_neighbour_advertisement(sock.recv(FRAME_RECEIVE_SIZE), target_ip)
-            except TimeoutError:
-                return None
-            if found is not None:
-                return found
-        return None
+        return await_answer(sock, timeout=timeout, parse=lambda frame: parse_neighbour_advertisement(frame, target_ip))
     except OSError as exc:
         raise could_not_ask(target_ip, interface, exc) from exc
     finally:
@@ -412,11 +394,10 @@ def raise_for_route_errno(error: int, *, action: NeighbourChange) -> None:
 
     if error == 0:
         return
-    if error in (errno.EPERM, errno.EACCES):
+    if error in PERMISSION_ERRNOS:
         msg = f"changing the neighbour table needs root on macOS: {os.strerror(error)}. Run as root"
         raise IPScoutPermissionError(msg)
-    msg = f"the kernel refused to {action.value} the neighbour entry: {os.strerror(error)} (errno {error})"
-    raise IPScoutError(msg)
+    raise kernel_refused_neighbour_change(action.value, error)
 
 
 def removed_from_route_errno(error: int) -> bool:
@@ -465,10 +446,7 @@ def _route_write(message: bytes) -> int:  # pragma: no cover - macOS only
 def _is_listed(ip: str, ifindex: int | None = None) -> bool:  # pragma: no cover - macOS only
     """Return whether the neighbour dump holds an entry for ``ip``, on ``ifindex`` when given."""
 
-    name: str | None = None
-    if ifindex is not None:
-        with contextlib.suppress(OSError, ValueError):
-            name = socket.if_indextoname(ifindex)
+    name = interface_name(ifindex) if ifindex is not None else None
     return any(entry.ip == ip and (ifindex is None or entry.interface == name) for entry in list_neighbours())
 
 

@@ -40,10 +40,11 @@ import sys
 from typing import TYPE_CHECKING
 
 from . import neighbours_linux, neighbours_macos, neighbours_windows
+from .arp import packed_mac, require_mac
 from .errors import IPScoutError, IPScoutUnsupportedError
 from .interfaces import local_interfaces
 from .models import AddressFamily, Neighbour
-from .neighbours import neighbours, normalise_mac
+from .neighbours import neighbours
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -107,7 +108,7 @@ def station_mac(mac: str) -> str:
     """Return ``mac`` normalised, refusing anything that is not one station's address.
 
     Args:
-        mac: A hardware address in any form :func:`~ipscout.neighbours.normalise_mac` reads.
+        mac: A hardware address in any form :func:`~ipscout.arp.require_mac` accepts.
 
     Returns:
         The lowercase colon-separated form.
@@ -126,11 +127,8 @@ def station_mac(mac: str) -> str:
 
     """
 
-    normalised = normalise_mac(mac)
-    if normalised is None:
-        msg = f"{mac!r} is not a hardware address"
-        raise ValueError(msg)
-    raw = bytes.fromhex(normalised.replace(":", ""))
+    normalised = require_mac(mac)
+    raw = packed_mac(normalised)
     if not any(raw):
         msg = f"{mac} is the all-zero hardware address, which names no device"
         raise ValueError(msg)
@@ -212,9 +210,7 @@ def subnet_interface_index(ip: str, interfaces: Sequence[Interface]) -> int:
     matches = [
         (candidate.name, index)
         for candidate in interfaces
-        if (index := candidate.index)
-        and candidate.mac
-        and any(address in ipaddress.ip_network(f"{entry.address}/{entry.prefix_len}", strict=False) for entry in candidate.ipv4)
+        if (index := candidate.index) and candidate.mac and any(address in entry.network for entry in candidate.ipv4)
     ]
     if not matches:
         msg = f"no interface on this host has a subnet holding {ip}; name one with interface= (--interface on the command line)"
@@ -322,7 +318,7 @@ def set_neighbour(ip: str, mac: str, *, interface: str | None = None) -> Neighbo
     interfaces = local_interfaces()
     index = interface_index(interface, interfaces) if interface is not None else subnet_interface_index(target, interfaces)
 
-    _write(target, bytes.fromhex(station.replace(":", "")), index)
+    _write(target, packed_mac(station), index)
 
     entry = _confirmed(target, station, index, neighbours(family=AddressFamily.IPV4))
     if entry is None:

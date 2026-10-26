@@ -325,10 +325,13 @@ def test_observe_dhcp_refuses_a_bad_address_before_it_needs_any_privilege(runner
     # standalone_mode=False, so _invoke would report 0 here for any command
     # that fails through _fail, including the ones that already existed.
     result = runner.invoke(cli, ["observe-dhcp", "nonsense"])
+    # The error printer wraps at the terminal width, so a long refusal can
+    # break mid-phrase; the words matter, not where the line ends.
+    said = " ".join(result.output.split())
 
     assert result.exit_code == EXIT_ERROR
-    assert "not a hardware address" in result.output
-    assert "ValueError" not in result.output
+    assert "mac: 'nonsense' is not a hardware address" in said
+    assert "ValueError" not in said
 
 
 def test_observe_dhcp_reports_the_window_its_empty_answer_rests_on(runner: CliRunner) -> None:

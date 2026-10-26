@@ -37,6 +37,7 @@ from .netlink import (
     iter_messages,
     open_socket,
 )
+from .resolve import interface_name
 
 __all__ = ["default_gateway", "query_route"]
 
@@ -95,9 +96,7 @@ def _parse_route(payload: bytes, family: AddressFamily) -> RouteInfo:
             with contextlib.suppress(OSError, ValueError):
                 source = socket.inet_ntop(family.socket_family, value)
         elif attribute == _RTA_OIF and len(value) >= _IFINDEX_SIZE:
-            index = struct.unpack("=I", value[:_IFINDEX_SIZE])[0]
-            with contextlib.suppress(OSError, ValueError):
-                interface = socket.if_indextoname(index)
+            interface = interface_name(struct.unpack("=I", value[:_IFINDEX_SIZE])[0])
 
     return RouteInfo(gateway=gateway, interface=interface, source=source)
 

@@ -22,7 +22,7 @@ def test_one_network_written_as_text_is_refused_rather_than_split_into_character
 def test_a_dhcp_settle_past_the_longest_wait_is_refused_before_the_watch() -> None:
     # The report the CLI builds from this session refuses such a settle, so
     # accepting it here would run the whole watch and then fail to report it.
-    with pytest.raises(ValueError, match="settle must be a finite number of seconds from 0 to"):
+    with pytest.raises(ValueError, match=r"^DHCP watch refused its arguments: settle: settle must be a finite number of seconds from 0 to"):
         DhcpSession("02:00:5e:10:00:00", interface="lo", timeout=1.0, settle=MAX_TIMEOUT + 1)
     DhcpSession("02:00:5e:10:00:00", interface="lo", timeout=1.0, settle=MAX_TIMEOUT)
 

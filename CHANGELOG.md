@@ -5,6 +5,64 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `subnet_info(interfaces=...)`: describe the given interfaces instead of reading this host's,
+  as `local_networks(interfaces=...)` already does.
+- `InterfaceAddress.cidr` / `.network`, `SubnetInfo.cidr` and `Neighbour.address`: the text and
+  parsed views of a record's address as plain properties, so they do not appear in JSON output.
+  `models.interface_cidr` / `interface_network` are the one derivation behind them; the network is
+  zone-free, so one address gives one network at every prefix length.
+- One home for facts several modules restated: `AddressFamily.of_socket_family`,
+  `models.names_a_neighbour`, `models.require_settle` / `Settle`, `models.FamilyAddress`,
+  `packet.ipv4_header_length`, `resolve.MAX_INTERFACE_INDEX` / `interface_name`,
+  `deadline.MIN_WAIT` / `seconds_left`, `unixio.packet_family`, `arp.require_mac` /
+  `packed_mac` / `await_answer` / `send_neighbour_solicitation`, `winapi.sockaddr_inet`, the shared
+  refusal texts in `errors`, and `wol.WakeSettings`.
+
+### Changed
+
+- One refusal for a hardware address everywhere: "'x' is not a hardware address". It replaces
+  "not a hardware address: 'x'" (`wake_on_lan`, `build_magic_packet`, `find_ip_by_mac`, the DHCP
+  watch) and "'x' is not a 6-byte Ethernet hardware address" (the ARP and neighbour-solicitation
+  builders).
+- `wake_on_lan` and the DHCP watch (`DhcpSession`, `observe_dhcp_session`, `observe_dhcp`,
+  `observe_dhcp_first_reachable`) check their arguments through a settings model, as every other
+  entry point does. A refusal reads "wake-on-LAN refused its arguments: <field>: <reason>" or
+  "DHCP watch refused its arguments: <field>: <reason>", every bad argument in one message joined
+  by "; ", instead of the first one alone. A bool, a string or a float where an int is due
+  (`port=True`, `port=9.0`), and a string or bool `timeout` or `settle`, are refused with
+  `ValueError` before anything is sent; a bool port used to be sent to port 1, a string timeout
+  raised `TypeError`, and a bool settle was accepted. An int `timeout` is stored as a float, so its
+  refusal echoes it as `0.0` where it used to say `0`.
+- The settle bound reads "from 0 to 2147483" in its refusal, as the timeout bound does, instead of
+  "2.14748e+06"; `ObserveDhcpReport` refuses a bad `settle` with that sentence rather than
+  pydantic's.
+- `ipscout traceroute --timeout`, `ipscout observe-dhcp --timeout` and `--settle` refuse a bad
+  value while the command line is parsed, naming the option (exit code 2 as before; the JSON error
+  type is `BadParameter` and `command` is null). `--max-hops` reports pydantic's wording instead
+  of Click's range text, its `--help` no longer prints the range, and `3.0` is read as 3, as the
+  other integer options already do.
+- `DhcpReply` refuses a bad `server_ip` or `offered_ip` with "'x' is not an IP address literal" or
+  "'x' is not an ipv4 address" instead of the `ipaddress` module's wording.
+- `syn_scan` sends one SYN per distinct port and reports the ports in order, as `scan_ports` does.
+- `sweep_scope` given both a bad `limit` and a bad network reports the limit first; both are
+  `ValueError`.
+- The last read before a deadline in the active neighbour lookup and the SYN scan waits at least
+  1 ms instead of 10 ms, the floor the DHCP capture already used.
+- Windows: `transport_windows.ipv6_destination` refuses a malformed literal with `ValueError`
+  instead of `OSError`; the ICMP echo transports and `neighbours_windows.resolve_active` refuse a
+  malformed, wrong-family or (for the latter) zoned address when constructed or called, before
+  anything is loaded or sent, instead of failing on the first probe or reporting nobody answered;
+  `winapi.string_to_ipv4` refuses shorthand such as "127.1".
+
+### Fixed
+
+- `subnet_info` no longer fails on an IPv6 address with a zone at prefix /128, whose network used
+  to keep the zone.
+- A `getaddrinfo` result of neither IP family is skipped instead of being reported as IPv4.
+- `tcpsyn.read_reply` refuses a packet whose version nibble is not 4, as the other IPv4 parsers do.
+
 ## [2.3.0] 2026-10-26 12:19:25
 
 ### Added

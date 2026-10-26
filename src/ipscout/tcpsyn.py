@@ -5,7 +5,7 @@ Contents:
     PortReply: The port a reply concerns, paired with what it says.
     read_reply: Which port a reply concerns and what it says.
     parse_tcp_reply: The same, asked about one specific port.
-    checksum: The one's-complement sum both headers use.
+    TCP_HEADER_SIZE: The length of a TCP header without options.
 
 Note:
     Separated from the raw socket that carries these, because sending them
@@ -14,7 +14,8 @@ Note:
 
     The TCP checksum covers a pseudo-header built from the IP addresses and
     the protocol, which is why this needs both endpoints to compute a packet
-    that will not simply be dropped.
+    that will not simply be dropped. Both headers are summed with
+    :func:`ipscout.packet.checksum`, the one RFC 1071 implementation.
 
 """
 
@@ -24,15 +25,18 @@ import socket
 import struct
 from typing import NamedTuple
 
-from .models import PortState
-from .packet import IPV4_MIN_HEADER_SIZE, checksum
+from .models import AddressFamily, PortState
+from .packet import checksum, ipv4_header_length
 
 __all__ = ["TCP_HEADER_SIZE", "PortReply", "build_syn", "parse_tcp_reply", "read_reply"]
 
 #: IPv4 header without options, and the TCP header without options.
 _IPV4 = struct.Struct("!BBHHHBBH4s4s")
 _TCP = struct.Struct("!HHIIBBHHH")
-TCP_HEADER_SIZE = 20
+TCP_HEADER_SIZE = _TCP.size
+
+#: Both headers count their own length in 32-bit words.
+_WORD = 4
 
 #: TCP flag bits this module cares about.
 FIN = 0x01
@@ -40,19 +44,17 @@ SYN = 0x02
 RST = 0x04
 ACK = 0x10
 
-#: Version 4, header length 5 words, packed into one byte.
-_VERSION_IHL = 0x45
+#: The version nibble and the header length in words, packed into one byte:
+#: 0x45, an IPv4 header carrying no options, which is what ``_IPV4`` packs.
+_VERSION_IHL = (AddressFamily.IPV4.ip_version << 4) | (_IPV4.size // _WORD)
 _DEFAULT_TTL = 64
 
-#: A data offset of five 32-bit words: a header with no options.
-_DATA_OFFSET = 5 << 4
+#: The data offset in the high nibble of its byte: 0x50, a TCP header with no
+#: options, which is what ``_TCP`` packs.
+_DATA_OFFSET = (_TCP.size // _WORD) << 4
 
 #: Advertised window. Any plausible value works; the target never sends data.
 _WINDOW = 65535
-
-#: The low nibble of the first byte counts 32-bit words.
-_IHL_MASK = 0x0F
-_WORD = 4
 
 
 def _pseudo_header(source_ip: str, target_ip: str, length: int) -> bytes:
@@ -98,7 +100,7 @@ def build_syn(*, source_ip: str, target_ip: str, source_port: int, target_port: 
     tcp_checksum = checksum(_pseudo_header(source_ip, target_ip, len(tcp)) + tcp)
     tcp = _TCP.pack(source_port, target_port, sequence, 0, _DATA_OFFSET, SYN, _WINDOW, tcp_checksum, 0)
 
-    total = IPV4_MIN_HEADER_SIZE + len(tcp)
+    total = _IPV4.size + len(tcp)
     header = _IPV4.pack(
         _VERSION_IHL,
         0,
@@ -214,15 +216,18 @@ def _ours_or_none(packet: bytes, *, source_port: int, peer_ip: str | None) -> _R
     out of it.
     """
 
-    if len(packet) < IPV4_MIN_HEADER_SIZE:
+    # Read through the one IHL decoder, which also refuses a version nibble
+    # other than 4: the TCP header is located by an IPv4 header length, so a
+    # packet that is not IPv4 has no TCP header this could find.
+    header_length = ipv4_header_length(packet)
+    if header_length is None:
         return None
     if peer_ip is not None and socket.inet_ntoa(packet[12:16]) != peer_ip:
         return None
-
-    header_length = (packet[0] & _IHL_MASK) * _WORD
     # Options make the header longer; assuming 20 bytes would read the TCP
-    # header from the middle of them.
-    if header_length < IPV4_MIN_HEADER_SIZE or len(packet) < header_length + TCP_HEADER_SIZE:
+    # header from the middle of them. A reply must hold the whole TCP header
+    # after them, a rule of this reader rather than of the IP header.
+    if len(packet) < header_length + TCP_HEADER_SIZE:
         return None
 
     fields = _TCP.unpack(packet[header_length : header_length + TCP_HEADER_SIZE])

@@ -42,6 +42,7 @@ import struct
 from .arp import ETH_P_IP, FRAME_RECEIVE_SIZE
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
 from .ports import CAPTURE_RECEIVE_BUFFER, MIN_CAPTURE_WAIT
+from .unixio import packet_family
 
 __all__ = ["PACKET_MREQ", "PacketSocketCapture", "capture_available", "open_capture"]
 
@@ -58,14 +59,21 @@ PACKET_ADD_MEMBERSHIP = 1
 PACKET_MR_PROMISC = 1
 
 
-def _af_packet() -> int:
-    """Return the ``AF_PACKET`` constant, or say why this host has none."""
+def _open_packet_socket() -> socket.socket:
+    """Open the IPv4 packet socket a capture reads from, unbound.
 
-    af_packet = getattr(socket, "AF_PACKET", None)
-    if not isinstance(af_packet, int):  # pragma: no cover - non-Linux
-        msg = "AF_PACKET is a Linux facility and this process is not on Linux"
-        raise IPScoutUnsupportedError(msg)
-    return af_packet
+    The one opener, so the probe in :func:`capture_available` asks for exactly
+    the socket :func:`open_capture` will need.
+
+    Raises:
+        IPScoutUnsupportedError: Off Linux, where no packet socket exists. Not
+            an ``OSError``, so a caller's ``except OSError`` lets it through.
+        OSError: The kernel refused the socket, usually for want of
+            ``CAP_NET_RAW``.
+
+    """
+
+    return socket.socket(packet_family(), socket.SOCK_RAW, socket.htons(ETH_P_IP))
 
 
 def _permission_error(exc: OSError) -> IPScoutPermissionError:
@@ -93,12 +101,9 @@ def capture_available() -> bool:
 
     """
 
-    af_packet = getattr(socket, "AF_PACKET", None)
-    if not isinstance(af_packet, int):  # pragma: no cover - non-Linux
-        return False
     try:
-        sock = socket.socket(af_packet, socket.SOCK_RAW, socket.htons(ETH_P_IP))
-    except OSError:
+        sock = _open_packet_socket()
+    except (IPScoutUnsupportedError, OSError):
         return False
     sock.close()
     return True
@@ -176,9 +181,8 @@ def open_capture(interface: str, *, promiscuous: bool = True) -> PacketSocketCap
 
     """
 
-    af_packet = _af_packet()
     try:
-        sock = socket.socket(af_packet, socket.SOCK_RAW, socket.htons(ETH_P_IP))
+        sock = _open_packet_socket()
     except OSError as exc:
         raise _permission_error(exc) from exc
 

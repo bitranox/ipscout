@@ -40,6 +40,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Strict, ValidationError
 
+from .deadline import seconds_left
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError, refused_arguments
 from .models import DISCARD_PORT, MAX_PORT, AddressFamily, Port, PortState, ScanMethod, Timeout, require_port
 from .packet import MAX_IP_LENGTH
@@ -200,9 +201,10 @@ def _listed(ports: list[int]) -> list[int]:
 
 
 def _wanted(ports: str | list[int]) -> list[int]:
-    """Return the ports to scan, however they were specified.
+    """Return the ports to scan, however they were specified: each once, in port order.
 
-    A list is held to the same range as a specification, so a port no host
+    Every entry point reads its ports through this, so a duplicate is probed
+    once and every result lists its ports in the same order. A list is held to the same range as a specification, so a port no host
     can listen on is refused before any connect or SYN is attempted.
     """
 
@@ -243,7 +245,7 @@ def _source_for(address: str) -> str | None:
         return route.source
 
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        with socket.socket(AddressFamily.IPV4.socket_family, socket.SOCK_DGRAM) as sock:
             # Nothing is sent, so this only has to be a valid destination for
             # the kernel to choose a source for.
             sock.connect((address, DISCARD_PORT))
@@ -259,13 +261,13 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
     Args:
         host: The target, as a name or an IPv4 literal. A name is resolved
             once, here, and every SYN goes to that one address.
-        ports: The ports to ask about.
+        ports: The ports to ask about. A port listed twice is sent one SYN.
         timeout: Seconds to wait for replies, in total.
 
     Returns:
-        Each port mapped to its state. A SYN-ACK is ``OPEN``, a RST is
-        ``CLOSED``, and silence is ``FILTERED`` - a distinction a connect scan
-        can only partly make.
+        Each port mapped to its state, in port order as :func:`scan_ports`
+        returns it. A SYN-ACK is ``OPEN``, a RST is ``CLOSED``, and silence is
+        ``FILTERED`` - a distinction a connect scan can only partly make.
 
     Raises:
         IPScoutPermissionError: The process may not open a raw socket, which
@@ -285,7 +287,7 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
 
     """
 
-    wanted = _listed(ports)
+    wanted = _wanted(ports)
     return _half_open(host, wanted, _settings(timeout=timeout))
 
 
@@ -306,9 +308,9 @@ def _half_open(host: str, ports: list[int], settings: PortScanSettings) -> dict[
         raise IPScoutUnsupportedError(msg)
 
     try:
-        sender = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-        sender.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-        receiver = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+        sender = socket.socket(AddressFamily.IPV4.socket_family, socket.SOCK_RAW, socket.IPPROTO_TCP)
+        sender.setsockopt(AddressFamily.IPV4.ip_option_level, socket.IP_HDRINCL, 1)
+        receiver = socket.socket(AddressFamily.IPV4.socket_family, socket.SOCK_RAW, socket.IPPROTO_TCP)
     except PermissionError as exc:
         msg = (
             f"a SYN scan needs a raw socket, so root or CAP_NET_RAW: {exc}. "
@@ -352,7 +354,7 @@ def _syn_exchange(  # noqa: PLR0913 - one parameter per piece of the exchange, a
         deadline = time.monotonic() + timeout
         outstanding = set(ports)
         while outstanding and time.monotonic() < deadline:
-            receiver.settimeout(max(0.01, deadline - time.monotonic()))
+            receiver.settimeout(seconds_left(deadline))
             try:
                 packet = receiver.recv(MAX_IP_LENGTH)
             except (TimeoutError, OSError):
@@ -465,11 +467,12 @@ async def ascan_ports(host: str, ports: str | list[int], *, timeout: float = DEF
 
 
 async def _connect_scan(target: ResolvedTarget, wanted: list[int], settings: PortScanSettings) -> dict[int, PortState]:
-    """Connect-scan ports already parsed and de-duplicated by :func:`_wanted`.
+    """Connect-scan ports already checked, de-duplicated and sorted by :func:`_wanted`.
 
-    Both public entry points parse the specification, check the settings and
-    resolve the host themselves and then share this, so each is done once
-    whichever of them a caller used.
+    The two entry points that connect-scan, :func:`scan_ports` and
+    :func:`ascan_ports`, parse the ports, check the settings and resolve the
+    host themselves and then share this, so each is done once whichever of
+    them a caller used.
     """
 
     async def probe(port: int) -> tuple[int, PortState]:

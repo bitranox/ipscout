@@ -40,6 +40,7 @@ from .bsdroute import (
     split_sockaddrs,
 )
 from .models import DEFAULT_TIMEOUT, AddressFamily, RouteInfo
+from .resolve import interface_name
 
 __all__ = ["default_gateway", "parse_route_reply", "query_route"]
 
@@ -113,12 +114,7 @@ def parse_route_reply(data: bytes, *, pid: int | None = None, seq: int | None = 
     gateway = address_of(sockaddrs.gateway) if flags & RTF_GATEWAY and sockaddrs.gateway else None
     source = address_of(sockaddrs.interface_address) if sockaddrs.interface_address else None
 
-    interface: str | None = None
-    if index:
-        with contextlib.suppress(OSError, ValueError):
-            interface = socket.if_indextoname(index)
-
-    return RouteInfo(gateway=gateway, interface=interface, source=source)
+    return RouteInfo(gateway=gateway, interface=interface_name(index), source=source)
 
 
 def _build_request(packed_destination: bytes, family: AddressFamily, seq: int) -> bytes:

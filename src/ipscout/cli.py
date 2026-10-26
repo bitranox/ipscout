@@ -47,7 +47,6 @@ from .errors import IPScoutError, validation_problems
 from .factory import icmp_available
 from .interfaces import local_interfaces
 from .models import (
-    MAX_HOP_LIMIT,
     AddressFamily,
     BannerState,
     CapabilityReport,
@@ -97,7 +96,7 @@ from .snmp import DEFAULT_PORT as DEFAULT_SNMP_PORT
 from .snmp import DEFAULT_TIMEOUT as DEFAULT_SNMP_TIMEOUT
 from .static_neighbours import remove_neighbour, set_neighbour
 from .subnet import subnet_info
-from .traceroute import DEFAULT_MAX_HOPS, traceroute
+from .traceroute import DEFAULT_MAX_HOPS, TracerouteSettings, traceroute
 from .transport_tcp import DEFAULT_TCP_PORT
 from .typed_click import argument, option, version_option
 from .wol import DEFAULT_BROADCAST, wake_on_lan
@@ -124,6 +123,17 @@ __all__ = [
 
 #: Shared Click context flags for consistent help output.
 CLICK_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+#: The spellings of the root command's output and traceback flags. main() looks
+#: for them in the raw argv before Click parses it, so an error escaping before
+#: any context exists still honours them; the option declarations and that
+#: lookup must therefore name the same strings, and a renamed flag that only one
+#: side learned of would silently report errors in the wrong shape.
+_JSON_FLAG = "--json"
+_JSON_SHORT_FLAG = "-j"
+_JSON_BARE_FLAG = "--json-bare"
+_TRACEBACK_FLAG = "--traceback"
+_NO_TRACEBACK_FLAG = "--no-traceback"
 
 #: Console for rich output. Markup is off on both consoles because what they
 #: print is mostly text the network chose - a device's description, a greeting,
@@ -246,9 +256,9 @@ class OutputMode(str, enum.Enum):
 
         """
 
-        if "--json-bare" in argv:
+        if _JSON_BARE_FLAG in argv:
             return cls.BARE
-        if "--json" in argv or "-j" in argv:
+        if _JSON_FLAG in argv or _JSON_SHORT_FLAG in argv:
             return cls.ENVELOPE
         return cls.HUMAN
 
@@ -274,7 +284,7 @@ class OutputMode(str, enum.Enum):
         """
 
         if json_output and json_bare:
-            msg = "--json and --json-bare are mutually exclusive; pick one output shape"
+            msg = f"{_JSON_FLAG} and {_JSON_BARE_FLAG} are mutually exclusive; pick one output shape"
             raise click.UsageError(msg)
         if json_bare:
             return cls.BARE
@@ -460,12 +470,12 @@ def _family(*, ipv4: bool, ipv6: bool) -> AddressFamily | None:
     prog_name=__init__conf__.shell_command,
     message=f"{__init__conf__.shell_command} version {__init__conf__.version}",
 )
-@option("--json", "-j", "json_output", is_flag=True, default=False, help="Emit a JSON envelope: {ok, command, data|error}.")
-@option("--json-bare", "json_bare", is_flag=True, default=False, help="Emit the JSON payload at top level, without the envelope.")
+@option(_JSON_FLAG, _JSON_SHORT_FLAG, "json_output", is_flag=True, default=False, help="Emit a JSON envelope: {ok, command, data|error}.")
+@option(_JSON_BARE_FLAG, "json_bare", is_flag=True, default=False, help="Emit the JSON payload at top level, without the envelope.")
 # The traceback setting is read from argv by main(), because the exception it
 # governs can escape before this command runs; Click only has to accept the
 # flag, so its value is not handed to the command at all.
-@option("--traceback/--no-traceback", is_flag=True, default=True, expose_value=False, help="Show a full Python traceback on unexpected errors.")
+@option(f"{_TRACEBACK_FLAG}/{_NO_TRACEBACK_FLAG}", is_flag=True, default=True, expose_value=False, help="Show a full Python traceback on unexpected errors.")
 @click.pass_context
 def cli(ctx: click.Context, *, json_output: bool, json_bare: bool) -> None:
     """Probe reachability and inspect the local network, without admin rights.
@@ -576,8 +586,8 @@ def cli_reachable(ctx: click.Context, target: str, *, timeout: float, tcp_port: 
 
 @cli.command("traceroute", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("target")
-@option("--max-hops", type=click.IntRange(min=1, max=MAX_HOP_LIMIT), default=DEFAULT_MAX_HOPS, show_default=True, help="Highest hop limit to try.")
-@option("--timeout", type=float, default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per hop.")
+@option("--max-hops", type=_int_field(TracerouteSettings, "max_hops"), default=DEFAULT_MAX_HOPS, show_default=True, help="Highest hop limit to try.")
+@option("--timeout", type=_float_field(TracerouteSettings, "timeout"), default=DEFAULT_PING_TIMEOUT, show_default=True, help="Seconds to wait per hop.")
 @option("-4", "ipv4", is_flag=True, default=False, help="Force IPv4.")
 @option("-6", "ipv6", is_flag=True, default=False, help="Force IPv6.")
 @option("--resolve-names", is_flag=True, default=False, help="Reverse-resolve each responding hop.")
@@ -659,7 +669,7 @@ def cli_interfaces(ctx: click.Context) -> None:
     def human() -> None:
         table = Table("interface", "up", "loopback", "mac", "addresses")
         for item in interfaces:
-            addresses = ", ".join(f"{entry.address}/{entry.prefix_len}" for entry in (*item.ipv4, *item.ipv6))
+            addresses = ", ".join(entry.cidr for entry in (*item.ipv4, *item.ipv6))
             table.add_row(item.name, "yes" if item.is_up else "no", "yes" if item.is_loopback else "no", item.mac or "-", addresses or "-")
         console.print(table)
 
@@ -880,7 +890,7 @@ def cli_subnet(ctx: click.Context, *, interface: str | None) -> None:
         for item in subnets:
             table.add_row(
                 item.interface,
-                f"{item.address}/{item.prefix_len}",
+                item.cidr,
                 str(item.network),
                 item.broadcast or "-",
                 item.gateway or "-",
@@ -1169,8 +1179,23 @@ def cli_wake(ctx: click.Context, mac: str, *, broadcast: str, port: int) -> None
 @cli.command("observe-dhcp", context_settings=CLICK_CONTEXT_SETTINGS)
 @argument("mac")
 @option("--interface", default=None, help="Interface to watch. Defaults to the one carrying the default route; name the bridge for a VM.")
-@option("--timeout", type=float, default=DEFAULT_TIMEOUT, show_default=True, help="Seconds to watch for the machine appearing.")
-@option("--settle", type=float, default=DEFAULT_SETTLE, show_default=True, help="Seconds of quiet after the last address before answering.")
+# The DHCP watch has no settings model of its own, so the report that records
+# the window and the settle carries the declaration; converting through it
+# refuses a bad value as a usage error before any capture socket is opened.
+@option(
+    "--timeout",
+    type=_float_field(ObserveDhcpReport, "timeout"),
+    default=DEFAULT_TIMEOUT,
+    show_default=True,
+    help="Seconds to watch for the machine appearing.",
+)
+@option(
+    "--settle",
+    type=_float_field(ObserveDhcpReport, "settle"),
+    default=DEFAULT_SETTLE,
+    show_default=True,
+    help="Seconds of quiet after the last address before answering.",
+)
 @click.pass_context
 def cli_observe_dhcp(ctx: click.Context, mac: str, *, interface: str | None, timeout: float, settle: float) -> None:
     """Watch a DHCP handshake for the addresses offered to a hardware address."""
@@ -1310,7 +1335,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # a stream the caller is parsing as JSON. Both shapes count, or bare mode
     # would be the one shape whose failures are not machine-readable.
     output = OutputMode.from_argv(argv_list)
-    show_traceback = "--no-traceback" not in argv_list
+    show_traceback = _NO_TRACEBACK_FLAG not in argv_list
 
     lib_cli_exit_tools.config.traceback = show_traceback and output is OutputMode.HUMAN
 

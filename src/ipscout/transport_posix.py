@@ -243,6 +243,14 @@ def recvmsg_of(sock: socket.socket) -> RecvMsg | None:
 #: Native byte order and alignment, as the kernel writes it.
 _EXTENDED_ERR = struct.Struct("=IBBBBII")
 
+#: Bytes offered for the ancillary data of one error-queue read. The control
+#: message wanted is a cmsg header, ``sock_extended_err`` and the offender's
+#: sockaddr - under a hundred bytes - but the kernel truncates (``MSG_CTRUNC``)
+#: rather than fails when the space is short, which would silently cut off the
+#: offender address, so the buffer is sized for several control messages, not
+#: for that one exactly.
+_ANCILLARY_SIZE = 4096
+
 
 class _Arrival(NamedTuple):
     """What the reader hands an awaiting probe when its reply arrives.
@@ -439,7 +447,7 @@ class PosixEchoTransport:
         if reader is None:
             return self._read_ttl_expired_raw() if self._is_raw else None
         try:
-            _data, ancillary, _flags, _addr = reader.recvmsg(4096, 4096, reader.flag)
+            _data, ancillary, _flags, _addr = reader.recvmsg(packet.MAX_IP_LENGTH, _ANCILLARY_SIZE, reader.flag)
         except (TimeoutError, OSError):
             return None
         for _level, _ctype, control in ancillary:
@@ -458,7 +466,7 @@ class PosixEchoTransport:
         """
 
         try:
-            data, address = self._socket.recvfrom(4096)
+            data, address = self._socket.recvfrom(packet.MAX_IP_LENGTH)
         except (TimeoutError, OSError):
             return None
         if not packet.is_time_exceeded(data, family=self._family):

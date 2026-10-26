@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Annotated
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from .api import ping_many
+from .arp import require_mac
 from .errors import IPScoutSweepIncompleteError, IPScoutSweepTooWideError, refused_arguments
 from .interfaces import local_interfaces
 from .models import AddressFamily, SweepScope, Timeout
@@ -164,10 +165,7 @@ def local_networks(interfaces: Sequence[Interface] | None = None) -> tuple[ipadd
         if interface.is_loopback:
             continue
         for entry in interface.ipv4:
-            try:
-                network = ipaddress.ip_network(f"{entry.address}/{entry.prefix_len}", strict=False)
-            except ValueError:  # pragma: no cover - the OS does not report these
-                continue
+            network = entry.network
             if not isinstance(network, ipaddress.IPv4Network) or network.prefixlen >= POINT_TO_POINT_PREFIX:
                 continue
             if network not in found:
@@ -175,11 +173,16 @@ def local_networks(interfaces: Sequence[Interface] | None = None) -> tuple[ipadd
     return tuple(found)
 
 
-def _targets(network: str | None, interfaces: Sequence[Interface] | None) -> list[IPNetwork]:
-    """Return the networks to sweep, from an explicit CIDR or the local ones."""
+def _targets(network: str | None, interfaces: Sequence[Interface] | None) -> list[str | IPNetwork]:
+    """Return the networks to sweep, from an explicit CIDR or the local ones.
+
+    An explicit CIDR is passed on as text: :meth:`SweepScope.from_networks`
+    is the one parser of a network a caller wrote, so it is not parsed here
+    as well.
+    """
 
     if network is not None:
-        return [ipaddress.ip_network(network, strict=False)]
+        return [network]
     return list(local_networks(interfaces))
 
 
@@ -372,15 +375,7 @@ def _sweep(scope: SweepScope, *, concurrency: int, timeout: float) -> tuple[Neig
         # unused - so the sweep must not raise on them.
         ping_many(hosts, concurrency=concurrency, times=1, timeout=timeout, interval=0.0, raise_on_error=False)
 
-    found: list[Neighbour] = []
-    for entry in neighbours():
-        try:
-            address = ipaddress.ip_address(entry.ip)
-        except ValueError:  # pragma: no cover - the kernel does not emit these
-            continue
-        if any(address in item for item in scope.networks):
-            found.append(entry)
-    return tuple(found)
+    return tuple(entry for entry in neighbours() if any(entry.address in item for item in scope.networks))
 
 
 def arp_scan(
@@ -490,11 +485,7 @@ def find_ip_by_mac(  # noqa: PLR0913 - public API: every knob is keyword-only an
 
     """
 
-    wanted = normalise_mac(mac)
-    if wanted is None:
-        msg = f"not a hardware address: {mac!r}"
-        raise ValueError(msg)
-
+    wanted = require_mac(mac)
     settings = _settings(timeout=DEFAULT_SWEEP_TIMEOUT, concurrency=concurrency)
     named = None if network is None and scope is None else "network" if scope is None else "scope"
     refusal = sweep_argument_refusal(scan=scan, named=named)

@@ -21,7 +21,21 @@ from typing import TYPE_CHECKING, Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
-from .models import DEFAULT_TIMEOUT, MAX_PORT, MAX_TIMEOUT, MAX_TIMES, MIN_PORT, AddressFamily, Port, ProbeMethod, ResponseObject, Timeout, require_address
+from .models import (
+    BLANK_TARGET_MESSAGE,
+    DEFAULT_TIMEOUT,
+    MAX_PORT,
+    MAX_TIMEOUT,
+    MAX_TIMES,
+    MIN_PORT,
+    AddressFamily,
+    Port,
+    ProbeMethod,
+    ResponseObject,
+    Timeout,
+    is_blank_target,
+    require_address,
+)
 from .packet import DEFAULT_PAYLOAD_SIZE, require_payload_size
 from .transport_tcp import DEFAULT_TCP_PORT
 
@@ -47,9 +61,8 @@ DEFAULT_INTERVAL = 0.2
 def _require_text(value: str) -> str:
     """Return ``value`` unless it is empty or only whitespace, which names no target."""
 
-    if not value.strip():
-        msg = "target must not be empty"
-        raise ValueError(msg)
+    if is_blank_target(value):
+        raise ValueError(BLANK_TARGET_MESSAGE)
     return value
 
 

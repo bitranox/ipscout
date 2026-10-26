@@ -31,7 +31,7 @@ import socket
 from typing import TYPE_CHECKING, NamedTuple
 
 from .errors import IPScoutResolutionError
-from .models import AddressFamily, needs_zone
+from .models import BLANK_TARGET_MESSAGE, AddressFamily, is_blank_target, needs_zone
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -356,11 +356,8 @@ def _resolved_targets(infos: Iterable[_AddrInfo], written_zone: str | None) -> I
     # library: a result of any other family is skipped rather than labelled
     # IPv4, which would hand a probe an address it cannot send to.
     for socket_family, _kind, _proto, _canonname, sockaddr in infos:
-        if socket_family == AddressFamily.IPV6.socket_family:
-            family = AddressFamily.IPV6
-        elif socket_family == AddressFamily.IPV4.socket_family:
-            family = AddressFamily.IPV4
-        else:
+        family = AddressFamily.of_socket_family(socket_family)
+        if family is None:
             continue
         yield ResolvedTarget(_with_zone(sockaddr, written_zone), family)
 
@@ -421,9 +418,8 @@ def _resolve(target: str, *, family: AddressFamily | None) -> list[ResolvedTarge
     # A blank target is a caller mistake, but resolvers disagree about it:
     # Windows happily resolves "" to the local host, so is_reachable("") would
     # answer True. Reject it here so every platform agrees.
-    if not target or not target.strip():
-        msg = "target must not be empty"
-        raise IPScoutResolutionError(msg)
+    if is_blank_target(target):
+        raise IPScoutResolutionError(BLANK_TARGET_MESSAGE)
 
     # Decide a literal's family before consulting the resolver, because the
     # resolvers disagree here too: asking macOS for the IPv6 address of an IPv4

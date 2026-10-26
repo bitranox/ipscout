@@ -35,12 +35,11 @@ Note:
 from __future__ import annotations
 
 import contextlib
-import ipaddress
 import socket
 from typing import TYPE_CHECKING, cast
 
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
-from .models import AddressFamily
+from .models import AddressFamily, require_address
 from .packet import MAX_IP_LENGTH
 from .ports import CAPTURE_RECEIVE_BUFFER, MIN_CAPTURE_WAIT
 
@@ -121,9 +120,10 @@ def _address_for(interface: str) -> str:
     """
 
     with contextlib.suppress(ValueError):
-        # DHCPv4 is IPv4 only, so an IPv6 literal is not an interface it can use.
-        if ipaddress.ip_address(interface).version == AddressFamily.IPV4.ip_version:
-            return interface
+        # DHCPv4 is IPv4 only, so an IPv6 literal is refused here like a name
+        # and falls through to the adapter lookup, which cannot bind it either.
+        require_address(interface, AddressFamily.IPV4)
+        return interface
 
     from .interfaces_windows import list_interfaces  # noqa: PLC0415 - Windows-only import
 

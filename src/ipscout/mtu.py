@@ -98,6 +98,11 @@ _IPV4_UDP_OVERHEAD = IPV4_MIN_HEADER_SIZE + UDP_HEADER_SIZE
 #: IP_DONTFRAG, the BSD option that refuses to fragment rather than doing it.
 _IP_DONTFRAG = 28
 
+#: How long one BSD probe's send may block. No reply is ever read - the answer
+#: is the kernel's EMSGSIZE refusal at send time - so this only bounds a send
+#: that stalls (a full socket buffer), turning it into an error rather than a hang.
+_BSD_SEND_TIMEOUT = 1.0
+
 
 def _linux_mtu(address: str, family: AddressFamily) -> int | None:
     """Return the kernel's own path MTU for a destination, sending nothing.
@@ -127,6 +132,10 @@ def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
     largest payload that is not answered with "packet too big" is the answer.
     """
 
+    # Converted once, before any handle exists: every probe of the bisection
+    # goes to the same destination.
+    destination = string_to_ipv4(address)
+
     try:
         library = iphlpapi()
     except IPScoutUnsupportedError:
@@ -140,7 +149,7 @@ def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
         options = IP_OPTION_INFORMATION(Ttl=DEFAULT_TTL, Tos=0, Flags=_IP_FLAG_DF, OptionsSize=0, OptionsData=None)
         request = b"\x00" * payload
         reply = (ctypes.c_uint8 * reply_buffer_size(ICMP_ECHO_REPLY, payload))()
-        count = library.IcmpSendEcho(handle, string_to_ipv4(address), request, payload, ctypes.byref(options), reply, len(reply), _PROBE_TIMEOUT_MS)
+        count = library.IcmpSendEcho(handle, destination, request, payload, ctypes.byref(options), reply, len(reply), _PROBE_TIMEOUT_MS)
         if count:
             return True
         return IpStatus.parse(last_error()) is not IpStatus.PACKET_TOO_BIG
@@ -165,13 +174,15 @@ def _bsd_mtu(address: str) -> int | None:  # pragma: no cover - macOS and the BS
     """Return the path MTU by probing with don't-fragment set.
 
     macOS and the BSDs have no ``IP_MTU`` to ask, so the size is narrowed by
-    bisection: send a datagram that may not be fragmented and see whether the
-    kernel refuses it as too large. The socket must be raw for the ICMP
-    Fragmentation Needed reply to be visible.
+    bisection: send a UDP datagram that may not be fragmented and see whether
+    the kernel refuses it as too large (``EMSGSIZE``). An ordinary datagram
+    socket does this and no reply is read: the refusal comes at send time, so
+    the answer is the largest packet the kernel will put on that route
+    unfragmented, as far as the kernel itself knows the path.
 
     Raises:
-        IPScoutPermissionError: The raw socket needed for the probe was
-            refused, which on a stock macOS means the process is not root.
+        IPScoutPermissionError: No IPv4 datagram socket could be opened, or
+            ``IP_DONTFRAG`` was refused, so the question cannot be asked.
     """
 
     try:
@@ -193,7 +204,7 @@ def _bsd_mtu(address: str) -> int | None:  # pragma: no cover - macOS and the BS
         raise IPScoutPermissionError(msg) from exc
 
     try:
-        sock.settimeout(1.0)
+        sock.settimeout(_BSD_SEND_TIMEOUT)
         sock.connect((address, DISCARD_PORT))
         low, high = _MIN_MTU - _IPV4_UDP_OVERHEAD, _MAX_MTU - _IPV4_UDP_OVERHEAD
 
@@ -260,8 +271,7 @@ def path_mtu(target: str, *, family: AddressFamily | None = None) -> int | None:
             return None
         return _windows_mtu(resolved.address)
     # macOS and the BSDs: no IP_MTU to query, so the only way to learn this
-    # is to probe with don't-fragment set and watch for the refusal, which
-    # needs a raw socket.
+    # is to probe with don't-fragment set and watch for the kernel's refusal.
     if resolved.family is AddressFamily.IPV6:
         return None
     return _bsd_mtu(resolved.address)

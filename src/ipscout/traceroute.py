@@ -39,9 +39,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .errors import IPScoutUnsupportedError, refused_arguments
 from .factory import make_async_transport, make_transport
-from .models import MAX_HOP_LIMIT, Timeout, TraceHop
+from .models import DEFAULT_TIMEOUT, MAX_HOP_LIMIT, Timeout, TraceHop
 from .resolve import resolve_one, reverse_dns
-from .service import DEFAULT_TIMEOUT
 
 if TYPE_CHECKING:
     from .models import AddressFamily

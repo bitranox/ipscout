@@ -58,7 +58,7 @@ __all__ = ["BpfCapture", "capture_available", "open_capture"]
 def _require_bpf() -> None:
     """Refuse before touching a device where the platform has no BPF at all.
 
-    The mirror of ``dhcp_linux._af_packet``: a backend guards its own platform
+    The mirror of ``unixio.packet_family``: a backend guards its own platform
     facility with this package's error rather than letting a foreign one
     escape. Without it the first call reaches ``fcntl``, which does not exist
     off Unix, and a ``ModuleNotFoundError`` leaves the package's promise that

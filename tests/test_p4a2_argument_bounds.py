@@ -102,6 +102,9 @@ class _NoRoute:
         (["arp-scan", "--network", "127.0.0.0/30", "--concurrency", "0"], "--concurrency"),
         (["banners", "127.0.0.1", "--port", "1", "--timeout", "inf"], "--timeout"),
         (["traceroute", "127.0.0.1", "--max-hops", "256", "--timeout", "0.2"], "--max-hops"),
+        (["traceroute", "127.0.0.1", "--timeout", "0"], "--timeout"),
+        (["observe-dhcp", MAC, "--interface", "lo", "--timeout", "0"], "--timeout"),
+        (["observe-dhcp", MAC, "--interface", "lo", "--settle", "-1"], "--settle"),
         (["wake", MAC, "--broadcast", "127.0.0.1", "--port", "0"], "--port"),
     ],
     ids=[
@@ -115,6 +118,9 @@ class _NoRoute:
         "arp-scan-concurrency",
         "banners-timeout-infinite",
         "traceroute-max-hops",
+        "traceroute-timeout",
+        "observe-dhcp-timeout",
+        "observe-dhcp-settle",
         "wake-port",
     ],
 )
@@ -124,6 +130,17 @@ def test_a_bad_option_is_a_usage_error_naming_the_option(args: list[str], option
     assert code == EXIT_ERROR
     assert payload["ok"] is False
     assert option in payload["error"]["message"]
+
+
+@pytest.mark.parametrize("args", [["--timeout", "0"], ["--settle", "-1"]], ids=["timeout", "settle"])
+def test_a_bad_dhcp_watch_window_is_refused_before_the_command_runs(args: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    # The command body is what opens the capture, and a refusal it raised would
+    # carry its name in the envelope; no command named means Click refused the
+    # value while parsing, so no capture socket was ever opened.
+    code, payload = _json(capsys, ["observe-dhcp", MAC, "--interface", "lo", *args])
+
+    assert code == EXIT_ERROR
+    assert payload["command"] is None
 
 
 def test_a_refused_option_reads_as_the_library_s_reason_not_pydantic_s(capsys: pytest.CaptureFixture[str]) -> None:

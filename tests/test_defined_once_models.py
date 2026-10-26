@@ -151,7 +151,7 @@ def test_require_settle_accepts_every_finite_value_from_0_to_max_timeout(settle:
 
 @pytest.mark.parametrize("settle", [-1.0, -1e-9, math.nextafter(MAX_TIMEOUT, math.inf), math.inf, -math.inf, math.nan])
 def test_require_settle_refuses_with_the_exact_session_message(settle: float) -> None:
-    expected = f"settle must be a finite number of seconds from 0 to {MAX_TIMEOUT:g}, got {settle!r}"
+    expected = f"settle must be a finite number of seconds from 0 to 2147483, got {settle!r}"
     with pytest.raises(ValueError, match=r"^settle must") as caught:
         require_settle(settle)
     assert str(caught.value) == expected

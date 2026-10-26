@@ -9,6 +9,7 @@ Contents:
     WindowsEchoTransport: Synchronous transport.
     AsyncWindowsEchoTransport: Executor-backed asyncio transport.
     ipv6_destination: The ``SOCKADDR_IN6`` an IPv6 echo is sent to.
+    api_destination: The destination in the form the echo call takes.
     echo_outcome: An ``IP_STATUS`` plus timings, as a transport result.
 
 Two honest limitations, stated rather than hidden:
@@ -37,20 +38,19 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import ctypes
-import socket
 import time
 from typing import TYPE_CHECKING
 
 from . import packet, winapi
 from .errors import IPScoutPermissionError, IPScoutUnsupportedError
-from .models import AddressFamily
+from .models import AddressFamily, require_address
 from .ports import EchoResult
 from .resolve import split_zone, zone_index
 
 if TYPE_CHECKING:
     from types import TracebackType
 
-__all__ = ["AsyncWindowsEchoTransport", "WindowsEchoTransport", "echo_outcome", "ipv6_destination", "windows_icmp_available"]
+__all__ = ["AsyncWindowsEchoTransport", "WindowsEchoTransport", "api_destination", "echo_outcome", "ipv6_destination", "windows_icmp_available"]
 
 #: Threads serving the async variant. Bounded, because each in-flight probe
 #: occupies one for the duration of its timeout.
@@ -86,18 +86,57 @@ def ipv6_destination(address: str) -> winapi.SOCKADDR_IN6:
         The structure, carrying Windows' ``AF_INET6`` number and the zone's
         interface index as its scope id.
 
+    Raises:
+        ValueError: ``address`` is not an IPv6 address literal.
+        IPScoutResolutionError: The zone names no interface this host has.
+
     Examples:
         >>> sockaddr = ipv6_destination("2001:db8::1")
         >>> sockaddr.sin6_family == winapi.WIN_AF_INET6, sockaddr.sin6_scope_id
         (True, 0)
+        >>> ipv6_destination("192.0.2.1")
+        Traceback (most recent call last):
+        ...
+        ValueError: '192.0.2.1' is not an ipv6 address
 
     """
 
-    # A zone names the link, and only the scope-id field can carry it:
-    # inet_pton parses an address alone and rejects the scoped text.
-    bare, zone = split_zone(address)
-    packed = socket.inet_pton(AddressFamily.IPV6.socket_family, bare)
+    # The packed bytes cannot carry a zone, so the zone travels in the one
+    # field that can: the scope id, as the interface index it names.
+    packed = require_address(address, AddressFamily.IPV6).packed
+    zone = split_zone(address).zone
     return winapi.sockaddr_in6(packed, scope_id=zone_index(zone) if zone is not None else 0)
+
+
+def api_destination(address: str, family: AddressFamily) -> int | winapi.SOCKADDR_IN6:
+    """Return ``address`` in the form the echo call for ``family`` takes.
+
+    Args:
+        address: An address literal of ``family``; an IPv6 one may carry a
+            ``%zone``.
+        family: Which call the destination is for.
+
+    Returns:
+        The ``IPAddr`` ``IcmpSendEcho`` takes for IPv4, or the
+        ``SOCKADDR_IN6`` ``Icmp6SendEcho2`` takes for IPv6.
+
+    Raises:
+        ValueError: ``address`` is not an address literal of ``family``.
+        IPScoutResolutionError: The zone names no interface this host has.
+
+    Examples:
+        >>> api_destination("127.0.0.1", AddressFamily.IPV4) == 0x0100007F
+        True
+        >>> isinstance(api_destination("2001:db8::1", AddressFamily.IPV6), winapi.SOCKADDR_IN6)
+        True
+
+    """
+
+    if family is AddressFamily.IPV6:
+        return ipv6_destination(address)
+    # Checked through require_address so the refusal reads as it does in every
+    # other entry point; string_to_ipv4 then only converts.
+    return winapi.string_to_ipv4(str(require_address(address, family)))
 
 
 def echo_outcome(status: winapi.IpStatus | None, *, elapsed_ms: float, api_rtt_ms: int, source: str) -> EchoResult:
@@ -148,13 +187,18 @@ class WindowsEchoTransport:
         payload_size: Bytes of payload per echo.
 
     Raises:
+        ValueError: ``address`` is not an address literal of ``family``.
+        IPScoutResolutionError: An IPv6 zone names no interface this host has.
         IPScoutUnsupportedError: Not running on Windows, or the DLL is absent.
         IPScoutPermissionError: The ICMP handle could not be opened.
 
     """
 
     def __init__(self, address: str, family: AddressFamily, *, payload_size: int = packet.DEFAULT_PAYLOAD_SIZE) -> None:
-        self._address = address
+        # Parsed once, before the library loads: every probe of a burst reuses
+        # it, and a malformed address is refused here on every platform rather
+        # than on the first probe.
+        self._destination = api_destination(address, family)
         self._family = family
         self._payload_size = payload_size
         self._library = winapi.iphlpapi()
@@ -217,11 +261,13 @@ class WindowsEchoTransport:
         ).datagram
         payload = datagram[packet.HEADER_SIZE :]
         timeout_ms = max(1, int(timeout * 1000))
-        if self._family is AddressFamily.IPV6:  # pragma: no cover - Windows only
-            return self._probe_v6(payload, timeout_ms, ttl)
-        return self._probe_v4(payload, timeout_ms, ttl)  # pragma: no cover - Windows only
+        # Dispatched on the destination's type, which api_destination chose by
+        # family, so the type checker sees each call get the form it takes.
+        if isinstance(self._destination, winapi.SOCKADDR_IN6):  # pragma: no cover - Windows only
+            return self._probe_v6(payload, timeout_ms, ttl, self._destination)
+        return self._probe_v4(payload, timeout_ms, ttl, self._destination)  # pragma: no cover - Windows only
 
-    def _probe_v4(self, payload: bytes, timeout_ms: int, ttl: int | None) -> EchoResult:  # pragma: no cover - Windows only
+    def _probe_v4(self, payload: bytes, timeout_ms: int, ttl: int | None, destination: int) -> EchoResult:  # pragma: no cover - Windows only
         """Issue an IPv4 echo through ``IcmpSendEcho``."""
 
         request = ctypes.create_string_buffer(payload, len(payload))
@@ -232,7 +278,7 @@ class WindowsEchoTransport:
         started = time.perf_counter()
         replies = self._library.IcmpSendEcho(
             ctypes.c_void_p(self._handle),
-            winapi.string_to_ipv4(self._address),
+            destination,
             ctypes.cast(request, ctypes.c_void_p),
             ctypes.c_uint16(len(payload)),
             ctypes.byref(options),
@@ -249,7 +295,7 @@ class WindowsEchoTransport:
         status = winapi.IpStatus.parse(int(reply.Status))
         return echo_outcome(status, elapsed_ms=elapsed_ms, api_rtt_ms=int(reply.RoundTripTime), source=source)
 
-    def _probe_v6(self, payload: bytes, timeout_ms: int, ttl: int | None) -> EchoResult:  # pragma: no cover - Windows only
+    def _probe_v6(self, payload: bytes, timeout_ms: int, ttl: int | None, destination: winapi.SOCKADDR_IN6) -> EchoResult:  # pragma: no cover - Windows only
         """Issue an IPv6 echo through ``Icmp6SendEcho2``."""
 
         request = ctypes.create_string_buffer(payload, len(payload))
@@ -258,7 +304,6 @@ class WindowsEchoTransport:
         options = self._options(ttl)
 
         source_address = winapi.sockaddr_in6()
-        destination = ipv6_destination(self._address)
 
         started = time.perf_counter()
         replies = self._library.Icmp6SendEcho2(

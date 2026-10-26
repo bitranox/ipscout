@@ -18,12 +18,11 @@ Note:
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
-import socket
 
 from .errors import IPScoutUnsupportedError
-from .models import AddressFamily, RouteInfo
+from .models import AddressFamily, RouteInfo, require_address
+from .resolve import interface_name
 from .winapi import (
     MIB_IPFORWARD_ROW2,
     MIB_IPFORWARD_TABLE2,
@@ -31,6 +30,7 @@ from .winapi import (
     SOCKADDR_INET,
     address_text,
     iphlpapi,
+    sockaddr_inet,
     sockaddr_inet_address,
     sockaddr_inet_to_string,
     win_family,
@@ -40,19 +40,18 @@ __all__ = ["default_gateway", "query_route"]
 
 
 def _destination(address: str, family: AddressFamily) -> SOCKADDR_INET | None:
-    """Pack an address into the union ``GetBestRoute2`` takes."""
+    """Pack an address into the union ``GetBestRoute2`` takes.
 
-    sockaddr = SOCKADDR_INET()
+    Returns ``None`` for anything that is not an address literal of
+    ``family``. An IPv6 ``%zone`` is dropped: the lookup is made for the bare
+    address, as :func:`ipscout.routes.query_route` makes it on every platform.
+    """
+
     try:
-        packed = socket.inet_pton(family.socket_family, address)
-        sockaddr.si_family = win_family(family)
-        if family is AddressFamily.IPV6:
-            sockaddr.Ipv6.sin6_addr[:] = packed
-        else:
-            sockaddr.Ipv4.sin_addr[:] = packed
-    except OSError:
+        parsed = require_address(address, family)
+    except ValueError:
         return None
-    return sockaddr
+    return sockaddr_inet(parsed.packed, family)
 
 
 def _next_hop(sockaddr: SOCKADDR_INET) -> str | None:
@@ -102,14 +101,9 @@ def query_route(destination: str, family: AddressFamily = AddressFamily.IPV4) ->
     if status != NO_ERROR:
         return None
 
-    interface: str | None = None
-    if row.InterfaceIndex:
-        with contextlib.suppress(OSError, ValueError):
-            interface = socket.if_indextoname(row.InterfaceIndex)
-
     return RouteInfo(
         gateway=_next_hop(row.NextHop),
-        interface=interface,
+        interface=interface_name(int(row.InterfaceIndex)),
         source=sockaddr_inet_to_string(best_source),
     )
 
@@ -161,11 +155,7 @@ def default_gateway(family: AddressFamily = AddressFamily.IPV4) -> RouteInfo | N
             # prefers the lowest metric, so reporting anything else would name
             # a router this host does not actually use.
             if best_metric is None or int(row.Metric) < best_metric:
-                interface: str | None = None
-                if int(row.InterfaceIndex):
-                    with contextlib.suppress(OSError, ValueError):
-                        interface = socket.if_indextoname(int(row.InterfaceIndex))
-                best, best_metric = RouteInfo(gateway=gateway, interface=interface), int(row.Metric)
+                best, best_metric = RouteInfo(gateway=gateway, interface=interface_name(int(row.InterfaceIndex))), int(row.Metric)
         return best
     finally:
         library.FreeMibTable(table)

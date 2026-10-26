@@ -28,7 +28,6 @@ Note:
 
 from __future__ import annotations
 
-import ipaddress
 import socket
 import sys
 from ipaddress import IPv4Address, IPv6Address
@@ -53,28 +52,11 @@ __all__ = ["ask_or_read_cache", "get_mac_address", "lookup_mac", "neighbours", "
 IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 
-#: The source handed on when an interface has no IPv4 address. Only an IPv6
-#: solicitation reaches that case, and it never reads the IPv4 source, so
-#: this fills the field rather than naming an address anything sends from.
-_NO_IPV4_SOURCE = str(ipaddress.IPv4Address(0))
-
-
-def _version_of(ip: str) -> int | None:
-    """The address family of ``ip`` as 4 or 6, or None when it will not parse."""
-
-    try:
-        return ipaddress.ip_address(ip).version
-    except ValueError:  # pragma: no cover - the kernel does not emit these
-        return None
-
 
 def of_family(entries: tuple[Neighbour, ...], family: AddressFamily | None) -> tuple[Neighbour, ...]:
     """Keep the entries in ``family``, or all of them when it is ``None``.
 
     One place, because the three address-returning calls must agree on what "IPv4" selects.
-    An entry the kernel listed with an address that will not parse is dropped rather than
-    guessed at; that cannot happen from a real cache, and a caller asking for one family has
-    said they will not handle the other.
 
     Read from the ADDRESS rather than ``entry.family``. A ``Neighbour`` refuses a family that
     disagrees with its address, so the two cannot differ; deriving keeps this filter and
@@ -82,8 +64,7 @@ def of_family(entries: tuple[Neighbour, ...], family: AddressFamily | None) -> t
     """
     if family is None:
         return entries
-    wanted = 4 if family is AddressFamily.IPV4 else 6
-    return tuple(entry for entry in entries if _version_of(entry.ip) == wanted)
+    return tuple(entry for entry in entries if entry.address.version == family.ip_version)
 
 
 def neighbours(*, family: AddressFamily | None = None) -> tuple[Neighbour, ...]:
@@ -279,7 +260,10 @@ def _sending_interface(ip: str, family: AddressFamily, *, zone: str | None = Non
         if family is AddressFamily.IPV4 and source is None:
             msg = f"{name} has no IPv4 address to send from"
             raise IPScoutUnsupportedError(msg)
-        return SendingInterface(name, source or _NO_IPV4_SOURCE, candidate.mac)
+        # Only an IPv6 solicitation gets here without an IPv4 source, and it never
+        # reads one, so the unspecified address fills the field rather than naming
+        # an address anything sends from.
+        return SendingInterface(name, source or AddressFamily.IPV4.unspecified_address, candidate.mac)
 
     msg = f"the route to {ip} names interface {name!r}, which is not among this host's interfaces"
     raise IPScoutUnsupportedError(msg)

@@ -35,15 +35,14 @@ Note:
 from __future__ import annotations
 
 import ctypes
-import ipaddress
 import socket
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
 
 from .arp import format_hardware_address
-from .models import AddressFamily, Interface, InterfaceAddress
+from .bsdroute import AF_LINK
+from .models import AddressFamily, FamilyAddress, Interface, InterfaceAddress
 from .unixio import fcntl_module
 
 __all__ = ["list_interfaces"]
@@ -55,9 +54,9 @@ _BSD_SOCKADDR = sys.platform != "linux"
 _IFF_UP = 0x1
 _IFF_LOOPBACK = 0x8
 
-#: Link-layer family. Linux spells it AF_PACKET, BSD spells it AF_LINK.
+#: Link-layer family. Linux spells it AF_PACKET; BSD spells it AF_LINK, whose
+#: number comes from bsdroute, the module that reads BSD sockaddrs.
 _AF_PACKET = getattr(socket, "AF_PACKET", 17)
-_AF_LINK = getattr(socket, "AF_LINK", 18)
 
 #: Offsets of the address bytes within each sockaddr. The same on both
 #: platforms, for the reason set out in the module docstring.
@@ -125,21 +124,7 @@ def _raw_bytes(sockaddr: _SockAddr) -> bytes:
     return bytes(bytearray(ctypes.string_at(ctypes.byref(sockaddr), _SOCKADDR_MAX)))
 
 
-class _IpAddress(NamedTuple):
-    """One IP address read out of a sockaddr.
-
-    Attributes:
-        family: The address family, decoded from the platform's raw
-            ``AF_INET`` / ``AF_INET6`` number where the sockaddr is read.
-        address: The address in its textual form, without a zone.
-
-    """
-
-    family: AddressFamily
-    address: str
-
-
-def _address_of(sockaddr: _SockAddr) -> _IpAddress | None:
+def _address_of(sockaddr: _SockAddr) -> FamilyAddress | None:
     """Return the family and text address, or None if it is not IP.
 
     This is where the raw ``sa_family`` number becomes an
@@ -160,12 +145,12 @@ def _address_of(sockaddr: _SockAddr) -> _IpAddress | None:
         chunk = raw[_IPV4_ADDR_OFFSET : _IPV4_ADDR_OFFSET + _IPV4_LEN]
         if len(chunk) != _IPV4_LEN:
             return None
-        return _IpAddress(AddressFamily.IPV4, socket.inet_ntop(socket.AF_INET, chunk))
+        return FamilyAddress(AddressFamily.IPV4, socket.inet_ntop(socket.AF_INET, chunk))
     if family == socket.AF_INET6:
         chunk = raw[_IPV6_ADDR_OFFSET : _IPV6_ADDR_OFFSET + _IPV6_LEN]
         if len(chunk) != _IPV6_LEN:
             return None
-        return _IpAddress(AddressFamily.IPV6, socket.inet_ntop(socket.AF_INET6, chunk))
+        return FamilyAddress(AddressFamily.IPV6, socket.inet_ntop(socket.AF_INET6, chunk))
     return None
 
 
@@ -210,7 +195,7 @@ def _mac_of(sockaddr: _SockAddr) -> str | None:
         if not 1 <= halen <= 8:  # noqa: PLR2004 - a hardware address is never longer
             return None
         chunk = raw[_LL_ADDR_OFFSET : _LL_ADDR_OFFSET + halen]
-    elif family == _AF_LINK and _BSD_SOCKADDR:
+    elif family == AF_LINK and _BSD_SOCKADDR:
         # The address follows a variable-length interface name, so both
         # lengths have to be read before the address can be located at all.
         nlen = raw[_DL_NLEN_OFFSET]
@@ -236,9 +221,10 @@ def _libc() -> ctypes.CDLL:
     return lib
 
 
-#: SIOCGIFMTU, which differs per platform because the ioctl number encodes
-#: the argument size and the BSD and Linux encodings are not the same.
-_SIOCGIFMTU_LINUX = 0x8921
+#: SIOCGIFMTU in the BSD encoding, which macOS uses. Only the BSDs ask
+#: through the ioctl - Linux reads the MTU from sysfs - and the number is not
+#: portable: an ioctl number encodes its argument size and direction, and the
+#: BSD and Linux encodings differ.
 _SIOCGIFMTU_BSD = 0xC0206933
 
 #: sizeof(struct ifreq): 16 bytes of name plus a 16-byte union on Linux, and
@@ -392,24 +378,3 @@ def list_interfaces() -> list[Interface]:
         lib.freeifaddrs(head)
 
     return [record.to_interface(name) for name, record in collected.items()]
-
-
-def network_of(address: str, prefix_len: int) -> str:
-    """Return the CIDR network an address belongs to.
-
-    Args:
-        address: An IPv4 or IPv6 address.
-        prefix_len: Prefix length in bits.
-
-    Returns:
-        The network in CIDR form.
-
-    Examples:
-        >>> network_of("192.168.1.55", 24)
-        '192.168.1.0/24'
-        >>> network_of("10.1.2.3", 8)
-        '10.0.0.0/8'
-
-    """
-
-    return str(ipaddress.ip_network(f"{address}/{prefix_len}", strict=False))
