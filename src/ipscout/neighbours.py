@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
     from .models import RouteInfo
 
-__all__ = ["get_mac_address", "lookup_mac", "neighbours", "normalise_mac", "resolve_active"]
+__all__ = ["ask_or_read_cache", "get_mac_address", "lookup_mac", "neighbours", "normalise_mac", "resolve_active"]
 
 IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
@@ -447,15 +447,16 @@ def _cached_lookup(ip: str, bare: str, route: RouteInfo | None, on_interface: st
             scope=MacScope.NEXT_HOP,
             via_ip=route.gateway,
             interface=(hop.interface if hop else route.interface),
+            method=MacMethod.CACHE,
         )
 
     entry = _entry_for(bare, entries, interface=on_interface)
     if entry is not None:
-        return MacLookup(ip=ip, mac=entry.mac, scope=MacScope.DIRECT, interface=entry.interface)
+        return MacLookup(ip=ip, mac=entry.mac, scope=MacScope.DIRECT, interface=entry.interface, method=MacMethod.CACHE)
 
     # On-link but not in the cache, or no route at all. Both mean the same
     # thing to a caller: nothing is known about this address yet.
-    return MacLookup(ip=ip, scope=MacScope.UNKNOWN, interface=on_interface)
+    return MacLookup(ip=ip, scope=MacScope.UNKNOWN, interface=on_interface, method=MacMethod.CACHE)
 
 
 def _require_active_for_fallback(*, active: bool, fallback_to_cache: bool) -> None:
@@ -496,7 +497,8 @@ def lookup_mac(ip: str, *, active: bool = False, fallback_to_cache: bool = False
         IPScoutPermissionError: ``active=True`` without the privilege the
             request needs, unless ``fallback_to_cache`` is set.
         IPScoutUnsupportedError: ``active=True`` with no interface or path
-            that can carry the request, unless ``fallback_to_cache`` is set.
+            that can carry the request, or one that could not be sent or
+            heard, unless ``fallback_to_cache`` is set.
         IPScoutResolutionError: ``active=True`` with a zone that names no
             interface this host has, whatever ``fallback_to_cache`` says.
 
@@ -523,6 +525,13 @@ def lookup_mac(ip: str, *, active: bool = False, fallback_to_cache: bool = False
 
     if not active:
         return _cached_lookup(ip, bare, route, on_interface)
+    if zone is not None:
+        # Checked here, before anything is sent and on every platform: the
+        # routed branch asks the gateway and never looks at the zone, and
+        # Windows sends without one, so a zone naming no interface would
+        # otherwise pass unseen - and with the fallback on, turn into a cache
+        # read of whichever link holds that address.
+        _zone_interface(zone)
     return ask_or_read_cache(
         lambda: _active_lookup(ip, route, on_interface),
         lambda: _cached_lookup(ip, bare, route, on_interface),
@@ -543,6 +552,11 @@ def get_mac_address(ip: str, *, active: bool = False, fallback_to_cache: bool = 
     Returns:
         The address, or ``None`` when the host is not directly reachable at
         layer 2 or is simply unknown.
+
+    Raises:
+        ValueError: As :func:`lookup_mac`: ``ip`` is not an IP address
+            literal, or ``fallback_to_cache`` is set without ``active``.
+        IPScoutError: As :func:`lookup_mac` for ``active=True``.
 
     Note:
         Deliberately strict: it refuses to guess rather than quietly handing

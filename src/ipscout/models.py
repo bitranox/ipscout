@@ -536,7 +536,8 @@ class MacMethod(str, enum.Enum):
     address is free needs to know which of the two it was given.
     """
 
-    #: A resolution request was sent; ``mac`` is what came back, ``None`` when nothing answered.
+    #: A resolution request was sent: to the host itself, or to the next-hop router for a
+    #: routed address. ``scope`` still says whose ``mac`` is, if any.
     ACTIVE = "active"
     #: Read from the neighbour cache.
     CACHE = "cache"

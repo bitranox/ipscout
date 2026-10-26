@@ -67,7 +67,7 @@ from .bsdroute import (
     split_sockaddrs,
     sysctl,
 )
-from .errors import IPScoutError, IPScoutPermissionError
+from .errors import IPScoutError, IPScoutPermissionError, could_not_ask
 from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState
 
 __all__ = [
@@ -223,6 +223,9 @@ def resolve_active_ipv4(
     Raises:
         IPScoutPermissionError: ``/dev/bpf*`` could not be opened, which on a
             stock macOS means the process is not root.
+        IPScoutUnsupportedError: The request could not be sent or the reply
+            could not be read (the interface went away, the stack refused the
+            send). That is "could not ask", never a ``None`` answer.
 
     Note:
         macOS has no ``AF_PACKET``; BPF is the equivalent, and it is
@@ -245,8 +248,8 @@ def resolve_active_ipv4(
                 if found is not None:
                     return found
         return None
-    except OSError:
-        return None
+    except OSError as exc:
+        raise could_not_ask(target_ip, interface, exc) from exc
     finally:
         with contextlib.suppress(OSError):
             os.close(descriptor)
@@ -266,6 +269,9 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
 
     Raises:
         IPScoutPermissionError: A raw ICMPv6 socket could not be opened.
+        IPScoutUnsupportedError: The request could not be sent or the reply
+            could not be read (the interface went away, the stack refused the
+            send). That is "could not ask", never a ``None`` answer.
 
     """
 
@@ -291,8 +297,8 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
             if found is not None:
                 return found
         return None
-    except OSError:
-        return None
+    except OSError as exc:
+        raise could_not_ask(target_ip, interface, exc) from exc
     finally:
         with contextlib.suppress(OSError):
             sock.close()

@@ -42,6 +42,7 @@ __all__ = [
     "ipv4_neighbour_row",
     "list_neighbours",
     "raise_for_status",
+    "refuse_unless_unanswered",
     "remove_static_neighbour",
     "removed_from_status",
     "resolve_active",
@@ -55,6 +56,28 @@ _ERROR_ACCESS_DENIED = 5
 
 #: ERROR_NOT_FOUND: a delete found no such entry, which is an answer.
 _ERROR_NOT_FOUND = 1168
+
+#: ERROR_BAD_NET_NAME: the one status that means "asked, nobody answered".
+#: Measured 2026-10-26 on a Windows test VM: SendARP gives it for an on-link address
+#: nobody holds and for an off-subnet one, and ResolveIpNetEntry2 for an
+#: unanswered link-local address. Every other failure (ERROR_NETWORK_UNREACHABLE
+#: with no route, an invalid parameter) means the request could not be asked.
+_ERROR_BAD_NET_NAME = 67
+
+
+def refuse_unless_unanswered(status: int, *, call: str, ip: str) -> None:
+    """Return quietly for "nobody answered"; raise for a request that could not be asked.
+
+    Raises:
+        IPScoutUnsupportedError: ``status`` is any failure other than no reply,
+            so the caller is told it could not ask rather than that the
+            address is free.
+    """
+
+    if status != _ERROR_BAD_NET_NAME:
+        msg = f"could not ask for {ip}: {call} failed with Windows error {status}"
+        raise IPScoutUnsupportedError(msg)
+
 
 #: ERROR_OBJECT_ALREADY_EXISTS: a create met an entry for that address.
 _ERROR_OBJECT_ALREADY_EXISTS = 5010
@@ -209,6 +232,7 @@ def _resolve_ipv6(library: ctypes.CDLL, ip: str) -> str | None:  # pragma: no co
         )
         raise IPScoutPermissionError(msg)
     if status != NO_ERROR:
+        refuse_unless_unanswered(int(status), call="ResolveIpNetEntry2", ip=ip)
         return None
     return declared_mac(bytes(row.PhysicalAddress), int(row.PhysicalAddressLength))
 
@@ -228,6 +252,9 @@ def resolve_active(ip: str, family: AddressFamily) -> str | None:  # pragma: no 
         IPScoutPermissionError: IPv6 resolution was refused for want of
             elevation. ``ResolveIpNetEntry2`` requires it; ``SendARP`` does
             not, so IPv4 works either way.
+        IPScoutUnsupportedError: ``iphlpapi.dll`` could not be loaded, or the
+            call failed for any reason other than no reply (no route to the
+            address, among others): the request could not be asked.
 
     Note:
         IPv4 goes through ``SendARP``, which needs no elevation and makes
@@ -237,10 +264,7 @@ def resolve_active(ip: str, family: AddressFamily) -> str | None:  # pragma: no 
 
     """
 
-    try:
-        library = iphlpapi()
-    except IPScoutUnsupportedError:
-        return None
+    library = iphlpapi()
 
     if family is AddressFamily.IPV6:
         return _resolve_ipv6(library, ip)
@@ -253,7 +277,9 @@ def resolve_active(ip: str, family: AddressFamily) -> str | None:  # pragma: no 
     buffer = (ctypes.c_uint8 * MAX_ADAPTER_ADDRESS_LENGTH)()
     length = ctypes.c_uint32(MAX_ADAPTER_ADDRESS_LENGTH)
     destination = ctypes.c_uint32.from_buffer_copy(packed).value
-    if library.SendARP(destination, 0, ctypes.byref(buffer), ctypes.byref(length)) != NO_ERROR:
+    status = library.SendARP(destination, 0, ctypes.byref(buffer), ctypes.byref(length))
+    if status != NO_ERROR:
+        refuse_unless_unanswered(int(status), call="SendARP", ip=ip)
         return None
     return declared_mac(bytes(buffer), int(length.value))
 

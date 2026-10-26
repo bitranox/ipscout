@@ -17,6 +17,18 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   for or read from the cache, and `ipscout mac` prints and emits it. `--strict` keeps it too, and now
   also carries the interface of a direct answer.
 
+### Fixed
+
+- An active MAC lookup no longer reports a request it could not make as "nobody answered":
+  - On Windows, a `SendARP` or `ResolveIpNetEntry2` failure other than no reply (no route to the
+    address, among others) and a missing `iphlpapi.dll` now raise `IPScoutUnsupportedError`.
+    They used to return `None`. Only `ERROR_BAD_NET_NAME` reads as no reply.
+  - On Linux and macOS, a send or receive that fails after the socket opens (the interface went
+    away, the link is down) now raises `IPScoutUnsupportedError` too, instead of returning `None`.
+- `lookup_mac(..., active=True)` checks a zone before anything is sent on every platform, and
+  raises `IPScoutResolutionError` when it names no interface. Before, the routed branch and
+  Windows never looked at the zone, so a typo passed unseen.
+
 ## [2.2.0] 2026-10-26 11:06:07
 
 ### Added

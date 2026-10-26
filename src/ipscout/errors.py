@@ -40,6 +40,7 @@ __all__ = [
     "IPScoutSweepIncompleteError",
     "IPScoutSweepTooWideError",
     "IPScoutUnsupportedError",
+    "could_not_ask",
     "refused_arguments",
     "validation_problems",
 ]
@@ -224,3 +225,26 @@ def refused_arguments(operation: str, error: ValidationError, *, field: str | No
     if field is not None:
         problems = [f"{field}: {problem}" for problem in problems]
     return ValueError(f"{operation} refused its arguments: " + "; ".join(problems))
+
+
+def could_not_ask(target_ip: str, interface: str, error: OSError) -> IPScoutUnsupportedError:
+    """Return the error for a resolution request that could not be sent or heard.
+
+    An interface that went down, a send the stack refused, a read that failed:
+    none of these is "nobody answered", and reporting one as a ``None`` answer
+    would tell a caller an address is free when it was never asked about. This
+    is the same class as having no path at all, so a caller who allowed a
+    fallback to the cache gets one.
+
+    Args:
+        target_ip: The address the request asked about.
+        interface: The interface it was to go out on.
+        error: What the operating system reported.
+
+    Examples:
+        >>> str(could_not_ask("192.0.2.7", "eth0", OSError(19, "No such device")))
+        'could not ask for 192.0.2.7 on eth0: [Errno 19] No such device'
+
+    """
+
+    return IPScoutUnsupportedError(f"could not ask for {target_ip} on {interface}: {error}")

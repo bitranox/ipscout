@@ -201,45 +201,45 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 
 ### Public surface
 
-| Module                 | Role                                                                                                                                                              |
-|------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `__init__.py`          | Re-exports the public API so importers depend on the package, not its layout.                                                                                     |
-| `api.py`               | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.                                                             |
-| `traceroute.py`        | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                                                                             |
-| `interfaces.py`        | `local_interfaces`, dispatching to the per-OS backend.                                                                                                            |
-| `routes.py`            | `query_route`, `default_gateway`, dispatching to the per-OS backend.                                                                                              |
-| `neighbours.py`        | `neighbours`, `lookup_mac`, `get_mac_address`, `resolve_active`, `normalise_mac`.                                                                                 |
-| `static_neighbours.py` | `set_neighbour`, `remove_neighbour`: write and delete a permanent IPv4 entry, choosing the interface and reading the result back.                                 |
-| `scan.py`              | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.                                                          |
-| `subnet.py`            | `subnet_info`, composing interfaces, routes and the stored lease.                                                                                                 |
-| `portscan.py`          | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                                                                           |
-| `banner.py`            | `grab_banners`, `agrab_banners`: connect, read the first line, say goodbye and close, all on one connection per host.                                             |
-| `snmp.py`              | `read_snmp_system`, `aread_snmp_system`: one SNMP GET of the system group per host on a connected UDP socket, re-asking under v1 without a value the agent lacks. |
-| `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                                                  |
-| `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                                                     |
-| `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                                                     |
-| `resolve.py`           | `resolve`, `resolve_one` (returns a `ResolvedTarget` named tuple), `reverse_dns`, `family_of`.                                                                    |
-| `factory.py`           | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path.                                                   |
+| Module                 | Role                                                                                                                                                                      |
+|------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `__init__.py`          | Re-exports the public API so importers depend on the package, not its layout.                                                                                             |
+| `api.py`               | `ping`, `aping`, `ping_many`, `aping_many`, `is_reachable`, `ais_reachable`. Owns the error contract.                                                                     |
+| `traceroute.py`        | `traceroute`, `atraceroute`, `trace_path`, `atrace_path`, and the capability refusal.                                                                                     |
+| `interfaces.py`        | `local_interfaces`, dispatching to the per-OS backend.                                                                                                                    |
+| `routes.py`            | `query_route`, `default_gateway`, dispatching to the per-OS backend.                                                                                                      |
+| `neighbours.py`        | `neighbours`, `lookup_mac`, `get_mac_address`, `resolve_active`, `normalise_mac`, and `ask_or_read_cache`, the one rule for falling back from an active ask to the cache. |
+| `static_neighbours.py` | `set_neighbour`, `remove_neighbour`: write and delete a permanent IPv4 entry, choosing the interface and reading the result back.                                         |
+| `scan.py`              | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.                                                                  |
+| `subnet.py`            | `subnet_info`, composing interfaces, routes and the stored lease.                                                                                                         |
+| `portscan.py`          | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                                                                                   |
+| `banner.py`            | `grab_banners`, `agrab_banners`: connect, read the first line, say goodbye and close, all on one connection per host.                                                     |
+| `snmp.py`              | `read_snmp_system`, `aread_snmp_system`: one SNMP GET of the system group per host on a connected UDP socket, re-asking under v1 without a value the agent lacks.         |
+| `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                                                          |
+| `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                                                             |
+| `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                                                             |
+| `resolve.py`           | `resolve`, `resolve_one` (returns a `ResolvedTarget` named tuple), `reverse_dns`, `family_of`.                                                                            |
+| `factory.py`           | `make_transport`, `make_async_transport`, `icmp_available`. The only `sys.platform` branch in the probing path.                                                           |
 
 ### Core
 
-| Module        | Role                                                                                                                    |
-|---------------|-------------------------------------------------------------------------------------------------------------------------|
-| `errors.py`   | `IPScoutError` and its subclasses, sweep refusals included. No dependencies.                                            |
-| `models.py`   | Frozen result models and the `str`-subclass enums.                                                                      |
-| `ports.py`    | `EchoResult`, `EchoTransport`, `AsyncEchoTransport`. The seams.                                                         |
-| `packet.py`   | ICMP encode and decode. Total functions over bytes: no sockets, no clock, no I/O.                                       |
-| `service.py`  | `PingRequest`, `run_ping`, `arun_ping`. Probe sequencing and aggregation.                                               |
-| `netlink.py`  | Message and attribute walkers and encoders, and the acknowledgement reader, for the Linux route and neighbour backends. |
-| `bsdroute.py` | Routing-message and `sockaddr` walkers and encoders for the macOS backends, plus `sysctl`.                              |
-| `arp.py`      | ARP and NDP codecs. Testable without the privilege the sockets need.                                                    |
-| `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.                                                  |
-| `bpf.py`      | BSD packet filter ioctl encoding and record splitting, shared by two backends.                                          |
-| `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.                                                   |
-| `deadline.py` | `within` and `failure_reason`: one deadline across several awaits, shared by the banner grab and the SNMP read.         |
-| `snmpber.py`  | BER encode of an SNMP GET and a structural parse of the reply. Total functions over bytes, like `packet.py`.            |
-| `pool.py`     | `gather_bounded`: a fixed worker pool, so a long work list never becomes one Task per item.                             |
-| `sockerr.py`  | `is_refusal`: one reading of a refused connect across every platform's spelling, shared by every module that connects.  |
+| Module        | Role                                                                                                                                              |
+|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `errors.py`   | `IPScoutError` and its subclasses, sweep refusals included, and `could_not_ask` for a resolution request that could not be sent. No dependencies. |
+| `models.py`   | Frozen result models and the `str`-subclass enums.                                                                                                |
+| `ports.py`    | `EchoResult`, `EchoTransport`, `AsyncEchoTransport`. The seams.                                                                                   |
+| `packet.py`   | ICMP encode and decode. Total functions over bytes: no sockets, no clock, no I/O.                                                                 |
+| `service.py`  | `PingRequest`, `run_ping`, `arun_ping`. Probe sequencing and aggregation.                                                                         |
+| `netlink.py`  | Message and attribute walkers and encoders, and the acknowledgement reader, for the Linux route and neighbour backends.                           |
+| `bsdroute.py` | Routing-message and `sockaddr` walkers and encoders for the macOS backends, plus `sysctl`.                                                        |
+| `arp.py`      | ARP and NDP codecs. Testable without the privilege the sockets need.                                                                              |
+| `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.                                                                            |
+| `bpf.py`      | BSD packet filter ioctl encoding and record splitting, shared by two backends.                                                                    |
+| `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.                                                                             |
+| `deadline.py` | `within` and `failure_reason`: one deadline across several awaits, shared by the banner grab and the SNMP read.                                   |
+| `snmpber.py`  | BER encode of an SNMP GET and a structural parse of the reply. Total functions over bytes, like `packet.py`.                                      |
+| `pool.py`     | `gather_bounded`: a fixed worker pool, so a long work list never becomes one Task per item.                                                       |
+| `sockerr.py`  | `is_refusal`: one reading of a refused connect across every platform's spelling, shared by every module that connects.                            |
 
 ### Platform backends
 

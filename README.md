@@ -200,7 +200,9 @@ ipscout.remove_neighbour(ip, interface="eth0")  # and out again
 ```
 
 A MAC address does not survive a router hop, so `lookup_mac` puts the scope in the answer and
-`get_mac_address` returns `None` for anything routed rather than passing off the gateway's as the host's. A
+`get_mac_address` returns `None` for anything routed rather than passing off the gateway's as the host's. Every
+answer also says in `method` whether it was asked for (`active=True`) or read from the cache, and
+`fallback_to_cache=True` reads the cache only when this host cannot ask actively. A
 sweep with no network given covers the subnets this host is attached to that fit inside one sweep's
 4096-address budget, and names the ones left out - a container bridge on a `/16` is skipped rather than
 cancelling the sweep, and a search that matched nothing while a network went uncovered says so instead of

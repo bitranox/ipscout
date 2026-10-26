@@ -10,6 +10,7 @@ caller's mistake still raises.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 
@@ -20,6 +21,8 @@ from ipscout.cli import EXIT_ERROR, EXIT_NOT_REACHED, main
 from ipscout.errors import IPScoutPermissionError, IPScoutResolutionError, IPScoutUnsupportedError
 from ipscout.models import MacLookup, MacMethod, MacScope
 from ipscout.neighbours import ask_or_read_cache
+from ipscout.neighbours_linux import resolve_active_ipv4
+from ipscout.neighbours_windows import refuse_unless_unanswered
 
 _ACTIVE_MISS = MacLookup(ip="192.0.2.7", scope=MacScope.UNKNOWN, method=MacMethod.ACTIVE)
 _CACHED_HIT = MacLookup(ip="192.0.2.7", mac="00:00:5e:00:53:07", scope=MacScope.DIRECT, method=MacMethod.CACHE)
@@ -29,6 +32,14 @@ def _loopback_name() -> str:
     """Return this host's loopback interface name (``lo`` on Linux, ``lo0`` on macOS)."""
 
     return next(name for _index, name in socket.if_nameindex() if name.startswith("lo"))
+
+
+def _is_root() -> bool:
+    """Return whether this process runs as root; a ``sys.platform`` guard, so the type checker narrows it."""
+
+    if sys.platform == "win32":
+        return False
+    return os.geteuid() == 0
 
 
 def _raising(error: Exception) -> MacLookup:
@@ -129,6 +140,8 @@ def test_an_unprivileged_host_answers_a_known_neighbour_from_the_cache() -> None
         ipscout.lookup_mac(known, active=True)
     except IPScoutPermissionError:
         pass
+    except IPScoutUnsupportedError:
+        pytest.skip(f"the first cache entry ({known}) is on an interface that cannot carry a request")
     else:
         pytest.skip("this process may send raw frames, so the active ask succeeds and nothing falls back")
 
@@ -201,3 +214,64 @@ def test_strict_keeps_the_method_of_a_routed_active_answer(capsys: pytest.Captur
 
     assert (data["method"], data["scope"], data["mac"]) == ("active", "unknown", None)
     assert code == EXIT_NOT_REACHED
+
+
+# --------------------------------------------------------------------------
+# Review round: "could not ask" is never read as "nobody answered"
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.os_agnostic
+def test_a_zone_naming_no_interface_raises_for_a_routed_address_too() -> None:
+    # The routed branch asks the gateway and never looks at the zone, and
+    # Windows sends without one, so the zone is checked before either.
+    with pytest.raises(IPScoutResolutionError, match=r"no interface named 'nosuchif0'"):
+        ipscout.lookup_mac("2001:db8::1%nosuchif0", active=True, fallback_to_cache=True)
+
+
+@pytest.mark.os_agnostic
+def test_windows_reads_only_its_no_reply_status_as_nobody_answered() -> None:
+    # 67 (ERROR_BAD_NET_NAME) is what SendARP and ResolveIpNetEntry2 return when
+    # nothing answered; 1231 (ERROR_NETWORK_UNREACHABLE) is what ResolveIpNetEntry2
+    # returns with no route, i.e. the request could not be asked.
+    refuse_unless_unanswered(67, call="SendARP", ip="192.0.2.7")
+    with pytest.raises(IPScoutUnsupportedError, match=r"^could not ask for 2001:db8::9: ResolveIpNetEntry2 failed with Windows error 1231$"):
+        refuse_unless_unanswered(1231, call="ResolveIpNetEntry2", ip="2001:db8::9")
+
+
+@pytest.mark.os_posix
+def test_a_routed_address_that_cannot_be_asked_reads_the_routers_cache_entry() -> None:
+    gateway = ipscout.default_gateway()
+    if gateway is None:
+        pytest.skip("this host has no IPv4 default route")
+    try:
+        ipscout.lookup_mac("203.0.113.199", active=True)
+    except (IPScoutPermissionError, IPScoutUnsupportedError):
+        pass
+    else:
+        pytest.skip("this process can ask the gateway actively, so nothing falls back")
+
+    answer = ipscout.lookup_mac("203.0.113.199", active=True, fallback_to_cache=True)
+
+    assert (answer.method, answer.scope) == (MacMethod.CACHE, MacScope.NEXT_HOP)
+    assert answer.via_ip == gateway.gateway
+
+
+@pytest.mark.os_windows
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' ResolveIpNetEntry2 status for an unrouted address")
+def test_windows_with_no_route_falls_back_rather_than_reporting_a_miss() -> None:
+    if ipscout.default_gateway(ipscout.AddressFamily.IPV6) is not None:
+        pytest.skip("this host routes IPv6, so 2001:db8::9 has a path")
+    try:
+        answer = ipscout.lookup_mac("2001:db8::9", active=True, fallback_to_cache=True)
+    except IPScoutPermissionError:
+        pytest.skip("not elevated: ResolveIpNetEntry2 is refused before it can report the missing route")
+
+    assert answer.method is MacMethod.CACHE
+
+
+@pytest.mark.os_linux
+@pytest.mark.skipif(not _is_root(), reason="opening a link-layer socket needs root")
+def test_a_send_that_fails_after_the_socket_opens_is_could_not_ask() -> None:
+    with pytest.raises(IPScoutUnsupportedError, match=r"^could not ask for 192\.0\.2\.7 on nosuchif0: "):
+        resolve_active_ipv4("192.0.2.7", interface="nosuchif0", source_ip="192.0.2.1", source_mac="00:00:5e:00:53:01", timeout=0.2)

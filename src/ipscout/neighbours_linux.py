@@ -41,7 +41,7 @@ from .arp import (
     parse_neighbour_advertisement,
     solicited_node_multicast,
 )
-from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError
+from .errors import IPScoutError, IPScoutPermissionError, IPScoutUnsupportedError, could_not_ask
 from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState
 from .netlink import (
     NLM_F_ACK,
@@ -369,6 +369,9 @@ def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, sourc
 
     Raises:
         IPScoutPermissionError: The process may not open a link-layer socket.
+        IPScoutUnsupportedError: The request could not be sent or the reply
+            could not be read (the interface went away, the stack refused the
+            send). That is "could not ask", never a ``None`` answer.
 
     Note:
         Uses ``AF_PACKET``, which requires root or ``CAP_NET_RAW``. It never
@@ -408,8 +411,8 @@ def resolve_active_ipv4(target_ip: str, *, interface: str, source_ip: str, sourc
         return None
     except PermissionError as exc:  # pragma: no cover - bind may also be denied
         raise _permission_error(exc, _Solicitation.ARP) from exc
-    except OSError:
-        return None
+    except OSError as exc:
+        raise could_not_ask(target_ip, interface, exc) from exc
     finally:
         with contextlib.suppress(OSError):
             sock.close()
@@ -429,6 +432,9 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
 
     Raises:
         IPScoutPermissionError: The process may not open a raw ICMPv6 socket.
+        IPScoutUnsupportedError: The request could not be sent or the reply
+            could not be read (the interface went away, the stack refused the
+            send). That is "could not ask", never a ``None`` answer.
 
     Note:
         Neighbour discovery does not broadcast: the solicitation goes to the
@@ -463,8 +469,8 @@ def resolve_active_ipv6(target_ip: str, *, interface: str, source_mac: str, time
         return None
     except PermissionError as exc:  # pragma: no cover - send may also be denied
         raise _permission_error(exc, _Solicitation.NEIGHBOUR_DISCOVERY) from exc
-    except OSError:
-        return None
+    except OSError as exc:
+        raise could_not_ask(target_ip, interface, exc) from exc
     finally:
         with contextlib.suppress(OSError):
             sock.close()
