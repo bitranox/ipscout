@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.5.0] 2026-10-26 19:16:26
+
 ### Added
 
 - `factory.make_hop_transport` / `make_async_hop_transport`: the ICMP transport a hop walk needs,
