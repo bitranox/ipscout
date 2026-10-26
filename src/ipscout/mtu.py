@@ -35,13 +35,14 @@ from .winapi import (
     INVALID_HANDLE_VALUE,
     IP_OPTION_INFORMATION,
     IpStatus,
+    echo_status,
     iphlpapi,
     last_error,
     reply_buffer_size,
     string_to_ipv4,
 )
 
-__all__ = ["path_mtu"]
+__all__ = ["fits_unfragmented", "path_mtu"]
 
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
@@ -125,11 +126,38 @@ def _linux_mtu(address: str, family: AddressFamily) -> int | None:
     return value if value > 0 else None
 
 
+def fits_unfragmented(status: IpStatus | None) -> bool:
+    """Return whether a don't-fragment echo with this outcome counts as fitting.
+
+    Only "packet too big" is evidence that the size does not fit, whether the
+    local stack refused it or a router on the path answered with it. Any other
+    outcome - an answer, a timeout, a hop limit spent - says nothing about the
+    size, so the bisection keeps climbing, as Linux reports a route's MTU for
+    a host that is down.
+
+    Args:
+        status: The probe's status, from :func:`ipscout.winapi.echo_status`.
+
+    Returns:
+        False only for ``IpStatus.PACKET_TOO_BIG``.
+
+    Examples:
+        >>> fits_unfragmented(IpStatus.PACKET_TOO_BIG)
+        False
+        >>> fits_unfragmented(IpStatus.REQ_TIMED_OUT)
+        True
+
+    """
+
+    return status is not IpStatus.PACKET_TOO_BIG
+
+
 def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
     """Return the path MTU by probing with the don't-fragment flag set.
 
     Windows has no query for this, so the size is narrowed by bisection: the
-    largest payload that is not answered with "packet too big" is the answer.
+    largest payload that is not answered with "packet too big" is the answer,
+    whether the local stack refuses it or a router's reply carries it.
     """
 
     # Converted once, before any handle exists: every probe of the bisection
@@ -150,9 +178,9 @@ def _windows_mtu(address: str) -> int | None:  # pragma: no cover - Windows only
         request = b"\x00" * payload
         reply = (ctypes.c_uint8 * reply_buffer_size(ICMP_ECHO_REPLY, payload))()
         count = library.IcmpSendEcho(handle, destination, request, payload, ctypes.byref(options), reply, len(reply), _PROBE_TIMEOUT_MS)
-        if count:
-            return True
-        return IpStatus.parse(last_error()) is not IpStatus.PACKET_TOO_BIG
+        error = last_error()
+        status = ctypes.cast(reply, ctypes.POINTER(ICMP_ECHO_REPLY)).contents.Status
+        return fits_unfragmented(echo_status(count, reply_status=int(status), last_error=error))
 
     try:
         low, high = _MIN_MTU - _IPV4_ICMP_OVERHEAD, _MAX_MTU - _IPV4_ICMP_OVERHEAD

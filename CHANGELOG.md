@@ -9,6 +9,9 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 - `subnet_info(interfaces=...)`: describe the given interfaces instead of reading this host's,
   as `local_networks(interfaces=...)` already does.
+- `winapi.echo_status` and `mtu.fits_unfragmented`: the status one `IcmpSendEcho` call reports,
+  from the reply when there is one and from `GetLastError` when not, and what the MTU probe reads
+  from it.
 - `packet.parse_echo_request` and `packet.quoted_echo_request`: read the echo request an ICMP
   error quotes, from an error-queue entry or from a received Time Exceeded message.
 - `InterfaceAddress.cidr` / `.network`, `SubnetInfo.cidr` and `Neighbour.address`: the text and
@@ -93,6 +96,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - Traceroute over a raw ICMP socket without an error queue (macOS as root) reports the routers:
   the receive loop discarded their Time Exceeded messages as foreign traffic. Checked on Linux
   with a raw socket that refuses `IP_RECVERR`, not yet on a Mac.
+- Windows: `path_mtu` reads a reply's own status. A router's "packet too big" comes back as a
+  reply carrying that status, and any reply used to count as fitting, so the MTU came out too
+  large on a path with a smaller link. The local refusal was already read; the router's reply is
+  read the same way now (`winapi.echo_status`), not yet measured on such a path.
 
 ## [2.3.0] 2026-10-26 12:19:25
 

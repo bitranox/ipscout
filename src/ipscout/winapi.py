@@ -75,6 +75,7 @@ __all__ = [
     "WIN_AF_UNSPEC",
     "IpStatus",
     "address_text",
+    "echo_status",
     "family_from_win",
     "iphlpapi",
     "ipv4_to_string",
@@ -196,6 +197,36 @@ def status_message(code: int) -> str:
 
     status = IpStatus.parse(code)
     return status.text if status is not None else f"IP_STATUS {code}"
+
+
+def echo_status(replies: int, *, reply_status: int, last_error: int) -> IpStatus | None:
+    """Return the status one ``IcmpSendEcho`` call reports.
+
+    The call reports in two places. With no reply it returns 0 and the status
+    is in ``GetLastError``. With a reply it returns the count, and the status
+    is the reply's own ``Status`` - which is not ``SUCCESS`` when the reply is
+    an ICMP error: a router's TTL expiry comes back as one reply carrying
+    ``TTL_EXPIRED_TRANSIT``. Reading the count alone takes every such error
+    for an answer.
+
+    Args:
+        replies: What the call returned.
+        reply_status: The first reply's ``Status`` field; ignored when
+            ``replies`` is 0, since nothing was written.
+        last_error: ``GetLastError`` right after the call.
+
+    Returns:
+        The status, or ``None`` for a code :class:`IpStatus` does not list.
+
+    Examples:
+        >>> echo_status(1, reply_status=11013, last_error=0) is IpStatus.TTL_EXPIRED_TRANSIT
+        True
+        >>> echo_status(0, reply_status=0, last_error=11010) is IpStatus.REQ_TIMED_OUT
+        True
+
+    """
+
+    return IpStatus.parse(reply_status if replies else last_error)
 
 
 #: Force the MSVC structure layout rather than the host compiler's native one.
