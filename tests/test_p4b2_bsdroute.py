@@ -94,3 +94,27 @@ def test_a_sockaddr_dl_hardware_address_renders_as_before(mac: bytes, expected: 
 def test_every_active_resolver_waits_the_package_default_for_a_reply(resolver: object) -> None:
     assert callable(resolver)
     assert inspect.signature(resolver).parameters["timeout"].default == DEFAULT_TIMEOUT
+
+
+def test_every_sockaddr_lands_in_its_own_field_and_unread_slots_are_stepped_over() -> None:
+    order = (
+        bsdroute.RTA_DST,
+        bsdroute.RTA_GATEWAY,
+        bsdroute.RTA_NETMASK,
+        bsdroute.RTA_GENMASK,
+        bsdroute.RTA_IFP,
+        bsdroute.RTA_IFA,
+        bsdroute.RTA_AUTHOR,
+        bsdroute.RTA_BRD,
+    )
+    # Each slot a minimal 4-byte sockaddr whose second byte says which slot it is.
+    slots = [bytes([4, index, 0, 0]) for index in range(len(order))]
+    addrs = 0
+    for bit in order:
+        addrs |= bit
+
+    found = bsdroute.split_sockaddrs(b"".join(slots), addrs)
+
+    assert found == bsdroute.SockaddrSet(
+        destination=slots[0], gateway=slots[1], netmask=slots[2], interface=slots[4], interface_address=slots[5], broadcast=slots[7]
+    )

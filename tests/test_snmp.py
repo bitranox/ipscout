@@ -113,6 +113,13 @@ def test_a_value_of_the_wrong_type_is_an_error_naming_it() -> None:
     assert system.error is not None and "uptime" in system.error
 
 
+def test_two_values_of_the_wrong_type_are_refused_naming_the_first_asked_for() -> None:
+    with FakeAgent(honest({**SYSTEM, NAME: (INTEGER, b"\x01"), DESCRIPTION: (INTEGER, b"\x01")})) as agent:
+        system = _read(agent)
+
+    assert system.error == "description: arrived as tag 0x02, expected 0x04"
+
+
 def test_a_reply_to_another_request_is_set_aside_until_the_right_one_arrives() -> None:
     def script(request: SnmpMessage) -> list[bytes]:
         return [answer(request, request_id=request.request_id + 1), b"\x30\x00garbage", answer(request)]

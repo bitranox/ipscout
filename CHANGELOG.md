@@ -5,6 +5,14 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Changed
+
+- `ipscout.errors.setcap_command` takes a `LinuxCapability` (`NET_RAW`, `NET_ADMIN`) instead of a
+  capability string. The command text it returns is unchanged.
+- `ipscout.errors.kernel_refused_neighbour_change(verb, error)` is replaced by
+  `NeighbourChange.refused_by_kernel(error)`, so only the two changes the backends make can be
+  named. The refusal message is unchanged.
+
 ## [2.5.1] 2026-10-26 21:35:48
 
 ### Added

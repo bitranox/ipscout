@@ -20,8 +20,7 @@ Contents:
     ARP_SCAN_ALTERNATIVE: The unprivileged way out every refused active
         resolution offers.
     PERMISSION_ERRNOS: The errnos a kernel answers with for want of a privilege.
-    kernel_refused_neighbour_change: The error for a neighbour-table change the
-        kernel refused for a reason other than privilege.
+    LinuxCapability: The capabilities a Linux refusal tells the caller to grant.
 
 Note:
     Names carry the ``IPScout`` prefix rather than reading ``PermissionError``
@@ -32,8 +31,8 @@ Note:
 
 from __future__ import annotations
 
+import enum
 import errno
-import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -49,8 +48,8 @@ __all__ = [
     "IPScoutSweepIncompleteError",
     "IPScoutSweepTooWideError",
     "IPScoutUnsupportedError",
+    "LinuxCapability",
     "could_not_ask",
-    "kernel_refused_neighbour_change",
     "refused_arguments",
     "setcap_command",
     "validation_problems",
@@ -62,7 +61,18 @@ __all__ = [
 ARP_SCAN_ALTERNATIVE = "use arp_scan(), which resolves the same addresses unprivileged"
 
 
-def setcap_command(capability: str) -> str:
+class LinuxCapability(str, enum.Enum):
+    """The Linux capabilities a refusal tells the caller to grant.
+
+    A fixed set, so an enum rather than a literal at each refusal. It lives
+    here, below the models, because only the refusal text uses it.
+    """
+
+    NET_RAW = "cap_net_raw"
+    NET_ADMIN = "cap_net_admin"
+
+
+def setcap_command(capability: LinuxCapability) -> str:
     """Return the shell command that grants ``capability`` to the running interpreter.
 
     Every Linux refusal for a missing capability offers it, so its spelling -
@@ -70,12 +80,14 @@ def setcap_command(capability: str) -> str:
     setcap must name the real file, not a symlink - is written once.
 
     Examples:
-        >>> setcap_command("cap_net_raw")
+        >>> setcap_command(LinuxCapability.NET_RAW)
         'setcap cap_net_raw+ep $(readlink -f $(which python3))'
 
     """
 
-    return f"setcap {capability}+ep $(readlink -f $(which python3))"
+    # .value, not the member: on 3.11+ an f-string of a str enum member gives
+    # "LinuxCapability.NET_RAW", and this package still runs on 3.10.
+    return f"setcap {capability.value}+ep $(readlink -f $(which python3))"
 
 
 #: The errnos a kernel answers with when the process lacks a privilege. Which
@@ -287,23 +299,3 @@ def could_not_ask(target_ip: str, interface: str, error: OSError) -> IPScoutUnsu
     """
 
     return IPScoutUnsupportedError(f"could not ask for {target_ip} on {interface}: {error}")
-
-
-def kernel_refused_neighbour_change(verb: str, error: int) -> IPScoutError:
-    """Return the error for a neighbour-table change the kernel refused.
-
-    For a refusal that is not about privilege - those are
-    :data:`PERMISSION_ERRNOS` and get their own remedy - so the kernel's own
-    reason is all there is to report, with its errno for a caller to match on.
-
-    Args:
-        verb: What the change was to do (``"add"``, ``"delete"``).
-        error: The errno the kernel answered with.
-
-    Examples:
-        >>> str(kernel_refused_neighbour_change("add", errno.EEXIST))
-        'the kernel refused to add the neighbour entry: File exists (errno 17)'
-
-    """
-
-    return IPScoutError(f"the kernel refused to {verb} the neighbour entry: {os.strerror(error)} (errno {error})")

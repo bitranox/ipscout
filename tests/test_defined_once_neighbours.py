@@ -26,7 +26,6 @@ from ipscout.errors import (
     IPScoutError,
     IPScoutPermissionError,
     IPScoutUnsupportedError,
-    kernel_refused_neighbour_change,
 )
 from ipscout.models import AddressFamily, Neighbour, NeighbourChange, NeighbourState
 from ipscout.neighbours import of_family
@@ -241,7 +240,7 @@ def test_both_privilege_errnos_name_the_privilege_on_linux_and_macos(error: int)
 @pytest.mark.os_agnostic
 @pytest.mark.parametrize("action", list(NeighbourChange))
 def test_another_kernel_refusal_is_the_shared_error_and_no_privilege_error(action: NeighbourChange) -> None:
-    expected = str(kernel_refused_neighbour_change(action.value, errno.EEXIST))
+    expected = str(action.refused_by_kernel(errno.EEXIST))
     for raise_it in (linux.raise_for_ack, macos.raise_for_route_errno):
         with pytest.raises(IPScoutError) as caught:
             raise_it(errno.EEXIST, action=action)

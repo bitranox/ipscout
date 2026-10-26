@@ -41,7 +41,7 @@ import struct
 
 from .arp import ETH_P_IP, FRAME_RECEIVE_SIZE
 from .deadline import blocking_wait
-from .errors import IPScoutPermissionError, IPScoutUnsupportedError, setcap_command
+from .errors import IPScoutPermissionError, IPScoutUnsupportedError, LinuxCapability, setcap_command
 from .ports import CAPTURE_RECEIVE_BUFFER
 from .unixio import packet_family
 
@@ -82,7 +82,7 @@ def _permission_error(exc: OSError) -> IPScoutPermissionError:
 
     return IPScoutPermissionError(
         f"capturing DHCP needs a link-layer socket, so root or CAP_NET_RAW: {exc}. "
-        f"Grant it with '{setcap_command('cap_net_raw')}' or run as root. "
+        f"Grant it with '{setcap_command(LinuxCapability.NET_RAW)}' or run as root. "
         f"There is no unprivileged way to watch somebody else's traffic; subnet_info() reads this "
         f"host's own lease without any privilege, but it only describes this host"
     )

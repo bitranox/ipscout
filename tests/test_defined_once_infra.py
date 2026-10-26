@@ -23,7 +23,8 @@ from ipscout.errors import (
     PERMISSION_ERRNOS,
     IPScoutError,
     IPScoutResolutionError,
-    kernel_refused_neighbour_change,
+    LinuxCapability,
+    setcap_command,
 )
 from ipscout.models import NeighbourChange
 from ipscout.neighbours_linux import raise_for_ack
@@ -142,23 +143,30 @@ def test_the_arp_scan_alternative_is_the_words_every_backend_offers() -> None:
     assert linux_advice_tail == f"or {ARP_SCAN_ALTERNATIVE}"
 
 
+@pytest.mark.parametrize(("capability", "named"), [(LinuxCapability.NET_RAW, "cap_net_raw"), (LinuxCapability.NET_ADMIN, "cap_net_admin")])
+def test_the_setcap_remedy_names_the_capability_by_its_value_on_every_python(capability: LinuxCapability, named: str) -> None:
+    # The capability is a str enum on a 3.10 floor, where 3.11+ formats a bare
+    # member as "LinuxCapability.NET_RAW"; the command must carry the value.
+    assert setcap_command(capability) == f"setcap {named}+ep $(readlink -f $(which python3))"
+
+
 def test_the_permission_errnos_are_eperm_and_eacces_only() -> None:
     assert frozenset({errno.EPERM, errno.EACCES}) == PERMISSION_ERRNOS
     assert errno.EEXIST not in PERMISSION_ERRNOS
 
 
-@pytest.mark.parametrize("verb", ["add", "delete"])
-def test_a_kernel_refusal_reads_exactly_as_the_backends_word_it(verb: str) -> None:
+@pytest.mark.parametrize(("action", "verb"), [(NeighbourChange.ADD, "add"), (NeighbourChange.REMOVE, "remove")])
+def test_a_kernel_refusal_reads_exactly_as_the_backends_word_it(action: NeighbourChange, verb: str) -> None:
     error = errno.EEXIST
     expected = f"the kernel refused to {verb} the neighbour entry: {os.strerror(error)} (errno {error})"
-    refused = kernel_refused_neighbour_change(verb, error)
+    refused = action.refused_by_kernel(error)
     assert type(refused) is IPScoutError
     assert str(refused) == expected
 
 
 @pytest.mark.parametrize("action", list(NeighbourChange))
 def test_the_shared_kernel_refusal_matches_the_linux_and_macos_backends(action: NeighbourChange) -> None:
-    shared = str(kernel_refused_neighbour_change(action.value, errno.ENOENT))
+    shared = str(action.refused_by_kernel(errno.ENOENT))
     with pytest.raises(IPScoutError) as linux:
         raise_for_ack(errno.ENOENT, action=action)
     with pytest.raises(IPScoutError) as macos:

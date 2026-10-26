@@ -40,12 +40,6 @@ def test_a_zoned_ipv6_host_address_gets_a_zone_free_network() -> None:
     assert record.broadcast is None
 
 
-def test_a_record_with_the_zoned_network_an_earlier_release_wrote_still_validates() -> None:
-    record = SubnetInfo.model_validate({"interface": "lab0", "address": "fe80::1%lab0", "prefix_len": 128, "network": "fe80::1%lab0/128", "family": "ipv6"})
-
-    assert str(record.network) == "fe80::1%lab0/128"
-
-
 def test_a_subnet_record_carries_the_network_and_broadcast_of_its_address() -> None:
     lab = Interface(name="lab0", ipv4=(InterfaceAddress(address="192.0.2.77", prefix_len=24), InterfaceAddress(address="198.51.100.9", prefix_len=32)))
 
@@ -143,3 +137,15 @@ def test_the_wake_settings_store_the_canonical_hardware_address() -> None:
 def test_a_record_naming_another_zone_on_its_network_is_refused() -> None:
     with pytest.raises(ValidationError, match="network must be fe80::1/128"):
         SubnetInfo.model_validate({"interface": "lab0", "address": "fe80::1%lab0", "prefix_len": 128, "network": "fe80::1%eth9/128", "family": "ipv6"})
+
+
+@pytest.mark.parametrize(
+    ("prefix_len", "network"),
+    [(64, "fe80::/64"), (64, "fe80::%lab0/64"), (128, "fe80::1%lab0/128")],
+    ids=["unzoned", "own-zone", "own-zone-host"],
+)
+def test_a_network_written_with_the_address_s_own_zone_is_the_same_network(prefix_len: int, network: str) -> None:
+    # ip_network keeps a zone written into its text, so a caller building the
+    # network from the zoned address spells the same link this way.
+    record = SubnetInfo.model_validate({"interface": "lab0", "address": "fe80::1%lab0", "prefix_len": prefix_len, "network": network, "family": "ipv6"})
+    assert str(record.network) == network

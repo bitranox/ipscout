@@ -44,8 +44,8 @@ from .errors import (
     IPScoutError,
     IPScoutPermissionError,
     IPScoutUnsupportedError,
+    LinuxCapability,
     could_not_ask,
-    kernel_refused_neighbour_change,
     setcap_command,
 )
 from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, parse_address, require_address
@@ -329,7 +329,7 @@ def _permission_error(exc: OSError, what: _Solicitation) -> IPScoutPermissionErr
 
     return IPScoutPermissionError(
         f"active {what.value} needs a raw socket, so root or CAP_NET_RAW: {exc}. "
-        f"Grant it with '{setcap_command('cap_net_raw')}', run as root, "
+        f"Grant it with '{setcap_command(LinuxCapability.NET_RAW)}', run as root, "
         f"or {ARP_SCAN_ALTERNATIVE}"
     )
 
@@ -520,10 +520,11 @@ def raise_for_ack(error: int | None, *, action: NeighbourChange) -> None:
         raise IPScoutError(msg)
     if error in PERMISSION_ERRNOS:
         msg = (
-            f"changing the neighbour table needs root or CAP_NET_ADMIN: {os.strerror(error)}. Run as root, or grant it with '{setcap_command('cap_net_admin')}'"
+            f"changing the neighbour table needs root or CAP_NET_ADMIN: {os.strerror(error)}. "
+            f"Run as root, or grant it with '{setcap_command(LinuxCapability.NET_ADMIN)}'"
         )
         raise IPScoutPermissionError(msg)
-    raise kernel_refused_neighbour_change(action.value, error)
+    raise action.refused_by_kernel(error)
 
 
 def removed_from_ack(error: int | None) -> bool:

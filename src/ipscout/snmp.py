@@ -54,7 +54,7 @@ from .snmpber import (
 from .sockerr import is_refusal
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
 __all__ = ["DEFAULT_COMMUNITY", "DEFAULT_CONCURRENCY", "DEFAULT_PORT", "DEFAULT_TIMEOUT", "SnmpSettings", "aread_snmp_system", "read_snmp_system"]
 
@@ -115,14 +115,13 @@ class _SystemValue(str, enum.Enum):
     NAME = "1.3.6.1.2.1.1.5.0"
 
 
-#: The BER type each value must arrive as, and the SnmpSystem field it fills.
+#: The BER type each value must arrive as.
 _TAG: Final = {
     _SystemValue.DESCRIPTION: OCTET_STRING,
     _SystemValue.OBJECT_ID: OBJECT_IDENTIFIER,
     _SystemValue.UPTIME: TIMETICKS,
     _SystemValue.NAME: OCTET_STRING,
 }
-_FIELD: Final = {_SystemValue.DESCRIPTION: "description", _SystemValue.OBJECT_ID: "object_id", _SystemValue.UPTIME: "uptime_seconds", _SystemValue.NAME: "name"}
 
 
 class SnmpSettings(BaseModel):
@@ -247,23 +246,30 @@ def _ticks(body: bytes) -> float:
     return seconds
 
 
-def _decode(kind: _SystemValue, binding: VarBind, version: SnmpVersion) -> str | float | None:
-    """Return one value as the record holds it, or None when a v2c agent does not have it."""
+def _body(kind: _SystemValue, bindings: Mapping[_SystemValue, VarBind], version: SnmpVersion) -> bytes | None:
+    """Return one value's octets once its tag is checked, or None when it was not read or a v2c agent does not have it."""
 
-    if binding.tag in EXCEPTION_TAGS and version is SnmpVersion.V2C:
+    binding = bindings.get(kind)
+    if binding is None or (binding.tag in EXCEPTION_TAGS and version is SnmpVersion.V2C):
         return None
     if binding.tag != _TAG[kind]:
         msg = f"{kind.name.lower()}: arrived as tag 0x{binding.tag:02x}, expected 0x{_TAG[kind]:02x}"
         raise _BadReplyError(msg)
-    if kind is _SystemValue.UPTIME:
-        return _ticks(binding.value)
-    if kind is _SystemValue.OBJECT_ID:
-        try:
-            return decode_oid(binding.value)
-        except BerError as exc:
-            msg = f"object_id: {exc}"
-            raise _BadReplyError(msg) from exc
-    return binding.value.decode("utf-8", errors="replace")
+    return binding.value
+
+
+def _text(body: bytes | None) -> str | None:
+    return None if body is None else body.decode("utf-8", errors="replace")
+
+
+def _object_id(body: bytes | None) -> str | None:
+    if body is None:
+        return None
+    try:
+        return decode_oid(body)
+    except BerError as exc:
+        msg = f"object_id: {exc}"
+        raise _BadReplyError(msg) from exc
 
 
 def _check(reply: SnmpMessage, wanted: tuple[_SystemValue, ...], version: SnmpVersion) -> None:
@@ -287,10 +293,17 @@ def _check(reply: SnmpMessage, wanted: tuple[_SystemValue, ...], version: SnmpVe
 def _answered(host: str, reply: SnmpMessage, wanted: tuple[_SystemValue, ...], version: SnmpVersion) -> SnmpSystem:
     try:
         _check(reply, wanted, version)
-        fields = {_FIELD[kind]: _decode(kind, binding, version) for kind, binding in zip(wanted, reply.bindings, strict=True)}
+        bindings = dict(zip(wanted, reply.bindings, strict=True))
+        # Decoded in the order they are asked for, so a reply with two bad
+        # values is refused naming the first one.
+        description = _text(_body(_SystemValue.DESCRIPTION, bindings, version))
+        object_id = _object_id(_body(_SystemValue.OBJECT_ID, bindings, version))
+        uptime = _body(_SystemValue.UPTIME, bindings, version)
+        uptime_seconds = None if uptime is None else _ticks(uptime)
+        name = _text(_body(_SystemValue.NAME, bindings, version))
     except _BadReplyError as exc:
         return SnmpSystem(host=host, state=SnmpState.ERROR, error=str(exc))
-    return SnmpSystem.model_validate({"host": host, "state": SnmpState.ANSWERED, **fields})
+    return SnmpSystem(host=host, state=SnmpState.ANSWERED, description=description, object_id=object_id, uptime_seconds=uptime_seconds, name=name)
 
 
 def _unanswered(host: str, heard: _Heard, settings: SnmpSettings) -> SnmpSystem:

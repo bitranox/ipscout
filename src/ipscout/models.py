@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import enum
 import math
+import os
 import re
 import socket
 import statistics
@@ -44,6 +45,8 @@ from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_add
 from typing import TYPE_CHECKING, Annotated, NamedTuple
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field, model_validator
+
+from .errors import IPScoutError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -864,6 +867,27 @@ class NeighbourChange(str, enum.Enum):
     ADD = "add"
     REMOVE = "remove"
 
+    def refused_by_kernel(self, error: int) -> IPScoutError:
+        """Return the error for this change when the kernel refused it.
+
+        For a refusal that is not about privilege - those are
+        :data:`~ipscout.errors.PERMISSION_ERRNOS` and get their own remedy -
+        so the kernel's own reason is all there is to report, with its errno
+        for a caller to match on. It sits on the enum because ``errors`` is
+        layered below the models and cannot name this type.
+
+        Args:
+            error: The errno the kernel answered with.
+
+        Examples:
+            >>> import errno
+            >>> str(NeighbourChange.ADD.refused_by_kernel(errno.EEXIST))
+            'the kernel refused to add the neighbour entry: File exists (errno 17)'
+
+        """
+
+        return IPScoutError(f"the kernel refused to {self.value} the neighbour entry: {os.strerror(error)} (errno {error})")
+
 
 class CommandName(str, enum.Enum):
     """The subcommands, as they appear in the JSON envelope.
@@ -1368,10 +1392,10 @@ class SubnetInfo(_Frozen):
     def _addressing_agrees(self) -> SubnetInfo:
         _require_prefix_len(self.prefix_len, require_address(self.address, self.family))
         expected = interface_network(self.address, self.prefix_len)
-        # interface_network drops the zone, while a record written before it did
-        # (a zoned /128, where ip_network keeps the zone) names the same network
-        # with the address's own zone, and must still validate. Any other zone
-        # on the network is refused.
+        # interface_network drops the zone, but ip_network keeps one written into
+        # its text, so "fe80::%eth0/64" is the same network as "fe80::/64" when
+        # eth0 is the address's own zone, and both validate. Any other zone on
+        # the network names a different link and is refused.
         stated = (self.network.network_address.packed, self.network.prefixlen)
         zone = getattr(self.network.network_address, "scope_id", None)
         own_zone = getattr(ip_address(self.address), "scope_id", None)

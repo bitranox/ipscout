@@ -68,7 +68,7 @@ from .bsdroute import (
     sysctl,
 )
 from .deadline import seconds_left
-from .errors import ARP_SCAN_ALTERNATIVE, PERMISSION_ERRNOS, IPScoutPermissionError, could_not_ask, kernel_refused_neighbour_change
+from .errors import ARP_SCAN_ALTERNATIVE, PERMISSION_ERRNOS, IPScoutPermissionError, could_not_ask
 from .models import DEFAULT_TIMEOUT, AddressFamily, Neighbour, NeighbourChange, NeighbourState, names_a_neighbour, parse_address, require_address
 from .resolve import interface_name
 
@@ -404,7 +404,7 @@ def raise_for_route_errno(error: int, *, action: NeighbourChange) -> None:
     if error in PERMISSION_ERRNOS:
         msg = f"changing the neighbour table needs root on macOS: {os.strerror(error)}. Run as root"
         raise IPScoutPermissionError(msg)
-    raise kernel_refused_neighbour_change(action.value, error)
+    raise action.refused_by_kernel(error)
 
 
 def removed_from_route_errno(error: int) -> bool:

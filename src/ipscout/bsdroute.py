@@ -298,17 +298,9 @@ class SockaddrSet(BaseModel):
     broadcast: bytes | None = None
 
 
-#: Which field each RTA bit fills, in the order the sockaddrs appear.
-_FIELD_FOR_BIT = (
-    (RTA_DST, "destination"),
-    (RTA_GATEWAY, "gateway"),
-    (RTA_NETMASK, "netmask"),
-    (RTA_GENMASK, None),
-    (RTA_IFP, "interface"),
-    (RTA_IFA, "interface_address"),
-    (RTA_AUTHOR, None),
-    (RTA_BRD, "broadcast"),
-)
+#: The RTA bits in the order their sockaddrs appear. Genmask and author are
+#: never read, but their slots still have to be stepped over.
+_SOCKADDR_ORDER = (RTA_DST, RTA_GATEWAY, RTA_NETMASK, RTA_GENMASK, RTA_IFP, RTA_IFA, RTA_AUTHOR, RTA_BRD)
 
 
 def split_sockaddrs(payload: bytes, addrs: int) -> SockaddrSet:
@@ -325,18 +317,25 @@ def split_sockaddrs(payload: bytes, addrs: int) -> SockaddrSet:
 
     """
 
-    found: dict[str, bytes] = {}
+    found: dict[int, bytes] = {}
     position = 0
-    for bit, field in _FIELD_FOR_BIT:
+    for bit in _SOCKADDR_ORDER:
         if not addrs & bit:
             continue
         if position + SOCKADDR_HEADER.size > len(payload):
             break
         length = payload[position]
-        if length and position + length <= len(payload) and field is not None:
-            found[field] = payload[position : position + length]
+        if length and position + length <= len(payload):
+            found[bit] = payload[position : position + length]
         position += roundup(length)
-    return SockaddrSet(**found)
+    return SockaddrSet(
+        destination=found.get(RTA_DST),
+        gateway=found.get(RTA_GATEWAY),
+        netmask=found.get(RTA_NETMASK),
+        interface=found.get(RTA_IFP),
+        interface_address=found.get(RTA_IFA),
+        broadcast=found.get(RTA_BRD),
+    )
 
 
 def open_route_socket() -> socket.socket:  # pragma: no cover - macOS only

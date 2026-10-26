@@ -41,7 +41,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Strict, ValidationError
 
 from .deadline import seconds_left
-from .errors import IPScoutPermissionError, IPScoutUnsupportedError, refused_arguments, setcap_command
+from .errors import IPScoutPermissionError, IPScoutUnsupportedError, LinuxCapability, refused_arguments, setcap_command
 from .models import DISCARD_PORT, MAX_PORT, AddressFamily, Port, PortState, ScanMethod, Timeout, require_port
 from .packet import MAX_IP_LENGTH
 from .pool import Concurrency, gather_bounded
@@ -322,7 +322,7 @@ def _half_open(host: str, ports: list[int], settings: PortScanSettings) -> dict[
     except PermissionError as exc:
         msg = (
             f"a SYN scan needs a raw socket, so root or CAP_NET_RAW: {exc}. "
-            f"Grant it with '{setcap_command('cap_net_raw')}', run as root, "
+            f"Grant it with '{setcap_command(LinuxCapability.NET_RAW)}', run as root, "
             f"or use the connect method, which needs no privileges"
         )
         raise IPScoutPermissionError(msg) from exc
