@@ -78,12 +78,19 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - macOS: a `PermissionError` while preparing an IPv6 neighbour solicitation (the interface lookup
   or the multicast option), not only while sending it, is reported as `IPScoutPermissionError`.
 
+- `LeaseInfo.dhcp_server`, `.router`, `.dns_servers` and `SubnetInfo.dhcp_server` /
+  `.dns_servers` refuse a value that is not an IP address literal, as the other address fields of
+  these records do.
+
 ### Removed
 
 - `ports.MIN_CAPTURE_WAIT`: use `deadline.MIN_WAIT` (the same value) or `deadline.blocking_wait`.
 
 ### Fixed
 
+- Linux lease reading keeps only address literals: a lease file's server, router or DNS entry
+  that is not one is dropped instead of reaching the record as text, and the first literal in a
+  dhclient `routers` list is the router even when an earlier entry is not one.
 - A `getaddrinfo` result of neither IP family is skipped instead of being reported as IPv4.
 - `tcpsyn.read_reply` refuses a packet whose version nibble is not 4, as the other IPv4 parsers do.
 - `atraceroute` / `atrace_path` report the routers along the path. The asyncio ICMP transport

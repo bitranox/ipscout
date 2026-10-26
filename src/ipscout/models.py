@@ -1195,9 +1195,9 @@ class LeaseInfo(_Frozen):
     the store did not say, which is different from a value of zero.
     """
 
-    dhcp_server: str | None = None
-    router: str | None = None
-    dns_servers: tuple[str, ...] = ()
+    dhcp_server: _IpLiteral | None = None
+    router: _IpLiteral | None = None
+    dns_servers: tuple[_IpLiteral, ...] = ()
     domain: str | None = None
     obtained: str | None = None
     expires: str | None = None
@@ -1344,9 +1344,9 @@ class SubnetInfo(_Frozen):
     broadcast: _IpLiteral | None = None
     #: A router of ``family``.
     gateway: _IpLiteral | None = None
-    dns_servers: tuple[str, ...] = ()
+    dns_servers: tuple[_IpLiteral, ...] = ()
     domain: str | None = None
-    dhcp_server: str | None = None
+    dhcp_server: _IpLiteral | None = None
     lease_obtained: str | None = None
     lease_expires: str | None = None
     #: Bytes; ``None`` where the OS did not say, never zero.

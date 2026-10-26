@@ -27,7 +27,7 @@ import re
 import socket
 from pathlib import Path
 
-from .models import LeaseInfo
+from .models import LeaseInfo, parse_address
 
 __all__ = ["MAX_LEASE_BYTES", "lease_for", "parse_dhclient_lease", "parse_networkd_lease", "read_lease_text"]
 
@@ -54,16 +54,28 @@ _RENEW = re.compile(r"renew\s+\d+\s+([0-9/]+\s+[0-9:]+);")
 _EXPIRE = re.compile(r"expire\s+\d+\s+([0-9/]+\s+[0-9:]+);")
 
 
-def _addresses(value: str) -> tuple[str, ...]:
-    """Return the addresses in a space- or comma-separated list."""
+def _address(value: str | None) -> str | None:
+    """Return ``value`` if it is an address literal, else None.
 
-    found: list[str] = []
-    for piece in value.replace(",", " ").split():
-        text = piece.strip()
-        with contextlib.suppress(OSError, ValueError):
-            socket.inet_pton(socket.AF_INET6 if ":" in text else socket.AF_INET, text)
-            found.append(text)
-    return tuple(found)
+    A lease store is written by another program, and a damaged or hand-edited
+    one can hold anything where an address belongs. One bad value is dropped
+    rather than failing the whole lease, since the record bounds the field.
+    """
+
+    if value is None:
+        return None
+    try:
+        parse_address(value)
+    except ValueError:
+        return None
+    return value
+
+
+def _addresses(value: str) -> tuple[str, ...]:
+    """Return the address literals in a space- or comma-separated list, in order."""
+
+    found = (_address(piece) for piece in value.replace(",", " ").split())
+    return tuple(address for address in found if address is not None)
 
 
 def parse_networkd_lease(text: str) -> LeaseInfo:
@@ -78,12 +90,12 @@ def parse_networkd_lease(text: str) -> LeaseInfo:
 
     Examples:
         >>> lease = parse_networkd_lease(
-        ...     "ADDRESS=192.168.1.50\\nSERVER_ADDRESS=192.168.1.1\\n"
-        ...     "ROUTER=192.168.1.1\\nDNS=192.168.1.1 9.9.9.9\\nDOMAINNAME=lan\\n")
+        ...     "ADDRESS=192.0.2.50\\nSERVER_ADDRESS=192.0.2.1\\n"
+        ...     "ROUTER=192.0.2.1\\nDNS=192.0.2.1 198.51.100.53\\nDOMAINNAME=lan\\n")
         >>> lease.dhcp_server, lease.domain
-        ('192.168.1.1', 'lan')
+        ('192.0.2.1', 'lan')
         >>> lease.dns_servers
-        ('192.168.1.1', '9.9.9.9')
+        ('192.0.2.1', '198.51.100.53')
 
     """
 
@@ -94,8 +106,8 @@ def parse_networkd_lease(text: str) -> LeaseInfo:
             values[key.strip().upper()] = value.strip()
 
     return LeaseInfo(
-        dhcp_server=values.get("SERVER_ADDRESS") or None,
-        router=values.get("ROUTER") or None,
+        dhcp_server=_address(values.get("SERVER_ADDRESS")),
+        router=_address(values.get("ROUTER")),
         dns_servers=_addresses(values.get("DNS", "")),
         domain=values.get("DOMAINNAME") or None,
         obtained=values.get("T1") or None,
@@ -118,14 +130,14 @@ def parse_dhclient_lease(text: str, interface: str | None = None) -> LeaseInfo:
         >>> lease = parse_dhclient_lease('''
         ...   lease {
         ...     interface "eth0";
-        ...     option dhcp-server-identifier 192.168.1.1;
-        ...     option domain-name-servers 192.168.1.1,9.9.9.9;
+        ...     option dhcp-server-identifier 192.0.2.1;
+        ...     option domain-name-servers 192.0.2.1,198.51.100.53;
         ...     option domain-name "lan";
         ...     expire 2 2026/07/29 10:00:00;
         ...   }
         ... ''')
         >>> lease.dhcp_server, lease.domain, lease.expires
-        ('192.168.1.1', 'lan', '2026/07/29 10:00:00')
+        ('192.0.2.1', 'lan', '2026/07/29 10:00:00')
 
     """
 
@@ -139,8 +151,8 @@ def parse_dhclient_lease(text: str, interface: str | None = None) -> LeaseInfo:
         renew = _RENEW.search(block)
         expire = _EXPIRE.search(block)
         latest = LeaseInfo(
-            dhcp_server=options.get("dhcp-server-identifier"),
-            router=options.get("routers", "").split(",")[0].strip() or None,
+            dhcp_server=_address(options.get("dhcp-server-identifier")),
+            router=next(iter(_addresses(options.get("routers", ""))), None),
             dns_servers=_addresses(options.get("domain-name-servers", "")),
             domain=options.get("domain-name", "").strip('"') or None,
             obtained=renew.group(1) if renew else None,
