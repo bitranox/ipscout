@@ -10,7 +10,6 @@ dependencies = [
     "lib_cli_exit_tools>=2.4.1",
     "pydantic>=2.14.1",
     "rich-click>=1.9.9",
-    "rtoml>=0.14.0",
 ]
 license = { text = "MIT" }
 authors = [{ name = "bitranox", email = "bitranox@gmail.com" }]

@@ -5,6 +5,11 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Changed
+
+- `rtoml` is no longer a runtime dependency: the package never imported it. It stays in the `dev`
+  extra, where the metadata tests use it.
+
 ## [2.5.2] 2026-10-27 09:01:02
 
 ### Changed

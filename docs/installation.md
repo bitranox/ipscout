@@ -13,12 +13,11 @@ The examples use [uv](https://docs.astral.sh/uv/), a fast Rust-based replacement
   3.15 on Linux and Windows, and the newest of them on macOS.
 - Runtime dependencies, installed automatically:
 
-| Package              | Floor  | Why it is there                                                 |
-|----------------------|--------|-----------------------------------------------------------------|
-| `lib_cli_exit_tools` | 2.4.1  | Signal handling, broken-pipe and errno mapping for the CLI.     |
-| `pydantic`           | 2.14.1 | The frozen result models and their validation.                  |
-| `rich-click`         | 1.9.9  | The CLI itself.                                                 |
-| `rtoml`              | 0.14.0 | Declared as a runtime dependency; the package never imports it. |
+| Package              | Floor  | Why it is there                                             |
+|----------------------|--------|-------------------------------------------------------------|
+| `lib_cli_exit_tools` | 2.4.1  | Signal handling, broken-pipe and errno mapping for the CLI. |
+| `pydantic`           | 2.14.1 | The frozen result models and their validation.              |
+| `rich-click`         | 1.9.9  | The CLI itself.                                             |
 
 No compiler, no system `ping` binary, and no administrator or root rights are needed to install it,
 or to run the default paths (ping, ping sweeps, traceroute on Linux and Windows, interfaces, routes,

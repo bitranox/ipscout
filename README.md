@@ -56,7 +56,7 @@ uvx ipscout capabilities        # run once, without installing
 pip install ipscout             # without uv
 ```
 
-Python 3.10 or newer. Runtime dependencies: `lib_cli_exit_tools`, `pydantic`, `rich-click`, `rtoml`.
+Python 3.10 or newer. Runtime dependencies: `lib_cli_exit_tools`, `pydantic`, `rich-click`.
 
 Full instructions, including per-user installs, `pipx` and installing from GitHub, are in
 [docs/installation.md](docs/installation.md).
