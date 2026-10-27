@@ -10,7 +10,7 @@
     {
       "name": "ipscout",
       "source": ".",
-      "description": "Ping, sweep, traceroute and interface enumeration from Python or the CLI, unprivileged and without a subprocess. Covers the library API, the JSON output for machine consumers, and the platform limits measured on Linux, macOS and Windows."
+      "description": "Ping, sweep, traceroute, port scan, banner grab, SNMP system read, neighbour-cache lookup and static writes, interface enumeration and DHCP observation from Python or the CLI, without a subprocess and mostly unprivileged. Covers the library API, the JSON output for machine consumers, and the platform limits measured on Linux, macOS and Windows."
     }
   ]
 }

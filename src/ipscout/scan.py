@@ -396,9 +396,10 @@ def arp_scan(
             sweep under a different bound. Mutually exclusive with ``network``.
         concurrency: How many probes are in flight at once.
         timeout: Seconds to wait for each reply.
-        family: Restrict the RESULT to one address family. The sweep itself is
-            IPv4 either way - there is no IPv6 sweep - but the cache it then
-            reads holds both, so the choice belongs on the way out.
+        family: Restrict the RESULT to one address family. The sweep probes
+            whatever ``network`` names (the defaults are IPv4 only), but the
+            cache it then reads holds both, so the choice belongs on the way
+            out.
 
     Returns:
         Every cache entry that falls inside the swept networks. Hosts that

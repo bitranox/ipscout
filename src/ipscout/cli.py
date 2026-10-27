@@ -470,7 +470,7 @@ def _family(*, ipv4: bool, ipv6: bool) -> AddressFamily | None:
     prog_name=__init__conf__.shell_command,
     message=f"{__init__conf__.shell_command} version {__init__conf__.version}",
 )
-@option(_JSON_FLAG, _JSON_SHORT_FLAG, "json_output", is_flag=True, default=False, help="Emit a JSON envelope: {ok, command, data|error}.")
+@option(_JSON_FLAG, _JSON_SHORT_FLAG, "json_output", is_flag=True, default=False, help="Emit a JSON envelope: {ok, command, data, error, skipped}.")
 @option(_JSON_BARE_FLAG, "json_bare", is_flag=True, default=False, help="Emit the JSON payload at top level, without the envelope.")
 # The traceback setting is read from argv by main(), because the exception it
 # governs can escape before this command runs; Click only has to accept the

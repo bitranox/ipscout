@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.5.2] 2026-10-27 09:01:02
+
 ### Changed
 
 - `ipscout.errors.setcap_command` takes a `LinuxCapability` (`NET_RAW`, `NET_ADMIN`) instead of a
@@ -12,6 +14,25 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `ipscout.errors.kernel_refused_neighbour_change(verb, error)` is replaced by
   `NeighbourChange.refused_by_kernel(error)`, so only the two changes the backends make can be
   named. The refusal message is unchanged.
+
+### Documentation
+
+- README, `docs/usage.md`, `docs/installation.md`, `docs/development.md`, `CONTRIBUTING.md`,
+  `docs/systemdesign/module_reference.md`, the Quickstart notebook and the `python-network-probe`
+  skill were checked against the code: every example was run or its code path read, and every
+  public function, CLI verb and option is now covered. Corrected among others: what exit code 1
+  means per command, the full JSON envelope (`error`, `skipped`, `command` null on a refused command
+  line), which operations need privilege on which platform, the `ValueError` and `RuntimeError`
+  cases `except IPScoutError` does not catch, the zone-less link-local behaviour per call, route
+  lookup on macOS and Windows (implemented), `subnet_info()` DHCP fields (Linux only), `scan_ports`
+  connect results being in completion order, and the `lib_cli_exit_tools` floor. Example addresses
+  are documentation ranges throughout.
+- The Quickstart notebook gains library cells (`ping`, `is_reachable`, `aping_many`,
+  `local_interfaces`).
+- The plugin and marketplace descriptions name banner grabbing, the SNMP system group, static
+  neighbour writes and DHCP observation, and which of them need privilege.
+- The `--json` help text lists all five envelope keys; the `syn_scan`, `arp_scan` and `path_mtu`
+  docstrings no longer contradict the code.
 
 ## [2.5.1] 2026-10-26 21:35:48
 

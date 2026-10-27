@@ -12,8 +12,9 @@ Note:
 
     macOS and the BSDs have neither, so they bisect with ``IP_DONTFRAG`` set
     and watch for the kernel's refusal. Where even that is unavailable the
-    call raises rather than guessing: an MTU is used to size packets, so a
-    wrong one is a silent black hole, and an honest error beats it.
+    call returns ``None`` rather than guessing: an MTU is used to size
+    packets, so a wrong one is a silent black hole, and an admitted unknown
+    beats it.
 
 """
 

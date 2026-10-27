@@ -939,7 +939,7 @@ wheels = [
 
 [[package]]
 name = "ipscout"
-version = "2.5.1"
+version = "2.5.2"
 source = { editable = "." }
 dependencies = [
     { name = "lib-cli-exit-tools" },

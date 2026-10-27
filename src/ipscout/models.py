@@ -1559,11 +1559,11 @@ class SweepScope(_Frozen):
     and which cross the output boundary as the same CIDR text.
 
     Examples:
-        >>> scope = SweepScope(networks=("192.168.1.0/24",), skipped=("172.17.0.0/16",), limit=4096)
+        >>> scope = SweepScope(networks=("198.51.100.0/24",), skipped=("203.0.113.0/24",), limit=4096)
         >>> scope.complete
         False
         >>> scope.model_dump(mode="json")["skipped"]
-        ['172.17.0.0/16']
+        ['203.0.113.0/24']
 
     """
 

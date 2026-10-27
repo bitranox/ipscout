@@ -273,8 +273,8 @@ def syn_scan(host: str, ports: list[int], *, timeout: float = DEFAULT_TIMEOUT) -
         timeout: Seconds to wait for replies, in total.
 
     Returns:
-        Each port mapped to its state, in port order as :func:`scan_ports`
-        returns it. A SYN-ACK is ``OPEN``, a RST is ``CLOSED``, and silence is
+        Each port mapped to its state, in port order (a connect scan through
+        :func:`scan_ports` lists them in the order they finished). A SYN-ACK is ``OPEN``, a RST is ``CLOSED``, and silence is
         ``FILTERED`` - a distinction a connect scan can only partly make.
 
     Raises:

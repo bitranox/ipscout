@@ -9,7 +9,17 @@ down.
 - [Traceroute](#traceroute)
 - [Is it reachable at all](#is-it-reachable-at-all)
 - [Local interfaces](#local-interfaces)
+- [Reaching an IPv6 link-local address](#reaching-an-ipv6-link-local-address)
 - [Resolve and reverse-resolve](#resolve-and-reverse-resolve)
+- [Hardware addresses, and whose they are](#hardware-addresses-and-whose-they-are)
+- [The neighbour cache, and searching it](#the-neighbour-cache-and-searching-it)
+- [Writing a static neighbour entry](#writing-a-static-neighbour-entry)
+- [Watching a DHCP handshake](#watching-a-dhcp-handshake)
+- [Routes and subnets](#routes-and-subnets)
+- [Port scanning](#port-scanning)
+- [Reading a banner](#reading-a-banner)
+- [Reading a device's SNMP system group](#reading-a-devices-snmp-system-group)
+- [Waking a host, and the path to it](#waking-a-host-and-the-path-to-it)
 - [The CLI](#the-cli)
 - [JSON output](#json-output)
 - [Error handling](#error-handling)
@@ -35,10 +45,14 @@ result.jitter_ms  # population stdev, or -1.0 with fewer than two replies
 result.family  # AddressFamily.IPV4
 result.method  # ProbeMethod.ICMP
 result.str_result  # the one-line summary, in its documented format
+result.rtts_ms  # one entry per echo, None for an echo that got no reply
+result.error  # None, or the failure when raise_on_error=False
 ```
 
-`ResponseObject` is frozen and every derived value is a real model field, so `model_dump()` carries
-the statistics rather than dropping them.
+`ResponseObject` is frozen and every derived value (`time_*_ms`, `jitter_ms`, `n_packets_lost`,
+`packets_lost_percentage`, `str_result`) is a computed model field, so `model_dump()` carries the
+statistics rather than dropping them. The stored fields are `target`, `reached`, `ip`,
+`number_of_pings`, `rtts_ms`, `packets_sent`, `packets_received`, `family`, `method` and `error`.
 
 The full signature:
 
@@ -120,7 +134,7 @@ comparable. Concurrency happens between targets.
 ```python
 import ipscout
 
-hops = ipscout.traceroute("1.1.1.1", max_hops=10, timeout=2.0)
+hops = ipscout.traceroute("203.0.113.1", max_hops=10, timeout=2.0)
 
 for hop in hops:
     print(hop.ttl, hop.address, hop.rtt_ms, hop.reached, hop.hostname)
@@ -248,11 +262,11 @@ scope is part of the answer:
 ```python
 import ipscout
 
-answer = ipscout.lookup_mac("8.8.8.8")
+answer = ipscout.lookup_mac("203.0.113.8")
 answer.mac, answer.scope, answer.via_ip
 # ('00:00:5e:00:53:01', <MacScope.NEXT_HOP: 'next_hop'>, '192.0.2.1')
 
-ipscout.get_mac_address("8.8.8.8")  # None - refuses to pass off the gateway's
+ipscout.get_mac_address("203.0.113.8")  # None - refuses to pass off the gateway's
 ipscout.get_mac_address("192.0.2.5")  # '00:00:5e:00:53:05' for an on-link host
 ```
 
@@ -305,8 +319,12 @@ several addresses, commonly an IPv4 and an IPv6 link-local on the same NIC:
 
 ```python
 ipscout.find_ip_by_mac("00:00:5e:00:53:42", scan=True)
-# ['192.0.2.104', 'fe80::200:5eff:fe00:5342']
+# ['192.0.2.104', 'fe80::200:5eff:fe00:5342%eth0']
 ```
+
+The addresses come out in the order the cache learned them, so pass `family=` when the answer is
+going to be connected to rather than taking the first element. A family the hardware does not hold
+is an empty list, not an error.
 
 Any written form compares equal - `00:00:5e:00:53:01`, `00-00-5E-00-53-01` and `0000.5e00.5301` are
 the same address. `network=` and `scope=` apply only when `scan=True`; giving one without it is
@@ -339,12 +357,12 @@ if scope.complete:
 `arp_scan` and `find_ip_by_mac` take either `network=` or `scope=`, never both - a silent
 precedence rule would leave you reading a result about ground you did not ask about.
 
-`limit` must be at least 1, `timeout` above 0 and at most `MAX_TIMEOUT`, and `concurrency` at least 1; anything
-else raises `ValueError` naming the argument before a probe is sent. A zero timeout would refuse
+`limit` must be at least 1, `timeout` above 0 and at most `MAX_TIMEOUT` (2147483 seconds,
+`ipscout.models.MAX_TIMEOUT`), and `concurrency` at least 1; anything else raises `ValueError` naming the argument before a probe is sent. A zero timeout would refuse
 every probe and hand back the cache as it already stood, as though the sweep had found it.
 
-`local_networks(interfaces)` and `sweep_scope(interfaces=...)` also accept the interface list to
-read, for describing a host other than this one:
+`local_networks(interfaces)`, `sweep_scope(interfaces=...)` and `subnet_info(interfaces=...)` also
+accept the interface list to read, for describing a host other than this one:
 
 ```python
 from ipscout import Interface, InterfaceAddress
@@ -353,7 +371,7 @@ elsewhere = [Interface(name="eth0", ipv4=(InterfaceAddress(address="198.51.100.5
 ipscout.local_networks(elsewhere)  # (IPv4Network('198.51.100.0/24'),)
 ```
 
-Ask that before sweeping and you know what the answer will and will not cover. Two consequences
+Ask that before sweeping and you know what the answer will and will not cover. Three consequences
 worth knowing:
 
 - The budget is spent in the order the host reports its interfaces, so a subnet that would fit on
@@ -415,6 +433,7 @@ that exchange is the only way to catch it.
 ```python
 import ipscout
 
+mac = "00:00:5e:00:53:10"
 with ipscout.observe_dhcp_session(mac, interface="br0", timeout=150) as watch:
     start_the_machine()  # the handshake happens ~1s into this
     addresses = watch.result()
@@ -443,8 +462,17 @@ That returns as soon as a candidate answers, so a successful lookup skips the
 settle wait entirely. The two outcomes cost very different amounts of time,
 though: `None` runs the whole `timeout` out, because giving up earlier would
 mean declaring a machine absent while its window was still open.
+It asks each candidate through `is_reachable`, with `tcp_port=22` (a machine
+early in its boot is likelier to have SSH up than HTTPS) and `probe_timeout=2.0`
+seconds per candidate.
 For a custom stopping rule, iterate `session.offers()`, which yields each new
 address as it arrives; `result()` still reports all of them afterwards.
+
+The defaults are `timeout=60.0` and `settle=12.0` seconds, and `interface=None`
+takes the interface carrying the default route, which is a guess: name it
+explicitly for a virtual machine, whose bridge is often not the routed interface.
+`promiscuous=True` is the default too (see below). A `DhcpSession` also has
+`stop()`, safe to call more than once, `running` and `mac`.
 
 `result()` blocks until 12 seconds pass with no new address (`settle`), or until
 `timeout` runs out - so 12 seconds is a floor on every call. If that is too slow,
@@ -483,13 +511,20 @@ address rather than to a device.
 ## Routes and subnets
 
 ```python
-ipscout.default_gateway()  # RouteInfo(gateway='192.0.2.1', interface='eth0', ...)
-ipscout.query_route("8.8.8.8")  # how this host would reach one address
+ipscout.default_gateway()  # RouteInfo(gateway='192.0.2.1', interface='eth0', source='192.0.2.5')
+ipscout.query_route("203.0.113.8")  # how this host would reach one address
 ipscout.local_networks()  # the IPv4 subnets a default sweep covers
 
 for subnet in ipscout.subnet_info():
     subnet.interface, subnet.address, subnet.network, subnet.broadcast, subnet.gateway, subnet.mtu
 ```
+
+Both take a `family`, `AddressFamily.IPV4` by default, and return `None` when there is no route.
+`query_route` takes an IP literal of that family only: `query_route("2001:db8::1")` raises
+`ValueError` until `family=ipscout.AddressFamily.IPV6` is passed.
+
+`subnet_info()` reports IPv6 addresses as well as IPv4, one record per address, and
+`subnet_info("eth0")` narrows it to one interface.
 
 `local_networks()` is the sweep view rather than the full picture: it leaves out loopback, where a
 sweep would find only this host, and any `/31` or `/32`, which hold this host plus at most one
@@ -507,12 +542,16 @@ states = ipscout.scan_ports("192.0.2.10", "22,80,443,8000-8100")
 open_ports = [port for port, state in states.items() if state is ipscout.PortState.OPEN]
 ```
 
+`timeout` is 1.0 s per port and `concurrency` 256 by default; `ports` is a specification string as
+above or a list of port numbers (`parse_ports` turns the one into the other).
+
 Three states, not a boolean. `CLOSED` means something actively refused, which proves a host is
 there; `FILTERED` means nothing answered. Conflating them hides the firewall a scan is asked to
 find. On Windows a connect scan cannot draw that line - a closed port goes quiet rather than
 refusing - so it reports `FILTERED` where the other two report `CLOSED`.
 
-A half-open SYN scan distinguishes them everywhere it can run, and needs a raw socket:
+A half-open SYN scan distinguishes them everywhere it can run, and needs a raw socket. Windows
+blocks raw TCP sends, so there it raises `IPScoutUnsupportedError` at any privilege level:
 
 ```python
 ipscout.scan_ports(host, "1-1024", method=ipscout.ScanMethod.SYN)
@@ -526,6 +565,7 @@ A name is resolved once, before the first probe, and every port is asked of that
 name that does not resolve raises `IPScoutResolutionError` rather than reporting every port
 `FILTERED`, which would read as a firewall. `timeout` must be above 0 and at most `MAX_TIMEOUT` and
 `concurrency` at least 1: a zero timeout reports an open port `FILTERED`, so it raises `ValueError` instead.
+`ascan_ports` is the connect scan on the event loop; it has no `method` argument.
 
 ## Reading a banner
 
@@ -585,14 +625,14 @@ host answered with ICMP port unreachable, so it is up and has no agent on that p
 an agent that speaks only the other version stays silent, and silence cannot be told apart from a
 host that is down. Under v1 a GET fails as a whole when the agent lacks one of the values, so the
 read asks again without it and reports it as `None`. The `community` defaults to `public` and never
-appears in an error. `timeout` (3.0 s by default) is one deadline per host for resolving and the
+appears in an error, and `port` defaults to 161. `timeout` (3.0 s by default) is one deadline per host for resolving and the
 whole exchange. `aread_snmp_system` is the same on the event loop.
 
 ## Waking a host, and the path to it
 
 ```python
 ipscout.wake_on_lan("00:00:5e:00:53:01", broadcast="192.0.2.255")
-ipscout.path_mtu("8.8.8.8")  # 1500, or None where the platform cannot say
+ipscout.path_mtu("203.0.113.8")  # 1500, or None where the platform cannot say
 ```
 
 `wake_on_lan` returns nothing because nothing acknowledges a magic packet: a successful send means
@@ -601,7 +641,8 @@ only that it left this host. Poll `is_reachable` to find out whether the target 
 `broadcast` (default `ipscout.wol.DEFAULT_BROADCAST`, the limited broadcast `255.255.255.255`) must be an IPv4
 address other than `0.0.0.0`. An empty string or `0.0.0.0` would send the packet to this host and
 report it sent, and a name says nothing about which segment is meant, so each raises `ValueError`
-before anything is sent. A send that fails raises `IPScoutError`.
+before anything is sent. `port` is the UDP port, 9 by default. A send that fails raises
+`IPScoutError`.
 
 `path_mtu` returning `None` is an answer rather than a failure. An MTU sizes packets, so a guessed
 one produces a silent black hole.
@@ -638,13 +679,13 @@ one produces a silent black hole.
 
 Global options, which live on the group so they compose with every subcommand:
 
-| Option                       | Effect                                                                    |
-|------------------------------|---------------------------------------------------------------------------|
-| `--json`, `-j`               | Emit a JSON envelope: `{ok, command, data`\|`error, skipped}`.            |
-| `--json-bare`                | Emit the JSON payload at top level, without the envelope.                 |
-| `--traceback/--no-traceback` | Show a full Python traceback on unexpected errors. Default `--traceback`. |
-| `--version`                  | Print the version and exit.                                               |
-| `-h`, `--help`               | Show help and exit.                                                       |
+| Option                       | Effect                                                                                          |
+|------------------------------|-------------------------------------------------------------------------------------------------|
+| `--json`, `-j`               | Emit a JSON envelope: `{ok, command, data`\|`error, skipped}`.                                  |
+| `--json-bare`                | Emit the JSON payload at top level, without the envelope.                                       |
+| `--traceback/--no-traceback` | Show a full Python traceback on unexpected errors, in human output only. Default `--traceback`. |
+| `--version`                  | Print the version and exit.                                                                     |
+| `-h`, `--help`               | Show help and exit.                                                                             |
 
 `--json` and `--json-bare` are mutually exclusive.
 
@@ -659,11 +700,20 @@ Per-command options:
 | `resolve`          | `-4`, `-6`                                                                                                                                 |
 | `reverse-dns`      | none beyond the global flags                                                                                                               |
 | `interfaces`       | none beyond the global flags                                                                                                               |
+| `gateway`          | `--to` (an address; without it the default route), `-4`, `-6`                                                                              |
+| `neighbours`       | `-4`, `-6`                                                                                                                                 |
+| `mac`              | `--strict` (answer only for a directly attached host), `--active`, `--fallback-to-cache`                                                   |
+| `find-ip`          | `--scan`, `--network` (needs `--scan`), `-4`, `-6`                                                                                         |
+| `arp-scan`         | `--network` (the local subnets), `--concurrency` (64), `-4`, `-6`                                                                          |
+| `subnet`           | `--interface` (every interface)                                                                                                            |
+| `scan-ports`       | `--ports` (required), `--syn`, `--timeout` (1.0), `--concurrency` (256)                                                                    |
 | `banners`          | `--port` (required), `--timeout` (3.0), `--concurrency` (64), `--max-line-bytes` (512), `--farewell`, `-4`, `-6`                           |
 | `snmp-system`      | `--version` (v1), `--community` (public, or `IPSCOUT_SNMP_COMMUNITY`), `--port` (161), `--timeout` (3.0), `--concurrency` (64), `-4`, `-6` |
 | `observe-dhcp`     | `--interface` (the default route's), `--timeout` (60.0), `--settle` (12.0)                                                                 |
 | `set-neighbour`    | `--interface` (the one whose subnet holds IP)                                                                                              |
 | `remove-neighbour` | `--interface` (every interface the cache lists IP on)                                                                                      |
+| `mtu`              | `-4`, `-6`                                                                                                                                 |
+| `wake`             | `--broadcast` (255.255.255.255), `--port` (9)                                                                                              |
 | `capabilities`     | none beyond the global flags                                                                                                               |
 | `info`             | none beyond the global flags                                                                                                               |
 
@@ -679,14 +729,14 @@ ipscout ping 127.0.0.1 -c 2
 # [127.0.0.1] pinged 2 times, min: 0.04ms, avg: 0.04ms, max: 0.04ms, 0% Packet loss
 
 ipscout ping-many 127.0.0.1 ::1 -c 1      # a table of target, reached, loss, avg ms, error
-ipscout traceroute 1.1.1.1 --max-hops 10 --resolve-names
+ipscout traceroute 203.0.113.1 --max-hops 10 --resolve-names
 ipscout reachable example.com             # 'yes' or 'no'
 ipscout resolve localhost -4
 ipscout reverse-dns 127.0.0.1
 ipscout interfaces
 ipscout gateway                           # the default route, or --to an address
 ipscout neighbours                        # the ARP/NDP cache
-ipscout mac 8.8.8.8                       # with its scope: direct or next_hop
+ipscout mac 203.0.113.8                   # with its scope: direct or next_hop
 ipscout find-ip 00:00:5e:00:53:42 --scan  # which addresses hold a MAC
 ipscout arp-scan --network 192.0.2.0/24   # sweep, then read what was learned
 ipscout subnet                            # addressing, gateway, stored DHCP facts
@@ -694,9 +744,9 @@ ipscout scan-ports 192.0.2.10 --ports 22,80,443,8000-8100
 ipscout banners 192.0.2.0/24 --port 21 --farewell 'QUIT\r\n'   # each host's greeting; networks expand
 ipscout snmp-system 192.0.2.10 192.0.2.0/28 --timeout 2          # uptime, name, description, object id
 IPSCOUT_SNMP_COMMUNITY=private ipscout --json snmp-system 192.0.2.10 --version v2c
-ipscout mtu 8.8.8.8
+ipscout mtu 203.0.113.8
 ipscout wake 00:00:5e:00:53:01 --broadcast 192.0.2.255
-ipscout observe-dhcp 02:00:5e:10:00:00 --interface br0   # needs root; last line is the bound address
+ipscout observe-dhcp 00:00:5e:00:53:10 --interface br0   # needs root; the last line is usually the bound address
 ipscout capabilities
 ipscout info
 ```
@@ -707,13 +757,16 @@ argument is visible to every user in the process list. An empty `IPSCOUT_SNMP_CO
 
 Exit codes are independent of the output format:
 
-| Code | Meaning                                                                                             |
-|------|-----------------------------------------------------------------------------------------------------|
-| 0    | Reached, or the command otherwise succeeded.                                                        |
-| 1    | Not reached. Nothing answered, or a reverse lookup found no PTR record.                             |
-| 2    | Error. A bad name, a missing permission, a capability this host lacks, or a malformed command line. |
+| Code | Meaning                                                                                                                                                                                     |
+|------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0    | Reached, or the command otherwise succeeded.                                                                                                                                                |
+| 1    | Nothing found: no reply, no PTR record, no route, an empty cache or sweep, no hardware address, no open port, no greeting or SNMP answer, no entry to remove, no path MTU, nothing offered. |
+| 2    | Error. A bad name, a missing permission, a capability this host lacks, or a malformed command line.                                                                                         |
 
-`ping-many` exits 1 only when no target at all was reached.
+A command over many targets exits 1 only when none of them succeeded: `ping-many` when no target was
+reached, `traceroute` when no hop was the target, `scan-ports` when no port is open, `banners` when
+no host greeted, `snmp-system` when no host answered. An unexpected exception that escapes every
+handler exits through `lib_cli_exit_tools`' errno mapping instead.
 
 ## JSON output
 
@@ -804,14 +857,14 @@ a packet that times out, a link losing everything all come back as a `ResponseOb
 `reached=False`. Missing ICMP permission, an unresolvable name, or a nonsensical argument raise,
 because no amount of retrying fixes them.
 
-| Exception                     | Raised when                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | What to do about it                                     |
-|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------|
-| `IPScoutResolutionError`      | The target does not resolve, or has no address in the demanded family.                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Fix the name, or drop the `-4`/`-6` restriction.        |
-| `IPScoutPermissionError`      | Neither an unprivileged nor a raw ICMP socket could be opened.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Apply one of the fixes in the message. Root would help. |
-| `IPScoutUnsupportedError`     | No backend implements this here, such as traceroute on unprivileged macOS.                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Use another capability. Root would not help.            |
-| `IPScoutSweepTooWideError`    | Every network a sweep was given holds more addresses than it probes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Name a narrower network.                                |
-| `IPScoutSweepIncompleteError` | A sweep skipped a network and matched nothing in the rest, so "not found" would overstate it.                                                                                                                                                                                                                                                                                                                                                                                                                                       | Name a narrower network inside the skipped one.         |
-| `ValueError`                  | An argument is out of range or not what it names: `times`, `timeout`, `interval`, `payload_size`, `tcp_port`, `concurrency`, `max_hops`, a port, a scan `method` or a sweep `limit`, including a value of the wrong type (`True` for a count, `"1"` for a timeout); one string where a collection of hosts or networks belongs; an address argument that is not an IP literal of the asked-for family (`query_route`, `lookup_mac`, `resolve_active`). The message reads `<operation> refused its arguments: <argument>: <reason>`. | Fix the argument.                                       |
+| Exception                     | Raised when                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | What to do about it                                     |
+|-------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------|
+| `IPScoutResolutionError`      | The target does not resolve, or has no address in the demanded family.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Fix the name, or drop the `-4`/`-6` restriction.        |
+| `IPScoutPermissionError`      | A privilege is missing: neither an unprivileged nor a raw ICMP socket could be opened, or a SYN scan, active ARP, DHCP capture or neighbour write was refused.                                                                                                                                                                                                                                                                                                                                                                                                                                               | Apply one of the fixes in the message. Root would help. |
+| `IPScoutUnsupportedError`     | No backend implements this here, such as traceroute on unprivileged macOS.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Use another capability. Root would not help.            |
+| `IPScoutSweepTooWideError`    | Every network a sweep was given holds more addresses than it probes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Name a narrower network.                                |
+| `IPScoutSweepIncompleteError` | A sweep skipped a network and matched nothing in the rest, so "not found" would overstate it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Name a narrower network inside the skipped one.         |
+| `ValueError`                  | An argument is out of range or not what it names: `times`, `timeout`, `interval`, `payload_size`, `tcp_port`, `concurrency`, `max_hops`, a port, a scan `method` or a sweep `limit`, including a value of the wrong type (`True` for a count, `"1"` for a timeout); one string where a collection of hosts or networks belongs; an address argument that is not an IP literal of the asked-for family (`query_route`, `lookup_mac`, `get_mac_address`). A checked argument reads `<operation> refused its arguments: <argument>: <reason>`; an address check reads `'<value>' is not an IP address literal`. | Fix the argument.                                       |
 
 Every ipscout error derives from `IPScoutError`, so one `except` catches the family without also
 catching unrelated `OSError` noise. The two sweep errors additionally derive from `ValueError`,
@@ -855,7 +908,8 @@ ipscout.icmp_available()  # True when ICMP v4 could be used right now
 ipscout.icmp_available(ipscout.AddressFamily.IPV6)  # availability genuinely differs per family
 ```
 
-`ipscout capabilities` is the CLI form and additionally reports whether traceroute works here.
+`ipscout capabilities` is the CLI form and additionally reports whether traceroute and a DHCP capture
+work here (`ipscout.dhcp_capture_available()` is the library form of the second).
 
 To report failures on the result instead of raising, for one call, pass `raise_on_error=False`:
 
@@ -880,7 +934,7 @@ here or, for the exceptions, in the paragraph below the tables.
 | `aping_many`                   | coroutine | Probe many targets concurrently.                                  |
 | `aread_snmp_system`            | coroutine | The same SNMP read, on the event loop.                            |
 | `arp_scan`                     | function  | Sweep a network, then report what the kernel learned.             |
-| `ascan_ports`                  | coroutine | The same, on the event loop.                                      |
+| `ascan_ports`                  | coroutine | The connect scan, on the event loop.                              |
 | `atrace_path`                  | coroutine | The same, over an async transport.                                |
 | `atraceroute`                  | coroutine | The same, on the event loop.                                      |
 | `default_gateway`              | function  | The route used when nothing more specific matches.                |
@@ -914,7 +968,7 @@ here or, for the exceptions, in the paragraph below the tables.
 | `observe_dhcp_first_reachable` | function  | The first offered address that answers, or None.                  |
 | `observe_dhcp_session`         | function  | The same, startable before the machine is started.                |
 | `dhcp_capture_available`       | function  | Whether this host may capture at all.                             |
-| `DhcpSession`                  | class     | The running capture: result(), offers(), stop().                  |
+| `DhcpSession`                  | class     | The running capture: result(), offers(), stop(), running, mac.    |
 | `wake_on_lan`                  | function  | Send a wake-on-LAN magic packet.                                  |
 
 Result models, all frozen Pydantic models with `extra="forbid"`:
@@ -957,7 +1011,8 @@ Enums, all `str` subclasses so their members are already strings on the wire:
 
 Exceptions: `IPScoutError`, `IPScoutPermissionError`, `IPScoutResolutionError`,
 `IPScoutUnsupportedError`, `IPScoutSweepError` and its two subclasses `IPScoutSweepTooWideError` and
-`IPScoutSweepIncompleteError`. Every public callable reports failure through this hierarchy, so
-`except IPScoutError` catches all of them.
+`IPScoutSweepIncompleteError`. Every public callable reports a failure other than a refused argument
+(`ValueError`) through this hierarchy, so `except IPScoutError` catches all of them. The one other
+exception is `ping_many` called inside a running event loop, which raises `RuntimeError`.
 
 For a module-by-module breakdown, see [systemdesign/module_reference.md](systemdesign/module_reference.md).

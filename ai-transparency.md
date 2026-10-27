@@ -54,11 +54,12 @@ approved every action and owns the result.
 
 ## What's been checked
 
-The gate is `make test`, and it is the same gate CI runs: Ruff (lint and format), Pyright in
-strict mode, the import-linter layer contract, Bandit, pip-audit, and Pytest with coverage,
-including the doctests embedded in the source modules. CI runs it across three operating systems
-(Linux, macOS, Windows) and CPython 3.10 through 3.14 on every push, and again before a release
-publishes to PyPI. The badges at the top of the README report the live state.
+The gate is `make test`, and CI runs the same checks: Ruff (lint and format), Pyright in strict
+mode, the import-linter layer contract, Bandit, pip-audit, and Pytest with coverage, including the
+doctests embedded in the source modules. CI runs them on every push and pull request and nightly,
+across three operating systems: CPython 3.10 through 3.15 on Linux and Windows, and the newest of
+them on macOS. `make ship` waits for that run to pass before it tags a release, and the release
+workflow publishes the tag to PyPI. The badges at the top of the README report the live state.
 
 That matrix is not decoration. A single-platform run passes on code that is broken on the other
 two, and it did so more than once here; every such case was caught by CI and fixed before

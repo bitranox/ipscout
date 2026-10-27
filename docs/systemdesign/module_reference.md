@@ -42,10 +42,12 @@ setup problems separate from network conditions.
 5. **One JSON boundary.** All CLI commands render through a single helper, so no command can
    support JSON on its success path and forget it elsewhere.
 6. **Wire formats are pure functions.** Every parser - ICMP, netlink, BSD routing messages, ARP,
-   neighbour discovery, TCP - is bytes in and a record out, with no socket in sight. That is what
-   lets the macOS and Windows formats be tested adversarially from Linux, and the privileged ones
-   be tested without privilege.
-7. **Privilege is refused, never faked.** The three operations that need elevation raise with the
+   neighbour discovery, TCP, BOOTP/DHCP, SNMP BER - is bytes in and a record out, with no socket in
+   sight. That is what lets the macOS and Windows formats be tested adversarially from Linux, and
+   the privileged ones be tested without privilege.
+7. **Privilege is refused, never faked.** The operations that need elevation - the half-open SYN
+   scan, active MAC resolution where the platform needs a raw or link-layer socket, a static
+   neighbour write or removal, observing a DHCP handshake, and traceroute on macOS - raise with the
    requirement named. None of them degrades to a weaker measurement under the same name.
 
 ---
@@ -78,8 +80,8 @@ models
 errors
 ```
 
-`cli.py`, `serialize.py`, `typed_click.py` and `__main__.py` sit outside the contract as the CLI
-adapter.
+`cli.py`, `serialize.py`, `typed_click.py`, `__main__.py` and `__init__conf__.py` sit outside the
+contract as the CLI adapter. The package `__init__.py` re-exports from every layer.
 
 ### Why the layers are split this way
 
@@ -87,11 +89,13 @@ adapter.
 and `AsyncEchoTransport` as `Protocol`s. `service.py` and `traceroute.py` are written against those
 protocols and import no concrete backend, which is why their tests hand them a real in-process fake
 rather than monkeypatching a module attribute. The substitution point is a constructor argument.
-There is no `mock.patch` of this package's own internals anywhere in the suite.
 
-**Only the factory knows the platform.** `factory.py` is the one module that branches on
-`sys.platform`. Everything above it is platform-free and therefore runnable on any machine under
-test. Everything below it is a single platform's implementation detail.
+**Only the factory knows the platform on the probing path.** `factory.py` is the one module on the
+ping and traceroute path that branches on `sys.platform`, so `api`, `service` and `traceroute` are
+platform-free and runnable on any machine under test. The local-network dispatchers (`interfaces`,
+`routes`, `neighbours`, `static_neighbours`, `subnet`, `mtu`, `portscan`, `dhcp`) each pick their
+own per-OS backend the same way. Everything in the backend layer is a single platform's
+implementation detail.
 
 **The service owns policy, the transport owns transit.** How many echoes, how far apart, what counts
 as reached is `service.py`. How one echo travels is a transport. Splitting them is what lets a probe
@@ -105,8 +109,8 @@ caller asked for and what the machine could do. A transport reports what happene
 
 1. `api.ping` resolves the target once through `resolve.resolve_one`, which fixes the address
    family up front rather than guessing it later. The async entry points (`aping`,
-   `ais_reachable`, `atraceroute`, and the hop names of `atrace_path`) run that lookup in a worker
-   thread, because `getaddrinfo` blocks for as long as the name server takes and one slow name on
+   `ais_reachable`, `atraceroute`, `agrab_banners`, `aread_snmp_system`, `ascan_ports`, and the
+   hop names of `atrace_path`) run that lookup in a worker thread, because `getaddrinfo` blocks for as long as the name server takes and one slow name on
    the loop thread would stall every other probe in a sweep.
 2. `api._request` builds a `service.PingRequest`. Pydantic field bounds reject a bad `times`,
    `timeout` or `interval` here, before any packet moves, identically for every caller path.
@@ -157,7 +161,7 @@ Established by running the suite on real CI runners, not by reading documentatio
 | Traceroute                 | yes, `IP_RECVERR` + `MSG_ERRQUEUE` | only on a raw socket, so root | yes, `IP_TTL_EXPIRED_TRANSIT`     |
 | Async model                | one socket on the event loop       | one socket on the event loop  | blocking C call in a thread pool  |
 | Interface enumeration      | `getifaddrs`                       | `getifaddrs`                  | `GetAdaptersAddresses`            |
-| Route lookup               | netlink `RTM_GETROUTE`             | not implemented               | not implemented                   |
+| Route lookup               | netlink `RTM_GETROUTE`             | routing socket `RTM_GET`      | `GetBestRoute2`                   |
 | Observing a DHCP handshake | `AF_PACKET`, needs root            | `/dev/bpf`, needs root        | `SIO_RCVALL`, needs Administrator |
 
 ### Traceroute on macOS
@@ -195,14 +199,14 @@ next send with its errno; a send refused that way is retried once after the drai
 
 ### The Linux socket-option fallback
 
-CPython only began exposing `IP_RECVERR` and `IPV6_RECVERR` in 3.14. On 3.10 through 3.13 the
-lookup came back empty and the capability check honestly answered "traceroute unsupported" on Linux.
-`transport_posix.py` therefore falls back to the kernel ABI values (`IP_RECVERR` 11 from
-`linux/in.h`, `IPV6_RECVERR` 25 from `linux/in6.h`). Those are fixed forever, since changing one
-would break every compiled binary on the platform.
+CPython exposes `IP_RECVERR` and `IPV6_RECVERR` only from 3.14. On 3.10 through 3.13 the lookup
+comes back empty, and the capability check would answer "traceroute unsupported" on Linux.
+`transport_posix.socket_const` therefore falls back to the kernel ABI values on Linux (`IP_RECVERR`
+11 from `linux/in.h`, `IPV6_RECVERR` 25 from `linux/in6.h`). Those are fixed forever, since
+changing one would break every compiled binary on the platform.
 
-The failure was invisible twice over: absent on a 3.14 development machine, and absent in CI, whose
-Linux runners refuse ICMP outright and skip those tests.
+Neither a 3.14 development machine nor CI, whose Linux runners refuse ICMP outright and skip those
+tests, would show the gap without it.
 
 ### Windows timing resolution
 
@@ -228,33 +232,34 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `scan.py`              | `arp_scan`, `find_ip_by_mac`, `local_networks`, `sweep_scope`. Sweep, then read what the kernel learned.                                                                            |
 | `subnet.py`            | `subnet_info`, composing interfaces, routes and the stored lease.                                                                                                                   |
 | `portscan.py`          | `scan_ports`, `ascan_ports`, `syn_scan`, `parse_ports`.                                                                                                                             |
-| `banner.py`            | `grab_banners`, `agrab_banners`: connect, read the first line, say goodbye and close, all on one connection per host.                                                               |
+| `banner.py`            | `grab_banners`, `agrab_banners`: connect, read the first line, optionally say goodbye, and close, all on one connection per host.                                                   |
 | `snmp.py`              | `read_snmp_system`, `aread_snmp_system`: one SNMP GET of the system group per host on a connected UDP socket, re-asking under v1 without a value the agent lacks.                   |
 | `mtu.py`               | `path_mtu`, by kernel query on Linux and by bisection elsewhere.                                                                                                                    |
-| `wol.py`               | `wake_on_lan` and the magic packet it builds.                                                                                                                                       |
-| `dhcp.py`              | `observe_dhcp` and its session: the capture loop, the quiet window and the platform dispatch.                                                                                       |
-| `resolve.py`           | `resolve`, `resolve_one` (returns a `ResolvedTarget` named tuple), `reverse_dns`, `family_of`.                                                                                      |
+| `wol.py`               | `wake_on_lan` and the magic packet it builds (`build_magic_packet`).                                                                                                                |
+| `dhcp.py`              | `observe_dhcp`, `observe_dhcp_session`, `observe_dhcp_first_reachable`, `dhcp_capture_available`: the capture loop, the quiet window and the platform dispatch.                     |
+| `resolve.py`           | `resolve`, `resolve_one` (returns a `ResolvedTarget` named tuple), `reverse_dns`, `family_of`, and the IPv6 zone helpers.                                                           |
 | `factory.py`           | `make_transport`, `make_async_transport`, `icmp_available`, and the hop-walk `make_hop_transport` / `make_async_hop_transport`. The only `sys.platform` branch in the probing path. |
 
 ### Core
 
-| Module        | Role                                                                                                                                              |
-|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
-| `errors.py`   | `IPScoutError` and its subclasses, sweep refusals included, and `could_not_ask` for a resolution request that could not be sent. No dependencies. |
-| `models.py`   | Frozen result models and the `str`-subclass enums.                                                                                                |
-| `ports.py`    | `EchoResult`, `EchoTransport`, `AsyncEchoTransport`. The seams.                                                                                   |
-| `packet.py`   | ICMP encode and decode. Total functions over bytes: no sockets, no clock, no I/O.                                                                 |
-| `service.py`  | `PingRequest`, `run_ping`, `arun_ping`. Probe sequencing and aggregation.                                                                         |
-| `netlink.py`  | Message and attribute walkers and encoders, and the acknowledgement reader, for the Linux route and neighbour backends.                           |
-| `bsdroute.py` | Routing-message and `sockaddr` walkers and encoders for the macOS backends, plus `sysctl`.                                                        |
-| `arp.py`      | ARP and NDP codecs. Testable without the privilege the sockets need.                                                                              |
-| `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.                                                                            |
-| `bpf.py`      | BSD packet filter ioctl encoding and record splitting, shared by two backends.                                                                    |
-| `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.                                                                             |
-| `deadline.py` | `within` and `failure_reason`: one deadline across several awaits, shared by the banner grab and the SNMP read.                                   |
-| `snmpber.py`  | BER encode of an SNMP GET and a structural parse of the reply. Total functions over bytes, like `packet.py`.                                      |
-| `pool.py`     | `gather_bounded`: a fixed worker pool, so a long work list never becomes one Task per item.                                                       |
-| `sockerr.py`  | `is_refusal`: one reading of a refused connect across every platform's spelling, shared by every module that connects.                            |
+| Module        | Role                                                                                                                                                                                                    |
+|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `errors.py`   | `IPScoutError` and its subclasses; `could_not_ask`, `refused_arguments`, `validation_problems`; `setcap_command`, which takes a `LinuxCapability`. Imports nothing from the package.                    |
+| `models.py`   | Frozen result models, the `str`-subclass enums, the bounded field types and the shared argument validators. `NeighbourChange.refused_by_kernel` builds the error for a refused static-neighbour change. |
+| `ports.py`    | `EchoResult`, `EchoTransport`, `AsyncEchoTransport`, `PacketCapture`, `CAPTURE_RECEIVE_BUFFER`. The seams.                                                                                              |
+| `packet.py`   | ICMP encode and decode. Total functions over bytes: no sockets, no clock, no I/O.                                                                                                                       |
+| `service.py`  | `PingRequest`, `run_ping`, `arun_ping`. Probe sequencing and aggregation.                                                                                                                               |
+| `netlink.py`  | Message and attribute walkers and encoders, and the acknowledgement reader, for the Linux route and neighbour backends.                                                                                 |
+| `bsdroute.py` | Routing-message and `sockaddr` walkers and encoders for the macOS backends, plus `sysctl`. `split_sockaddrs` returns a named `SockaddrSet`.                                                             |
+| `arp.py`      | ARP and NDP codecs, testable without the privilege the sockets need, plus the shared MAC helpers.                                                                                                       |
+| `bootp.py`    | BOOTP/DHCP reply codec, separate from the capture for the same reason.                                                                                                                                  |
+| `bpf.py`      | BSD packet filter ioctl encoding and record splitting, shared by two backends.                                                                                                                          |
+| `tcpsyn.py`   | TCP SYN codec and its pseudo-header checksum, for the half-open scan.                                                                                                                                   |
+| `deadline.py` | `within`, `failure_reason`, `seconds_left`, `blocking_wait`: one deadline across several awaits or blocking reads.                                                                                      |
+| `snmpber.py`  | BER encode of an SNMP GET and a structural parse of the reply. Total functions over bytes, like `packet.py`.                                                                                            |
+| `pool.py`     | `gather_bounded`: a fixed worker pool, so a long work list never becomes one Task per item.                                                                                                             |
+| `sockerr.py`  | `is_refusal`: one reading of a refused connect across every platform's spelling, shared by every module that connects.                                                                                  |
+| `unixio.py`   | `fcntl_module`, `packet_family`: typed access to Unix-only `fcntl` and `AF_PACKET`.                                                                                                                     |
 
 ### Platform backends
 
@@ -272,7 +277,7 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 | `neighbours_linux.py`   | `RTM_GETNEIGH` for both families in one dump; `AF_PACKET` ARP and raw ICMPv6 for the active path; `RTM_NEWNEIGH` / `RTM_DELNEIGH` for a static entry. |
 | `dhcp_linux.py`         | `AF_PACKET` bound to `ETH_P_IP`, plus the `PACKET_ADD_MEMBERSHIP` promiscuous join that drops with the socket.                                        |
 | `dhcp_windows.py`       | A raw IPv4 socket put into promiscuous receive with `SIO_RCVALL`; no driver, but a weaker promise.                                                    |
-| `dhcp_macos.py`         | A `/dev/bpf` device bound to one interface, buffering the several frames each read returns.                                                           |
+| `dhcp_macos.py`         | A `/dev/bpf` device bound to one interface, buffering the several frames each read returns; refuses a `bridge<N>` interface (`bridge_refusal`).       |
 | `neighbours_macos.py`   | `NET_RT_FLAGS` sysctl dump; BPF for the active path; `RTM_ADD` / `RTM_DELETE` for a static entry (measured as root on a macOS runner VM).             |
 | `neighbours_windows.py` | `GetIpNetTable2`; `SendARP` and `ResolveIpNetEntry2` for the active path; `CreateIpNetEntry2` / `DeleteIpNetEntry2` for a static entry.               |
 | `leases_linux.py`       | systemd-networkd and dhclient lease stores. Reads a file; sends no DHCP traffic.                                                                      |
@@ -294,26 +299,37 @@ own value only as a fallback, which keeps loopback and LAN timings meaningful.
 Every model is frozen with `extra="forbid"`. A probe result records something that already happened,
 and mutating it can only make it disagree with reality.
 
-| Model                | Fields                                                                                                                                                                                                                                                          |
-|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `ResponseObject`     | `target`, `reached`, `ip`, `number_of_pings`, `rtts_ms`, `packets_sent`, `packets_received`, `family`, `method`, `error`, plus the computed `time_min_ms`, `time_avg_ms`, `time_max_ms`, `jitter_ms`, `n_packets_lost`, `packets_lost_percentage`, `str_result` |
-| `TraceHop`           | `ttl`, `address`, `rtt_ms`, `reached`, `hostname`                                                                                                                                                                                                               |
-| `Interface`          | `name`, `ipv4`, `ipv6`, `mac`, `is_up`, `is_loopback`, `mtu`                                                                                                                                                                                                    |
-| `InterfaceAddress`   | `address`, `prefix_len`                                                                                                                                                                                                                                         |
-| `MacLookup`          | `ip`, `mac`, `scope`, `via_ip`, `interface`                                                                                                                                                                                                                     |
-| `SubnetInfo`         | `interface`, `address`, `prefix_len`, `network`, `family`, `broadcast`, `gateway`, `dns_servers`, `domain`, `dhcp_server`, `lease_obtained`, `lease_expires`, `mtu`                                                                                             |
-| `Banner`             | `host`, `port`, `state`, `line`, `error`                                                                                                                                                                                                                        |
-| `SnmpSystem`         | `host`, `state`, `uptime_seconds`, `name`, `description`, `object_id`, `error`                                                                                                                                                                                  |
-| `CapabilityReport`   | `icmp_ipv4`, `icmp_ipv6`, `traceroute`                                                                                                                                                                                                                          |
-| `ReachabilityReport` | `target`, `reachable`                                                                                                                                                                                                                                           |
-| `ResolveReport`      | `target`, `addresses`                                                                                                                                                                                                                                           |
-| `ReverseDnsReport`   | `ip`, `hostname`                                                                                                                                                                                                                                                |
-| `PackageInfo`        | `name`, `version`, `title`, `homepage`, `author`, `shell_command`                                                                                                                                                                                               |
-| `JsonEnvelope`       | `ok`, `command`, `data`, `error`                                                                                                                                                                                                                                |
-| `JsonError`          | `type`, `message`                                                                                                                                                                                                                                               |
+| Model                   | Fields                                                                                                                                                                                                                                                          |
+|-------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ResponseObject`        | `target`, `reached`, `ip`, `number_of_pings`, `rtts_ms`, `packets_sent`, `packets_received`, `family`, `method`, `error`, plus the computed `time_min_ms`, `time_avg_ms`, `time_max_ms`, `jitter_ms`, `n_packets_lost`, `packets_lost_percentage`, `str_result` |
+| `TraceHop`              | `ttl`, `address`, `rtt_ms`, `reached`, `hostname`                                                                                                                                                                                                               |
+| `Interface`             | `name`, `index`, `ipv4`, `ipv6`, `mac`, `is_up`, `is_loopback`, `mtu`                                                                                                                                                                                           |
+| `InterfaceAddress`      | `address`, `prefix_len`                                                                                                                                                                                                                                         |
+| `Neighbour`             | `ip`, `mac`, `interface`, `state`, `family`, plus the computed `scoped`                                                                                                                                                                                         |
+| `MacLookup`             | `ip`, `mac`, `scope`, `via_ip`, `interface`, `method`                                                                                                                                                                                                           |
+| `RouteInfo`             | `gateway`, `interface`, `source`                                                                                                                                                                                                                                |
+| `LeaseInfo`             | `dhcp_server`, `router`, `dns_servers`, `domain`, `obtained`, `expires`                                                                                                                                                                                         |
+| `SubnetInfo`            | `interface`, `address`, `prefix_len`, `network`, `family`, `broadcast`, `gateway`, `dns_servers`, `domain`, `dhcp_server`, `lease_obtained`, `lease_expires`, `mtu`                                                                                             |
+| `SweepScope`            | `limit`, `networks`, `skipped`, plus the computed `complete`                                                                                                                                                                                                    |
+| `FindIpReport`          | `mac`, `addresses`, `scanned`, `scope`                                                                                                                                                                                                                          |
+| `RemoveNeighbourReport` | `ip`, `interface`, `removed`                                                                                                                                                                                                                                    |
+| `Banner`                | `host`, `port`, `state`, `line`, `error`                                                                                                                                                                                                                        |
+| `SnmpSystem`            | `host`, `state`, `uptime_seconds`, `name`, `description`, `object_id`, `error`                                                                                                                                                                                  |
+| `PortResult`            | `port`, `state`                                                                                                                                                                                                                                                 |
+| `PortScanReport`        | `host`, `method`, `ports`                                                                                                                                                                                                                                       |
+| `MtuReport`             | `target`, `mtu`                                                                                                                                                                                                                                                 |
+| `WakeReport`            | `mac`, `broadcast`, `port`, `sent`                                                                                                                                                                                                                              |
+| `ObserveDhcpReport`     | `mac`, `interface`, `addresses`, `timeout`, `settle`                                                                                                                                                                                                            |
+| `CapabilityReport`      | `icmp_ipv4`, `icmp_ipv6`, `traceroute`, `dhcp_capture`                                                                                                                                                                                                          |
+| `ReachabilityReport`    | `target`, `reachable`                                                                                                                                                                                                                                           |
+| `ResolveReport`         | `target`, `addresses`                                                                                                                                                                                                                                           |
+| `ReverseDnsReport`      | `ip`, `hostname`                                                                                                                                                                                                                                                |
+| `PackageInfo`           | `name`, `version`, `title`, `homepage`, `author`, `shell_command`                                                                                                                                                                                               |
+| `JsonEnvelope`          | `ok`, `command`, `data`, `error`, `skipped`                                                                                                                                                                                                                     |
+| `JsonError`             | `type`, `message`                                                                                                                                                                                                                                               |
 
-`MacLookup` and `SubnetInfo` are exported result types for the local-network inspection layer. No
-public callable returns one in this release.
+Every `*Report` model, `PortResult`, `PackageInfo`, `JsonEnvelope` and `JsonError` is built only by
+the CLI as a JSON payload; the others are what the library callables return.
 
 Two model decisions worth knowing:
 
@@ -328,10 +344,10 @@ package supports 3.10.
 
 ---
 
-### Observing DHCP
+## Observing DHCP
 
-The one capability here that needs elevation on the platform it works on, and
-the only one that reads traffic addressed to other hosts. Three decisions are
+One of the capabilities here that need elevation, and the only one that reads
+traffic addressed to other hosts. Three decisions are
 load-bearing and each was measured rather than reasoned:
 
 - **Promiscuous mode is on by default.** On a bridge a reply is forwarded to
@@ -378,6 +394,8 @@ and checks the bridge itself is refused. Its ioctl encoding is also pinned
 against the values in `<net/bpf.h>` and its record splitting against hand-built
 buffers on every platform. It has not run on physical hardware.
 
+---
+
 ## The error contract
 
 | Exception                     | Meaning                                                       | Would root help |
@@ -394,8 +412,8 @@ Keeping these apart is the point of `errors.py`: a missing ICMP permission and a
 host call for different responses from the caller, so collapsing both into `reached=False` would
 throw away the distinction that matters.
 
-The two sweep refusals also derive from `ValueError`, which is what the sweeping callables have
-raised since the first release. They are the one place where a *result* decides whether something
+The two sweep refusals also derive from `ValueError`, so a caller catching `ValueError` from a
+sweeping callable catches them too. They are the one place where a *result* decides whether something
 raises: a sweep that covered everything and found nothing has an answer, while one that skipped a
 network has only a smaller answer, and returning the same empty list for both would present the
 weaker finding as the stronger one.
@@ -411,9 +429,10 @@ own docstrings so nobody mistakes them for `ping(...).reached`.
 
 Tests drive the real modules through their real seams. A transport is injected as a constructor
 argument, so the probing logic is exercised with an in-process fake rather than with a patched
-module attribute. Nothing inside this package is monkeypatched anywhere in the suite; the single
-`monkeypatch` call sets `sys.argv` for the `python -m` entry-point test, which is a genuine
-external edge.
+module attribute. The suite uses no `mock.patch`. Its `monkeypatch` calls sit at external edges
+(the stdlib `socket` functions, `os.open`, `sys.argv` for the `python -m` entry-point test, and one
+environment variable), with one exception: `tests/test_family_filter.py` replaces
+`ipscout.scan.neighbours` with a fixed cache.
 
 `packet.py` is a set of total functions over bytes, so the protocol layer is fully testable without
 a network, without privileges and without a particular operating system. `winapi.py` structure
@@ -422,15 +441,17 @@ integer types make the layouts identical everywhere.
 
 Doctests run under `--doctest-modules`, so the examples in the source are tests.
 
-**Coverage gate:** `fail_under = 85` over `src/ipscout`. The four platform backends
-(`transport_posix.py`, `transport_windows.py`, `interfaces_posix.py`, `interfaces_windows.py`) are
-omitted from the percentage, not from testing. Each is exercised by per-OS marked suites in the CI
-matrix, but each can only execute on one platform, so leaving them in makes every backend report as
-dead weight on the two platforms that cannot run it and sinks the gate on every OS at once.
+**Coverage gate:** `fail_under = 85` over `src/ipscout`. The single-platform backends
+(`transport_posix`, `transport_windows`, `interfaces_posix`, `interfaces_windows`, the three
+`routes_<os>`, the three `neighbours_<os>`, the three `dhcp_<os>` and `leases_linux`) are omitted
+from the percentage, not from testing. Each is exercised by
+per-OS marked suites in the CI matrix, but each can only execute on one platform, so leaving them
+in makes every backend report as dead weight on the platforms that cannot run it and sinks the gate
+on every OS at once.
 
-**Markers:** `os_agnostic`, `os_windows`, `os_macos`, `os_posix`, `os_linux`, `local_only`.
-
----
+**Markers:** `os_agnostic`, `os_windows`, `os_macos`, `os_posix`, `os_linux`, `local_only`,
+`integration` (reaches a real external network), `host_mutating` (changes this host's network
+state; runs only with `IPSCOUT_HOST_WRITE_TESTS=1` and the privilege to do it).
 
 The capture backend follows the same split. `bootp.py` decodes frames and needs nothing, so every
 wire-format story runs unprivileged on every platform; `dhcp.py` is driven through the
@@ -439,7 +460,9 @@ window, the teardown and the error split are all exercised without a socket. The
 tests replay are real, captured off a bridge during a guest's cold boot, so the codec is measured
 against the wire rather than against an idea of it. `tests/test_dhcp_capability_probe.py` follows
 the `test_ttl_capability_probe.py` pattern: it reports what each platform can actually do and never
-fails a build, and its recorded answer is what decides whether macOS and Windows get a real backend.
+fails a build.
+
+---
 
 ## Security considerations
 
@@ -456,10 +479,10 @@ fails a build, and its recorded answer is what decides whether macOS and Windows
   lets tests assert the sizes from Linux.
 - **One capability reads other hosts' traffic, and says so.** `observe_dhcp` is the only thing
   here that captures frames not addressed to this host, and it puts the interface into promiscuous
-  mode to do it. It is opt-in per call, it never transmits, the socket is bound to `ETH_P_IP` so
-  the kernel hands over nothing else, and replies are matched on the caller's own hardware address.
-  The promiscuous join is reference-counted by the kernel and released when the socket closes, so a
-  crashed process cannot leave the interface promiscuous.
+  mode to do it. It is opt-in per call, the capture never transmits, on Linux the socket is bound
+  to `ETH_P_IP` so the kernel hands over nothing else, and replies are matched on the hardware
+  address the caller named. On Linux the promiscuous join is reference-counted by the kernel and
+  released when the socket closes, so a crashed process cannot leave the interface promiscuous.
 - **Captured frames are scrubbed before they become fixtures.** A DHCP option block carries the
   site's routers, DNS and NTP servers and its internal domain (options 3, 6, 15, 42, 54, 119), none
   of which a header-level rewrite touches. The checked-in fixture's options are truncated to the
@@ -477,7 +500,7 @@ import ipscout
 ipscout.ping("127.0.0.1", 2, interval=0)  # -> ResponseObject
 ipscout.ping_many(["127.0.0.1", "::1"], times=1)  # -> dict[str, ResponseObject]
 ipscout.is_reachable("127.0.0.1")  # -> bool, never raises
-ipscout.traceroute("1.1.1.1", max_hops=10)  # -> list[TraceHop]
+ipscout.traceroute("192.0.2.1", max_hops=10)  # -> list[TraceHop]
 ipscout.resolve("localhost")  # -> list[str]
 ipscout.reverse_dns("127.0.0.1")  # -> str | None
 ipscout.local_interfaces()  # -> list[Interface]

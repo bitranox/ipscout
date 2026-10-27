@@ -1,11 +1,11 @@
 [project]
 name = "ipscout"
-version = "2.5.1"
+version = "2.5.2"
 description = "Ping, traceroute and local-network inspection in pure Python - no subprocess, and no admin rights on the default paths"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # 2.3.4 is the floor: earlier releases discarded Click's return value in
+    # Never below 2.3.4: earlier releases discarded Click's return value in
     # run_cli, so a command reporting a negative answer via ctx.exit() exited 0.
     "lib_cli_exit_tools>=2.4.1",
     "pydantic>=2.14.1",
