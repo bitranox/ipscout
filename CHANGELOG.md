@@ -5,10 +5,16 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.5.3] 2026-10-28 21:11:58
+
 ### Changed
 
 - `rtoml` is no longer a runtime dependency: the package never imported it. It stays in the `dev`
   extra, where the metadata tests use it.
+- `ipscout.scan` exposes the selection `find_ip_by_mac` and the sweep share as
+  `addresses_held_by(entries, mac, family)` and `entries_in_scope(entries, scope)`, pure functions
+  over neighbour entries. The family-filter tests use them on fixed entries and check the public
+  calls against the host's real cache, so the suite no longer patches any part of the package.
 
 ## [2.5.2] 2026-10-27 09:01:02
 
