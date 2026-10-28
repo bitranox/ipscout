@@ -5,6 +5,21 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+### Added
+
+- `tests/test_dhcp_macos_vmnet_live.py`: a `host_mutating` test, macOS as root with
+  `qemu-system-x86_64` installed, that boots a paused QEMU guest on `vmnet-shared` (macOS creates
+  the bridge, adds the guest's `vmenetN` port and serves DHCP itself), captures on that member
+  port while the guest's network boot ROM asks for an address, and checks the capture returns the
+  address macOS's DHCP server leased; and that the bridge itself is refused. Passed three times
+  in a row on each of macos-15-intel, macos-26-intel (`-accel hvf`), macos-latest and macos-26
+  (`-accel tcg`).
+
+### Changed
+
+- The docs, docstrings and skill now say the macOS capture is measured against a separate guest
+  VM booting behind a macOS bridge; only a physical network card is still unmeasured.
+
 ## [2.5.3] 2026-10-28 21:11:58
 
 ### Changed

@@ -486,7 +486,10 @@ Needs elevation on every platform: root or `CAP_NET_RAW` on Linux, root on
 macOS, Administrator on Windows. Ask `ipscout.dhcp_capture_available()` first.
 The macOS backend was measured as root on a macOS runner VM, watching a real
 macOS DHCP client's handshake from its member port of a bridge, through to the
-client binding the offered address; not yet on physical hardware. On macOS
+client binding the offered address, and watching a separate QEMU guest boot
+behind macOS's own `vmnet-shared` bridge from the guest's member port, where it
+returned the address macOS's DHCP server leased the guest; not yet on a
+physical network card. On macOS
 name a physical interface or the guest's member port, not `lo0`, which is not
 Ethernet-framed and is refused. The interface goes into promiscuous mode for the
 session's lifetime, which is not optional in practice: a reply is often unicast

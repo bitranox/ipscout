@@ -45,7 +45,10 @@ Verification status:
     ``tests/test_dhcp_macos_live.py`` captures offers written onto a ``feth``
     pair, and ``tests/test_dhcp_macos_bridge_live.py`` watches a real macOS
     DHCP client's handshake from its member port of a bridge, through to the
-    client binding the offered address. Not yet run on physical hardware.
+    client binding the offered address, and ``tests/test_dhcp_macos_vmnet_live.py``
+    watches a QEMU guest booting behind macOS's own ``vmnet-shared`` bridge from
+    the guest's member port, checking the address against the lease macOS's DHCP
+    server recorded. Not yet run on a physical network card.
 
 """
 

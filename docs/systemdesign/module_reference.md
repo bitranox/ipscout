@@ -390,9 +390,13 @@ Windows on every CI push. The macOS backend runs only in the `host_mutating`
 tests, as root on a macOS runner VM: `tests/test_dhcp_macos_live.py` captures
 offers written onto a `feth` pair, and `tests/test_dhcp_macos_bridge_live.py`
 watches a real macOS DHCP client's handshake from its member port of a bridge
-and checks the bridge itself is refused. Its ioctl encoding is also pinned
+and checks the bridge itself is refused. `tests/test_dhcp_macos_vmnet_live.py`
+boots a QEMU guest on `vmnet-shared` (macOS makes the bridge and serves DHCP) and
+checks the capture on the guest's member port returns the address macOS leased
+it; it needs `qemu-system-x86_64`, and runs on both Intel (`-accel hvf`) and
+Apple Silicon (`-accel tcg`) runners. Its ioctl encoding is also pinned
 against the values in `<net/bpf.h>` and its record splitting against hand-built
-buffers on every platform. It has not run on physical hardware.
+buffers on every platform. It has not run on a physical network card.
 
 ---
 

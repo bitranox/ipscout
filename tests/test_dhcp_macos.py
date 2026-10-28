@@ -3,7 +3,7 @@
 The unprivileged CI lanes cannot open a BPF device - measured, ``/dev/bpf0`` is
 refused with EACCES on every macos-latest lane - so the device path runs only in
 the root-only ``host_mutating`` tests (``test_dhcp_macos_live.py``,
-``test_dhcp_macos_bridge_live.py``). Everything that does NOT need the device is
+``test_dhcp_macos_bridge_live.py``, ``test_dhcp_macos_vmnet_live.py``). Everything that does NOT need the device is
 pinned here instead, on every platform: the ioctl encoding against the numbers
 in ``<net/bpf.h>``, the record splitting against hand-built buffers, and the
 refusals.
