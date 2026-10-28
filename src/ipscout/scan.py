@@ -54,7 +54,9 @@ __all__ = [
     "DEFAULT_CONCURRENCY",
     "MAX_SWEEP_HOSTS",
     "SweepSettings",
+    "addresses_held_by",
     "arp_scan",
+    "entries_in_scope",
     "find_ip_by_mac",
     "local_networks",
     "refuse_a_partial_scope",
@@ -366,6 +368,27 @@ def _matching(entries: tuple[Neighbour, ...], wanted: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def addresses_held_by(entries: tuple[Neighbour, ...], wanted: str, family: AddressFamily | None) -> list[str]:
+    """Return the addresses in ``family`` that ``entries`` show held by ``wanted``.
+
+    Takes the entries rather than reading the cache, so the selection both
+    :func:`find_ip_by_mac` paths share can be checked against entries a test
+    chooses; the kernel's cache holds whatever this host happened to learn.
+    """
+
+    return _matching(of_family(entries, family), wanted)
+
+
+def entries_in_scope(entries: tuple[Neighbour, ...], scope: SweepScope) -> tuple[Neighbour, ...]:
+    """Keep the entries whose address lies in one of the scope's networks.
+
+    A sweep answers for the ground it covered only: the cache also holds
+    neighbours learned elsewhere, which say nothing about the swept networks.
+    """
+
+    return tuple(entry for entry in entries if any(entry.address in item for item in scope.networks))
+
+
 def _sweep(scope: SweepScope, *, concurrency: int, timeout: float) -> tuple[Neighbour, ...]:
     """Probe every address the scope covers, then read what the kernel learned."""
 
@@ -375,7 +398,7 @@ def _sweep(scope: SweepScope, *, concurrency: int, timeout: float) -> tuple[Neig
         # unused - so the sweep must not raise on them.
         ping_many(hosts, concurrency=concurrency, times=1, timeout=timeout, interval=0.0, raise_on_error=False)
 
-    return tuple(entry for entry in neighbours() if any(entry.address in item for item in scope.networks))
+    return entries_in_scope(neighbours(), scope)
 
 
 def arp_scan(
@@ -493,12 +516,11 @@ def find_ip_by_mac(  # noqa: PLR0913 - public API: every knob is keyword-only an
     if refusal is not None:
         raise ValueError(refusal)
     if not scan:
-        return _matching(of_family(neighbours(), family), wanted)
+        return addresses_held_by(neighbours(), wanted, family)
 
     plan = _plan(network, scope)
     _refuse_an_empty_scope(plan)
-    swept = of_family(_sweep(plan, concurrency=settings.concurrency, timeout=settings.timeout), family)
-    found = _matching(swept, wanted)
+    found = addresses_held_by(_sweep(plan, concurrency=settings.concurrency, timeout=settings.timeout), wanted, family)
     if not found:
         _refuse_a_partial_miss(mac, plan)
     return found

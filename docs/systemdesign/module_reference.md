@@ -431,8 +431,10 @@ Tests drive the real modules through their real seams. A transport is injected a
 argument, so the probing logic is exercised with an in-process fake rather than with a patched
 module attribute. The suite uses no `mock.patch`. Its `monkeypatch` calls sit at external edges
 (the stdlib `socket` functions, `os.open`, `sys.argv` for the `python -m` entry-point test, and one
-environment variable), with one exception: `tests/test_family_filter.py` replaces
-`ipscout.scan.neighbours` with a fixed cache.
+environment variable); nothing of the package itself is patched. Where a check needs fixed data
+that the host would otherwise supply, such as the neighbour cache, the selection is a pure function
+taking that data (`scan.addresses_held_by`, `scan.entries_in_scope`), and the public call is
+checked against the host's real data with an invariant that holds whatever it contains.
 
 `packet.py` is a set of total functions over bytes, so the protocol layer is fully testable without
 a network, without privileges and without a particular operating system. `winapi.py` structure
