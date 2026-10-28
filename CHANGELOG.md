@@ -5,6 +5,8 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
+## [2.5.4] 2026-10-28 22:42:07
+
 ### Added
 
 - `tests/test_dhcp_macos_vmnet_live.py`: a `host_mutating` test, macOS as root with
