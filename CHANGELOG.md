@@ -5,7 +5,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 ## [Unreleased]
 
-## [2.5.4] 2026-10-28 22:42:07
+## [2.5.4] - 2026-10-28
 
 ### Added
 
@@ -22,7 +22,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - The docs, docstrings and skill now say the macOS capture is measured against a separate guest
   VM booting behind a macOS bridge; only a physical network card is still unmeasured.
 
-## [2.5.3] 2026-10-28 21:11:58
+## [2.5.3] - 2026-10-28
 
 ### Changed
 
@@ -33,7 +33,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   over neighbour entries. The family-filter tests use them on fixed entries and check the public
   calls against the host's real cache, so the suite no longer patches any part of the package.
 
-## [2.5.2] 2026-10-27 09:01:02
+## [2.5.2] - 2026-10-27
 
 ### Changed
 
@@ -62,7 +62,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - The `--json` help text lists all five envelope keys; the `syn_scan`, `arp_scan` and `path_mtu`
   docstrings no longer contradict the code.
 
-## [2.5.1] 2026-10-26 21:35:48
+## [2.5.1] - 2026-10-26
 
 ### Added
 
@@ -91,7 +91,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - `docs/handover-observe-dhcp.md`, the proposal for `observe_dhcp`, is removed: the feature has
   shipped and its contracts live in `docs/usage.md` and the docstrings.
 
-## [2.5.0] 2026-10-26 19:16:26
+## [2.5.0] - 2026-10-26
 
 ### Added
 
@@ -121,7 +121,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - The skill said a macOS capture on `lo0` is refused by name. It is refused by its link type, with
   `IPScoutUnsupportedError`; the skill now says so.
 
-## [2.4.0] 2026-10-26 16:19:43
+## [2.4.0] - 2026-10-26
 
 ### Added
 
@@ -244,7 +244,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
   large on a path with a smaller link. The local refusal was already read; the router's reply is
   read the same way now (`winapi.echo_status`), not yet measured on such a path.
 
-## [2.3.0] 2026-10-26 12:19:25
+## [2.3.0] - 2026-10-26
 
 ### Added
 
@@ -275,7 +275,7 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 - On Windows, an active lookup of an address with no route raises `IPScoutUnsupportedError`
   instead of reporting nobody answered: `SendARP` gives the same status for both.
 
-## [2.2.0] 2026-10-26 11:06:07
+## [2.2.0] - 2026-10-26
 
 ### Added
 
@@ -472,7 +472,7 @@ namespace is removed or changed.
 - `neighbours_windows.resolve_active(ip)` takes the family as a second argument; an IPv4 address in
   a non-dotted-quad form such as `192.0.2` resolves to nothing instead of being read as `192.0.0.2`.
 
-## [2.1.0] 2026-10-24 17:18:42
+## [2.1.0] - 2026-10-24
 
 ### Added
 
@@ -498,7 +498,7 @@ namespace is removed or changed.
   (`Invalid value for '--timeout': ...`). The JSON error message carried only Click's bare text,
   which did not say which option was wrong.
 
-## [2.0.0] 2026-10-24 12:32:19
+## [2.0.0] - 2026-10-24
 
 ### Changed
 
@@ -544,7 +544,7 @@ namespace is removed or changed.
 - Private helpers that returned bare tuples (in `neighbours`, `neighbours_linux`, `tcpsyn`,
   `bootp`, `interfaces_posix`, `interfaces_windows` and `transport_posix`) return named tuples too.
 
-## [1.7.0] 2026-10-23 23:14:12
+## [1.7.0] - 2026-10-23
 
 ### Added
 
@@ -568,7 +568,7 @@ namespace is removed or changed.
   `tests/test_platform_markers.py`), so no CI runner writes its neighbour table - the Windows one is
   elevated and would otherwise do it on every push.
 
-## [1.6.2] 2026-10-15 17:13:03
+## [1.6.2] - 2026-10-15
 
 ### Fixed
 
@@ -589,7 +589,7 @@ namespace is removed or changed.
   (`pytest_runtest_setup` in `tests/conftest.py`); registered in `pyproject.toml` alone they skipped
   nothing, so a test trusting its marker ran everywhere. `tests/test_platform_markers.py` pins it.
 
-## [1.6.1] 2026-10-12 22:49:02
+## [1.6.1] - 2026-10-12
 
 ### Added
 - Python 3.15 is a supported version: declared in the classifiers, so CI and `make test-all` run it.
@@ -602,9 +602,9 @@ namespace is removed or changed.
   a plain `pip install` from PyPI does not.
 - `rtoml` floor raised to 0.14.0, the first release with Python 3.15 wheels.
 
-## [1.6.0] 2026-08-01 01:08:25
+## [1.6.0] - 2026-08-01
 
-## [1.6.0] 2026-08-01
+## [1.6.0] - 2026-08-01
 
 ### Added
 
@@ -622,7 +622,7 @@ namespace is removed or changed.
   IPv6" is an ordinary finding, not a failure.
 
 
-## [1.5.0] 2026-07-31 23:04:58
+## [1.5.0] - 2026-07-31
 
 ### Fixed
 
@@ -692,7 +692,7 @@ namespace is removed or changed.
   the interface the frame would leave by and reports which one that was. Mirrored into
   `bitranox-skills`.
 
-## [1.4.0] 2026-07-31 16:30:04
+## [1.4.0] - 2026-07-31
 
 
 ### Added
@@ -723,7 +723,7 @@ namespace is removed or changed.
 - **The `fcntl` typed facade accepts a request with no argument.** Its Protocol declared the ioctl
   argument as required, which a BSD `_IO` request does not take. Widened to match what the module
   really accepts, rather than suppressing the type error at the one call site that needed it.
-## [1.3.0] 2026-07-31 14:42:32
+## [1.3.0] - 2026-07-31
 
 ### Added
 
